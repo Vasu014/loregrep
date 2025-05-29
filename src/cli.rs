@@ -373,6 +373,8 @@ impl CliApp {
     }
 
     async fn process_ai_query_with_engine(&self, conversation_engine: &mut ConversationEngine, query: &str) -> Result<()> {
+        use std::io::Write;
+        
         if self.verbose {
             println!("Query: {}", query.cyan());
         }
@@ -383,7 +385,6 @@ impl CliApp {
         print!("🤔 Thinking");
         for _ in 0..3 {
             print!(".");
-            use std::io::Write;
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
@@ -413,12 +414,13 @@ impl CliApp {
     }
 
     async fn start_interactive_mode_with_engine(&self, conversation_engine: &mut ConversationEngine) -> Result<()> {
+        use std::io::Write;
+        
         println!("{} {}", "ℹ".blue(), "Starting interactive AI mode. Type 'help' for commands, 'exit' to quit.");
         
         loop {
             // Prompt for input
             print!("\n{}> ", "loregrep".cyan().bold());
-            use std::io::Write;
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             // Read user input
@@ -702,6 +704,7 @@ impl CliApp {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::test;
 
@@ -916,8 +919,8 @@ struct PrivateStruct {
         let app = CliApp::new(config, false, false).await.unwrap();
         
         if let Some(engine) = &app.conversation_engine {
-            // This should not panic
-            app.print_status(engine);
+            // This should not panic - use the static method
+            CliApp::print_status_static(engine, &app.repo_map, &app.config);
         }
     }
 
@@ -925,8 +928,8 @@ struct PrivateStruct {
     async fn test_interactive_commands() {
         let app = CliApp::new(create_test_config(), false, false).await.unwrap();
         
-        // These should not panic
-        app.print_help_interactive();
+        // These should not panic - use the static method
+        CliApp::print_help_interactive();
     }
 
     #[test]

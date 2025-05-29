@@ -7,6 +7,7 @@ use crate::anthropic::ToolSchema;
 use crate::storage::memory::RepoMap;
 use crate::scanner::discovery::RepositoryScanner;
 use crate::analyzers::{rust::RustAnalyzer, traits::LanguageAnalyzer};
+use crate::config::FileScanningConfig;
 
 pub struct LocalAnalysisTools {
     repo_map: Arc<RepoMap>,
@@ -412,7 +413,6 @@ struct GetRepositoryOverviewInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     // Helper to create minimal test instances
     fn create_test_repo_map() -> Arc<RepoMap> {
@@ -421,7 +421,7 @@ mod tests {
 
     fn create_test_scanner() -> RepositoryScanner {
         // Create with minimal config
-        let config = crate::scanner::discovery::FileScanningConfig {
+        let config = FileScanningConfig {
             include_patterns: vec!["*.rs".to_string()],
             exclude_patterns: vec![],
             max_file_size: 1024 * 1024,

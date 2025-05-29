@@ -7,10 +7,7 @@ use std::path::PathBuf;
 use tokio;
 
 // Use the library instead of declaring local modules
-use loregrep::{CliConfig, cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs}};
-
-mod cli;
-use cli::CliApp;
+use loregrep::{CliConfig, CliApp, cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs}};
 
 #[derive(Parser)]
 #[command(name = "loregrep")]

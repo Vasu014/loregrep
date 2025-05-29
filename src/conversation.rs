@@ -238,7 +238,7 @@ mod tests {
         let repo_map = Arc::new(RepoMap::new());
         
         // Create scanner with proper config
-        let config = crate::scanner::discovery::FileScanningConfig {
+        let config = crate::config::FileScanningConfig {
             include_patterns: vec!["*.rs".to_string()],
             exclude_patterns: vec![],
             max_file_size: 1024 * 1024,
@@ -327,8 +327,17 @@ mod tests {
             None,
         );
         let repo_map = Arc::new(RepoMap::new());
-        let scanner = RepositoryScanner::new().unwrap();
-        let rust_analyzer = RustAnalyzer::new();
+        
+        // Create scanner with proper config for empty key test
+        let config = crate::config::FileScanningConfig {
+            include_patterns: vec!["*.rs".to_string()],
+            exclude_patterns: vec![],
+            max_file_size: 1024 * 1024,
+            follow_symlinks: false,
+            max_depth: Some(10),
+        };
+        let scanner = RepositoryScanner::new(&config, None).unwrap();
+        let rust_analyzer = RustAnalyzer::new().unwrap();
         let local_tools = LocalAnalysisTools::new(repo_map, scanner, rust_analyzer);
         
         let engine_no_key = ConversationEngine::new(claude_client, local_tools, None);
