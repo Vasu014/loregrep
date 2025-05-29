@@ -1,0 +1,152 @@
+[package]
+name = "loregrep"
+version = "0.3.0"
+edition = "2021"
+authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
+description = "Lightweight Code Analysis Server with Tree-sitter + MCP + CLI + Multi-language Code Understanding"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Vasu014/loregrep"
+keywords = ["code-analysis", "tree-sitter", "mcp", "cli", "ast"]
+categories = ["command-line-utilities", "development-tools", "parsing"]
+
+[[bin]]
+name = "loregrep"
+path = "src/main.rs"
+
+[[bin]]
+name = "loregrep-server"
+path = "src/server.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Tree-sitter core and language grammars
+tree-sitter = "0.20"
+tree-sitter-rust = "0.20"
+tree-sitter-python = "0.20"
+tree-sitter-typescript = "0.20"
+tree-sitter-javascript = "0.20"
+tree-sitter-go = "0.20"
+streaming-iterator = "0.1"
+
+# Database
+rusqlite = { version = "0.29", features = ["bundled", "chrono", "serde_json"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.22"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# HTTP server for MCP
+axum = { version = "0.7", features = ["json", "tokio"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# HTTP client for Claude API
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# CLI and terminal
+clap = { version = "4.4", features = ["derive", "env"] }
+crossterm = "0.27"
+colored = "2.0"
+indicatif = "0.17"
+console = "0.15"
+
+# File system and patterns
+walkdir = "2.4"
+globset = "0.4"
+ignore = "0.4"
+notify = "6.1"
+
+# Text processing and search
+regex = "1.10"
+fuzzy-matcher = "0.3"
+levenshtein = "1.0"
+unicode-segmentation = "1.10"
+
+# Hashing and crypto
+blake3 = "1.5"
+sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+# Compression
+flate2 = "1.0"
+
+# Time and dates
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+once_cell = "1.19"
+lazy_static = "1.4"
+dashmap = "5.5"
+parking_lot = "0.12"
+
+# Configuration
+config = "0.14"
+directories = "5.0"
+
+# Memory and performance
+rayon = "1.8"
+crossbeam = "0.8"
+
+# Benchmarking (optional)
+criterion = { version = "0.5", features = ["html_reports"], optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"
+proptest = "1.4"
+mockall = "0.12"
+wiremock = "0.5"
+
+[features]
+default = ["cli", "server"]
+cli = []
+server = []
+benchmark = ["criterion"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+
+[profile.test]
+opt-level = 1
+debug = true
+
+[[bench]]
+name = "parsing_benchmark"
+harness = false
+required-features = ["benchmark"]
+
+[[bench]]
+name = "query_benchmark"
+harness = false
+required-features = ["benchmark"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"] 
