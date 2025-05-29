@@ -159,24 +159,273 @@
 
 ---
 
-## **Phase 3: Language Analyzer Refactoring** (Week 2-3)
+## **Phase 3A: Minimal Working CLI Foundation** (Week 3) ✅ **COMPLETED**
 
-### **P1 - Core Functionality**
+### **P0 - Immediate CLI MVP**
 
-#### **Task 3.1: Rust Analyzer Enhancement** ✅
-- [x] Move current Rust parsing logic to `src/analyzers/rust.rs`
-- [x] Fix parameter parsing (currently incomplete)
-- [x] Add function call extraction
-- [x] Improve struct field parsing
-- [x] Add proper error recovery
-- [x] Add support for:
-  - [x] Const functions (`const fn`)
-  - [x] Static functions (`static`)
-  - [x] External functions (`extern`)
-  - [x] Trait implementations
-  - [x] Generics handling
+#### **Task 3A.1: Basic CLI Architecture** ✅
+- [x] ✅ Dependencies already added (Cargo.toml has all CLI deps)
+- [x] ✅ Replace placeholder `src/main.rs` with basic CLI structure:
+  ```rust
+  pub struct CliApp {
+      config: CliConfig,
+      repo_scanner: RepositoryScanner,
+      repo_map: RepoMap,
+      rust_analyzer: RustAnalyzer,
+  }
+  ```
+- [x] ✅ Add configuration loading (TOML + env vars + CLI args)
+- [x] ✅ Basic commands: `scan`, `search`, `analyze`, `help`, `config`
+- [x] ✅ Command-line argument parsing with `clap`
+- [x] ✅ Basic error handling and user feedback
 
-#### **Task 3.2: Language Registry System**
+#### **Task 3A.2: Repository Scanner (Moved from Phase 5)** ✅
+- [x] ✅ Move file discovery implementation to `src/scanner/discovery.rs`
+- [x] ✅ Implement `RepositoryScanner` struct:
+  ```rust
+  pub struct RepositoryScanner {
+      filters: FileFilters,
+      language_detector: LanguageDetector,
+      config: ScanConfig,
+  }
+  ```
+- [x] ✅ Basic gitignore support using `ignore` crate
+- [x] ✅ File extension filtering (Rust-only initially)
+- [x] ✅ Parallel file discovery with progress reporting
+
+#### **Task 3A.3: Complete Rust Analyzer Integration** ✅
+- [x] ✅ Current `tree-sitter.rs` logic moved to `src/analyzers/rust.rs`  
+- [x] ✅ Parameter parsing completed
+- [x] ✅ Function call extraction added
+- [x] ✅ Struct field parsing improved
+- [x] ✅ Error recovery implemented
+- [x] ✅ Integration with CLI for file analysis commands
+- [x] ✅ Add CLI-friendly output formatting for analysis results
+
+#### **Task 3A.4: Configuration System (Moved from Phase 5)** ✅
+- [x] ✅ Create configuration structure matching CLI needs:
+  ```rust
+  pub struct CliConfig {
+      // File scanning
+      pub include_patterns: Vec<String>,
+      pub exclude_patterns: Vec<String>,
+      pub max_file_size: u64,
+      pub follow_symlinks: bool,
+      
+      // Analysis settings
+      pub languages: Vec<String>,
+      pub cache_enabled: bool,
+      pub cache_path: PathBuf,
+      
+      // Output settings
+      pub colors: bool,
+      pub verbose: bool,
+      pub max_results: usize,
+  }
+  ```
+- [x] ✅ Add TOML configuration file support
+- [x] ✅ Environment variable support
+- [x] ✅ Configuration validation and defaults
+
+### **🎯 Phase 3A Checkpoint - COMPLETED** ✅
+
+**What was accomplished:**
+- ✅ **Working CLI Application**: Full command-line interface with scan, search, analyze, config commands
+- ✅ **Module Structure**: Fixed imports and module organization for binary/library separation
+- ✅ **Repository Scanner**: Complete file discovery with gitignore support and language detection
+- ✅ **Configuration System**: TOML config files, environment variables, CLI arguments
+- ✅ **Rust Analysis**: Full integration with tree-sitter for Rust code analysis
+- ✅ **Beautiful Output**: Colored output, progress indicators, multiple output formats (text, JSON, tree)
+- ✅ **Error Handling**: Graceful error handling throughout the application
+- ✅ **CLI Types**: Proper argument parsing and command structure
+- ✅ **Binary Compilation**: Successfully builds and runs
+- ✅ **Manual Testing**: CLI commands work correctly (scan, analyze, config, help)
+- ✅ **Tests Written**: Comprehensive test suite with 15+ test cases written in `src/cli.rs`
+
+**⚠️ Still Pending:**
+- ❌ **Test Verification**: Need to run `cargo test cli::tests` to ensure all tests compile and pass
+- ❌ **Test Fixes**: May need to fix any test compilation or runtime issues
+- ❌ **Git Commit**: Need to run `git add .` and commit changes
+- ❌ **Git Push**: Need to push changes with comprehensive commit message
+
+**CLI Commands Working:**
+```bash
+loregrep scan src --verbose          # Scans and analyzes Rust files
+loregrep analyze src/main.rs         # Analyzes specific file
+loregrep search "new" --type function # Searches for functions (after scan)
+loregrep config                      # Shows configuration
+loregrep --help                      # Help system
+```
+
+**Technical Implementation:**
+- Created `src/cli.rs` with full `CliApp` implementation
+- Created `src/cli_types.rs` for command argument types
+- Fixed all module imports and compilation issues
+- Integrated with existing `RepoMap`, `RustAnalyzer`, and `RepositoryScanner`
+- Added proper error handling and user feedback
+- Wrote comprehensive test suite (needs verification)
+
+**To Complete Phase 3A:**
+1. Run and fix CLI tests: `cargo test cli::tests`
+2. Ensure all tests pass
+3. Git add and commit with message like:
+   ```bash
+   git add .
+   git commit -m "feat: Complete Phase 3A - Working CLI Foundation
+   
+   - ✅ Full CLI application with scan, search, analyze, config commands
+   - ✅ Repository scanner with gitignore support and language detection  
+   - ✅ Configuration system with TOML, env vars, CLI args
+   - ✅ Rust analyzer integration with tree-sitter
+   - ✅ Beautiful colored output and multiple formats
+   - ✅ Comprehensive error handling and user feedback
+   - ✅ Proper module structure and binary/library separation
+   - ✅ 15+ test cases for CLI functionality
+   
+   CLI commands working: scan, analyze, search, config, help
+   Ready for Phase 3B: Anthropic Integration"
+   ```
+4. Push to repository: `git push`
+
+**Next Phase Ready:** Phase 3B - Anthropic Integration 🤖
+
+---
+
+## **Phase 3B: Anthropic Integration** (Week 4) 🤖
+
+### **P0 - AI-Powered CLI**
+
+#### **Task 3B.1: Anthropic Client Implementation**
+- [ ] Implement `AnthropicClient` from specs:
+  ```rust
+  pub struct AnthropicClient {
+      api_key: String,
+      model: String,
+      base_url: String,
+      max_tokens: u32,
+      temperature: f64,
+      timeout_seconds: u64,
+  }
+  ```
+- [ ] API key management through config/env (`ANTHROPIC_API_KEY`)
+- [ ] Basic conversation handling with message history
+- [ ] Error handling for API failures (rate limits, auth, network)
+- [ ] Request/response logging for debugging
+
+#### **Task 3B.2: CLI + AI Integration**
+- [ ] Add natural language input processing to CLI:
+  ```bash
+  loregrep "What functions handle authentication?"
+  loregrep "Show me all public structs"
+  loregrep "What would break if I change this function?"
+  ```
+- [ ] Implement conversation context management
+- [ ] Add conversation history (last N interactions)
+- [ ] System prompts for code analysis context
+
+#### **Task 3B.3: Local Analysis Tools (Pseudo-MCP)**
+- [ ] Create "pseudo-MCP" tools that work locally without server:
+  ```rust
+  pub struct LocalAnalysisTools {
+      repo_map: Arc<RepoMap>,
+      scanner: RepositoryScanner,
+      rust_analyzer: RustAnalyzer,
+  }
+  ```
+- [ ] Tool implementations:
+  - `scan_repository` → direct `RepositoryScanner` call
+  - `search_functions` → direct `RepoMap` query
+  - `analyze_file` → direct analyzer call
+  - `get_dependencies` → import/export analysis
+  - `find_callers` → function call graph query
+- [ ] Format results for Claude consumption (JSON schemas)
+- [ ] Tool calling integration with Anthropic client
+
+#### **Task 3B.4: Conversation Engine**
+- [ ] Implement conversation flow:
+  ```rust
+  pub struct ConversationEngine {
+      claude_client: AnthropicClient,
+      local_tools: LocalAnalysisTools,
+      context: ConversationContext,
+  }
+  ```
+- [ ] Tool call execution and result processing
+- [ ] Multi-turn conversations with tool usage
+- [ ] Context management (repository info, recent analysis)
+
+---
+
+## **Phase 4A: Enhanced CLI Experience** (Week 5) ✨
+
+### **P1 - User Experience**
+
+#### **Task 4A.1: Improved User Interface**
+- [ ] Color output with `colored` crate:
+  ```rust
+  pub struct OutputFormatter {
+      colors_enabled: bool,
+      theme: ColorTheme,
+  }
+  ```
+- [ ] Progress indicators with `indicatif` during scanning
+- [ ] Interactive prompts for ambiguous queries
+- [ ] Command history and auto-completion hints
+- [ ] Better error messages with suggestions
+
+#### **Task 4A.2: Advanced Analysis Features**
+- [ ] Function call extraction and call graph visualization
+- [ ] Basic dependency tracking (imports/exports)
+- [ ] Code search with fuzzy matching
+- [ ] Export/save analysis results (JSON, markdown)
+- [ ] File change detection and incremental updates
+
+#### **Task 4A.3: Performance & Caching**
+- [ ] Repository analysis caching
+- [ ] Incremental updates when files change
+- [ ] Memory usage optimization for large repos
+- [ ] Background analysis for better responsiveness
+
+---
+
+## **Phase 4B: MCP Server Architecture** (Week 6) 🔌
+
+### **P2 - Architecture Enhancement (Optional)**
+
+#### **Task 4B.1: Convert to True MCP Architecture**
+- [ ] Implement `src/server.rs` as MCP server:
+  ```rust
+  pub struct McpServer {
+      analysis_service: AnalysisService,
+      tools: Vec<McpTool>,
+      config: McpConfig,
+  }
+  ```
+- [ ] Convert CLI to use MCP client instead of direct calls
+- [ ] This enables external tool integration later
+- [ ] Maintain backward compatibility with local mode
+
+#### **Task 4B.2: Service Architecture**
+- [ ] Create main `AnalysisService` struct:
+  ```rust
+  pub struct AnalysisService {
+      repo_map: Arc<RwLock<RepoMap>>,
+      rust_analyzer: RustAnalyzer,
+      scanner: RepositoryScanner,
+      config: AnalysisConfig,
+  }
+  ```
+- [ ] Implement service lifecycle management
+- [ ] Add thread-safe access to RepoMap
+- [ ] Background analysis service
+
+---
+
+## **Phase 5: Multi-Language Support** (Week 7+) 🌍
+
+### **P1 - Incremental Language Implementation**
+
+#### **Task 5.1: Language Registry System**
 - [ ] Create `LanguageAnalyzerRegistry`:
   ```rust
   pub struct LanguageAnalyzerRegistry {
@@ -185,58 +434,64 @@
   ```
 - [ ] Implement language detection by:
   - [ ] File extension
-  - [ ] Filename patterns
+  - [ ] Filename patterns  
   - [ ] Content-based detection (shebangs, etc.)
 - [ ] Add analyzer registration and lookup
 
-#### **Task 3.3: Parser Pool Implementation**
-- [ ] Create thread-safe parser pool to avoid recreation overhead
-- [ ] Implement parser reuse and cleanup
-- [ ] Add parser configuration management
-
----
-
-## **Phase 4: Multi-Language Support** (Week 3-4)
-
-### **P1 - Incremental Implementation**
-
-#### **Task 4.1: Python Analyzer**
+#### **Task 5.2: Python Analyzer**
 - [ ] Implement full Python analysis in `src/analyzers/python.rs`
 - [ ] Add Python-specific query patterns
 - [ ] Support async/await detection
 - [ ] Handle class methods vs functions
 - [ ] Add import resolution (relative vs absolute)
 
-#### **Task 4.2: TypeScript Analyzer**
+#### **Task 5.3: TypeScript Analyzer**
 - [ ] Implement TypeScript analysis
 - [ ] Handle interfaces, types, and classes
 - [ ] Support import/export variations
 - [ ] Add generic type extraction
 
-#### **Task 4.3: JavaScript Analyzer**
+#### **Task 5.4: JavaScript Analyzer**
 - [ ] Implement JavaScript analysis
 - [ ] Handle ES6+ features (arrow functions, destructuring)
 - [ ] Support different module systems (CommonJS, ES modules)
 
-#### **Task 4.4: Go Analyzer**
+#### **Task 5.5: Go Analyzer**
 - [ ] Implement Go analysis
 - [ ] Handle package declarations
 - [ ] Support Go-specific function signatures
 - [ ] Add interface and struct handling
 
+#### **Task 5.6: Parser Pool Implementation**
+- [ ] Create thread-safe parser pool to avoid recreation overhead
+- [ ] Implement parser reuse and cleanup
+- [ ] Add parser configuration management
+
 ---
 
-## **Phase 5: Repository Scanning & File Management** (Week 4)
+## **Phase 6: Advanced Features** (Week 8+) 🚀
 
-### **P1 - System Integration**
+### **P2 - Enhanced Functionality**
 
-#### **Task 5.1: File Discovery System**
-- [ ] Implement repository scanner in `src/scanner/`
-- [ ] Add gitignore support using `ignore` crate
-- [ ] Implement include/exclude pattern matching
-- [ ] Add parallel file discovery
+#### **Task 6.1: Function Call Analysis**
+- [ ] Implement function call extraction across languages
+- [ ] Build call graph construction in-memory
+- [ ] Add cross-file function resolution
+- [ ] Create call site tracking
 
-#### **Task 5.2: Change Detection & Incremental Updates**
+#### **Task 6.2: Dependency Analysis**
+- [ ] Implement import resolution
+- [ ] Create dependency graph construction in-memory
+- [ ] Add circular dependency detection
+- [ ] Implement impact analysis
+
+#### **Task 6.3: Query Engine Integration**
+- [ ] Create query interface for the analysis service
+- [ ] Implement pattern-based searching
+- [ ] Add filtering and ranking
+- [ ] Create result caching
+
+#### **Task 6.4: Change Detection & Incremental Updates**
 - [ ] Implement file content hashing (blake3)
 - [ ] Add modification time tracking
 - [ ] Create incremental update detection:
@@ -250,38 +505,37 @@
 - [ ] Add file deletion handling
 - [ ] Implement dependency invalidation (when imports change)
 
-#### **Task 5.3: Configuration System**
-- [ ] Create configuration structure matching `specs/` requirements
-- [ ] Add TOML configuration file support
-- [ ] Implement runtime configuration updates
-
 ---
 
-## **Phase 6: Analysis Service Architecture** (Week 5)
+## **Phase 7: Performance & Optimization** (Week 9+) ⚡
 
-### **P1 - Service Layer**
+### **P2 - Performance Targets**
 
-#### **Task 6.1: Analysis Service**
-- [ ] Create main `AnalysisService` struct:
-  ```rust
-  pub struct AnalysisService {
-      repo_map: Arc<RwLock<RepoMap>>,
-      registry: LanguageAnalyzerRegistry,
-      scanner: RepositoryScanner,
-      config: AnalysisConfig,
-  }
-  ```
-- [ ] Implement service lifecycle management
-- [ ] Add service configuration and initialization
-- [ ] Add thread-safe access to RepoMap
+#### **Task 7.1: Performance Optimization**
+- [ ] Implement result caching strategies
+- [ ] Add memory usage optimization
+- [ ] Create benchmark tests
+- [ ] Profile and optimize query performance
 
-#### **Task 6.2: Batch Operations**
+#### **Task 7.2: Parallel Processing**
+- [ ] Implement worker thread pools
+- [ ] Add async analysis pipeline
+- [ ] Optimize parser pool usage
+- [ ] Create processing queue management
+
+#### **Task 7.3: Memory Efficiency**
+- [ ] Optimize data structure sizes
+- [ ] Implement string interning for common values
+- [ ] Add compression for stored analysis data
+- [ ] Create memory-mapped file support for large repos
+
+#### **Task 7.4: Batch Operations**
 - [ ] Implement parallel file analysis
 - [ ] Add progress tracking and reporting
 - [ ] Implement graceful error handling for failed files
 - [ ] Add analysis metrics collection
 
-#### **Task 6.3: Memory Management & Limits**
+#### **Task 7.5: Memory Management & Limits**
 - [ ] Add memory usage monitoring
 - [ ] Implement memory pressure handling
 - [ ] Add configurable memory limits
@@ -289,71 +543,23 @@
 
 ---
 
-## **Phase 7: Advanced Features** (Week 5-6)
-
-### **P2 - Enhanced Functionality**
-
-#### **Task 7.1: Function Call Analysis**
-- [ ] Implement function call extraction across languages
-- [ ] Build call graph construction in-memory
-- [ ] Add cross-file function resolution
-- [ ] Create call site tracking
-
-#### **Task 7.2: Dependency Analysis**
-- [ ] Implement import resolution
-- [ ] Create dependency graph construction in-memory
-- [ ] Add circular dependency detection
-- [ ] Implement impact analysis
-
-#### **Task 7.3: Query Engine Integration**
-- [ ] Create query interface for the analysis service
-- [ ] Implement pattern-based searching
-- [ ] Add filtering and ranking
-- [ ] Create result caching
-
----
-
-## **Phase 8: Performance & Optimization** (Week 6-7)
-
-### **P2 - Performance Targets**
-
-#### **Task 8.1: Performance Optimization**
-- [ ] Implement result caching strategies
-- [ ] Add memory usage optimization
-- [ ] Create benchmark tests
-- [ ] Profile and optimize query performance
-
-#### **Task 8.2: Parallel Processing**
-- [ ] Implement worker thread pools
-- [ ] Add async analysis pipeline
-- [ ] Optimize parser pool usage
-- [ ] Create processing queue management
-
-#### **Task 8.3: Memory Efficiency**
-- [ ] Optimize data structure sizes
-- [ ] Implement string interning for common values
-- [ ] Add compression for stored analysis data
-- [ ] Create memory-mapped file support for large repos
-
----
-
-## **Phase 9: Integration & Testing** (Week 7-8)
+## **Phase 8: Testing & Reliability** (Week 10+) 🧪
 
 ### **P1 - System Reliability**
 
-#### **Task 9.1: Error Recovery**
+#### **Task 8.1: Error Recovery**
 - [ ] Implement graceful parse failure handling
 - [ ] Add partial analysis results
 - [ ] Create error reporting and logging
 - [ ] Add retry mechanisms
 
-#### **Task 9.2: Testing Suite**
+#### **Task 8.2: Testing Suite**
 - [ ] Create unit tests for all analyzers
 - [ ] Add integration tests for full workflows
 - [ ] Create performance benchmarks
 - [ ] Add property-based tests for edge cases
 
-#### **Task 9.3: MCP/CLI Integration Points**
+#### **Task 8.3: CLI/MCP Integration Points**
 - [ ] Create async-compatible interfaces for MCP server
 - [ ] Add event emission for file analysis completion
 - [ ] Create CLI-friendly output formatting
@@ -361,22 +567,22 @@
 
 ---
 
-## **Phase 10: Database Storage (Optional)** (Week 8+)
+## **Phase 9: Database Storage (Optional)** (Week 11+) 📊
 
 ### **P3 - Future Enhancement**
 
-#### **Task 10.1: Database Schema (When Needed)**
+#### **Task 9.1: Database Schema (When Needed)**
 - [ ] Create SQLite schema from `specs/database-storage.md`
 - [ ] Add migrations system for schema updates
 - [ ] Implement connection pooling with `r2d2_sqlite`
 
-#### **Task 10.2: Hybrid Storage Strategy**
+#### **Task 9.2: Hybrid Storage Strategy**
 - [ ] Create hybrid RepoMap that uses both memory and database
 - [ ] Implement hot/cold data separation
 - [ ] Add background persistence
 - [ ] Create migration tools from in-memory to database
 
-#### **Task 10.3: Advanced Database Features**
+#### **Task 9.3: Advanced Database Features**
 - [ ] Add historical analysis data
 - [ ] Implement cross-repository queries
 - [ ] Add advanced indexing strategies
@@ -384,50 +590,79 @@
 
 ---
 
-## **Dependencies & Blocking Relationships**
+## **🎯 CLI-First Success Milestones**
+
+### **Week 3 (Phase 3A) - Basic CLI Working:**
+```bash
+loregrep scan .                    # Scan current directory
+loregrep search "function_name"    # Search functions
+loregrep analyze src/main.rs       # Analyze specific file
+loregrep config                    # Show configuration
+```
+
+### **Week 4 (Phase 3B) - AI-Powered CLI:**
+```bash
+loregrep "What functions handle authentication?"
+loregrep "Show me all public structs"
+loregrep "What would break if I change this function?"
+loregrep "Find all functions that call parse_config"
+```
+
+### **Week 5 (Phase 4A) - Enhanced Experience:**
+- [ ] Colored output and progress bars
+- [ ] Interactive queries and suggestions
+- [ ] Fast incremental updates
+- [ ] Export analysis results
+
+### **Week 6+ (Phases 4B+) - Advanced Features:**
+- [ ] MCP server architecture
+- [ ] Multi-language support
+- [ ] Advanced dependency analysis
+- [ ] Performance optimization
+
+---
+
+## **Dependencies & Blocking Relationships (Updated)**
 
 ```mermaid
 graph TD
-    A[Task 1.1: Module Structure] --> B[Task 1.2: Data Structures]
-    B --> C[Task 1.3: Enhanced Trait]
-    A --> D[Task 2.1: Optimized RepoMap]
-    D --> E[Task 2.2: Fast Queries]
-    E --> F[Task 2.3: Persistence]
-    C --> G[Task 3.1: Rust Analyzer]
-    G --> H[Task 3.2: Language Registry]
-    H --> I[Task 4.x: Multi-Language]
-    F --> J[Task 5.1: File Discovery]
-    J --> K[Task 5.2: Change Detection]
-    K --> L[Task 6.1: Analysis Service]
-    L --> M[Task 7.x: Advanced Features]
-    M --> N[Task 8.x: Performance]
-    N --> O[Task 9.x: Integration]
-    O --> P[Task 10.x: Database (Optional)]
+    A[Phase 1: Foundation ✅] --> B[Phase 2: Storage ✅]
+    B --> C[Phase 3A: CLI Foundation 🚀]
+    C --> D[Phase 3B: AI Integration 🤖]
+    D --> E[Phase 4A: Enhanced UX ✨]
+    E --> F[Phase 4B: MCP Architecture 🔌]
+    F --> G[Phase 5: Multi-Language 🌍]
+    G --> H[Phase 6: Advanced Features 🚀]
+    H --> I[Phase 7: Performance ⚡]
+    I --> J[Phase 8: Testing 🧪]
+    J --> K[Phase 9: Database 📊]
 ```
 
-## **Success Criteria**
+## **Success Criteria (Updated)**
 
-### **Phase 1-3 Success:**
-- [ ] Clean module structure with separated concerns
-- [ ] Optimized in-memory RepoMap with fast lookups
-- [ ] Enhanced Rust analyzer with all features
+### **Phase 3A Success (Week 3):**
+- [ ] Working CLI that can scan repositories and analyze Rust files
+- [ ] Basic configuration system working
+- [ ] File discovery and filtering implemented
+- [ ] Integration with existing RepoMap and RustAnalyzer
 
-### **Phase 4-6 Success:**
-- [ ] At least 3 languages fully supported
-- [ ] Repository scanning and incremental updates working
-- [ ] Service architecture ready for MCP/CLI integration
-- [ ] Memory usage <100MB for repositories up to 50,000 files
+### **Phase 3B Success (Week 4):**
+- [ ] Natural language queries working through Anthropic API
+- [ ] Local tool integration without MCP server
+- [ ] Conversation context and history
+- [ ] AI-powered code analysis and search
 
-### **Phase 7-9 Success:**
+### **Phase 4A Success (Week 5):**
+- [ ] Beautiful, responsive CLI interface
+- [ ] Fast incremental updates and caching
+- [ ] Advanced analysis features
+- [ ] Ready for user feedback and iteration
+
+### **Long-term Success:**
+- [ ] Multi-language support (Python, TypeScript, JavaScript, Go)
 - [ ] Performance targets met (≤1s file analysis, ≤10s repo scan)
-- [ ] All advanced features implemented
 - [ ] Comprehensive test coverage
-- [ ] Ready for production use with in-memory storage
-
-### **Phase 10 Success (Optional):**
-- [ ] Database storage available for very large repositories
-- [ ] Hybrid storage strategy working
-- [ ] Migration path from in-memory to database
+- [ ] Production-ready with excellent UX
 
 ## **Memory Usage Targets**
 
@@ -441,8 +676,9 @@ graph TD
 
 ## **Notes**
 
-- **In-Memory First**: Start with optimized in-memory storage for faster development and better performance
-- **Database Optional**: Add database storage only when memory becomes a constraint (>50K files)
-- **Incremental Migration**: Each phase builds on the previous, allowing gradual enhancement
-- **Performance Focus**: Prioritize query speed and memory efficiency over persistent storage
-- **Production Ready**: In-memory approach suitable for 95% of real-world projects
+- **🚀 CLI-First Approach**: Get working CLI with AI integration in 2 weeks
+- **👥 User Feedback Early**: Start getting user feedback by Week 4
+- **🔄 Incremental Enhancement**: Add languages and features based on feedback
+- **⚡ Performance Focus**: Optimize for speed and memory efficiency
+- **🤖 AI-Native**: Built around natural language interaction from day one
+- **🔌 Future-Proof**: MCP architecture enables external integrations later

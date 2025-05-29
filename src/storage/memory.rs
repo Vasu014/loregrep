@@ -1,11 +1,10 @@
 // Placeholder RepoMap - will be enhanced in Phase 2: Task 2.1
 use crate::types::{
     TreeNode, FunctionSignature, StructSignature, ImportStatement, 
-    ExportStatement, FunctionCall, AnalysisError
+    ExportStatement, AnalysisError
 };
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
-use std::path::Path;
 use regex::Regex;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use serde::{Serialize, Deserialize};
@@ -198,7 +197,7 @@ impl RepoMap {
             .unwrap_or_default()
     }
 
-    /// Find functions by pattern (supports regex and fuzzy matching)
+    /// Find functions by pattern (supports regex and fuzzy matching) - Original method
     pub fn find_functions(&self, pattern: &str) -> QueryResult<&FunctionSignature> {
         let start_time = std::time::Instant::now();
         
@@ -252,6 +251,32 @@ impl RepoMap {
         QueryResult::new(results, len, duration)
     }
 
+    /// Find functions with limit and fuzzy matching support - CLI-compatible method
+    pub fn find_functions_with_options(&self, pattern: &str, limit: usize, fuzzy: bool) -> Vec<&FunctionSignature> {
+        if fuzzy {
+            let fuzzy_results = self.fuzzy_search(pattern, Some(limit));
+            let mut function_results = Vec::new();
+            
+            for file in &self.files {
+                for func in &file.functions {
+                    for (fuzzy_match, _score) in &fuzzy_results {
+                        if fuzzy_match.contains(&func.name) {
+                            function_results.push(func);
+                            if function_results.len() >= limit {
+                                return function_results;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            function_results
+        } else {
+            let query_result = self.find_functions(pattern);
+            query_result.items.into_iter().take(limit).collect()
+        }
+    }
+
     /// Find structs by pattern
     pub fn find_structs(&self, pattern: &str) -> QueryResult<&StructSignature> {
         let start_time = std::time::Instant::now();
@@ -284,6 +309,32 @@ impl RepoMap {
         let duration = start_time.elapsed().as_millis() as u64;
         let len = results.len();
         QueryResult::new(results, len, duration)
+    }
+
+    /// Find structs with limit and fuzzy matching support - CLI-compatible method
+    pub fn find_structs_with_options(&self, pattern: &str, limit: usize, fuzzy: bool) -> Vec<&StructSignature> {
+        if fuzzy {
+            let fuzzy_results = self.fuzzy_search(pattern, Some(limit));
+            let mut struct_results = Vec::new();
+            
+            for file in &self.files {
+                for struct_def in &file.structs {
+                    for (fuzzy_match, _score) in &fuzzy_results {
+                        if fuzzy_match.contains(&struct_def.name) {
+                            struct_results.push(struct_def);
+                            if struct_results.len() >= limit {
+                                return struct_results;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            struct_results
+        } else {
+            let query_result = self.find_structs(pattern);
+            query_result.items.into_iter().take(limit).collect()
+        }
     }
 
     /// Get file dependencies based on imports
@@ -365,6 +416,57 @@ impl RepoMap {
     /// Clear query cache
     pub fn clear_cache(&mut self) {
         self.query_cache.clear();
+    }
+
+    /// Find imports by pattern
+    pub fn find_imports(&self, pattern: &str, limit: usize) -> Vec<&ImportStatement> {
+        let mut results = Vec::new();
+        
+        for file in &self.files {
+            for import in &file.imports {
+                if self.matches_pattern(&import.module_path, pattern) {
+                    results.push(import);
+                    if results.len() >= limit {
+                        return results;
+                    }
+                }
+            }
+        }
+        
+        results
+    }
+
+    /// Find exports by pattern
+    pub fn find_exports(&self, pattern: &str, limit: usize) -> Vec<&ExportStatement> {
+        let mut results = Vec::new();
+        
+        for file in &self.files {
+            for export in &file.exports {
+                if self.matches_pattern(&export.exported_item, pattern) {
+                    results.push(export);
+                    if results.len() >= limit {
+                        return results;
+                    }
+                }
+            }
+        }
+        
+        results
+    }
+
+    /// Get the number of files in the repository map
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Check if the repository map is empty
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Get memory usage in bytes
+    pub fn memory_usage(&self) -> usize {
+        self.get_memory_usage()
     }
 
     // Private helper methods
