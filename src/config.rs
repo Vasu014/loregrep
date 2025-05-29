@@ -46,6 +46,7 @@ pub struct AiConfig {
     pub max_tokens: u32,
     pub temperature: f64,
     pub timeout_seconds: u64,
+    pub conversation_memory: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +109,7 @@ impl Default for CliConfig {
                 max_tokens: 4096,
                 temperature: 0.1,
                 timeout_seconds: 30,
+                conversation_memory: 10,
             },
             cache: CacheConfig {
                 enabled: true,
@@ -262,5 +264,30 @@ impl CliConfig {
     pub fn create_sample_config() -> String {
         let config = Self::default();
         toml::to_string_pretty(&config).unwrap_or_else(|_| "# Error generating sample config".to_string())
+    }
+
+    // Helper methods for accessing AI config in a consistent way
+    pub fn anthropic_api_key(&self) -> &Option<String> {
+        &self.ai.api_key
+    }
+
+    pub fn anthropic_model(&self) -> Option<String> {
+        Some(self.ai.model.clone())
+    }
+
+    pub fn max_tokens(&self) -> Option<u32> {
+        Some(self.ai.max_tokens)
+    }
+
+    pub fn temperature(&self) -> Option<f64> {
+        Some(self.ai.temperature)
+    }
+
+    pub fn timeout_seconds(&self) -> Option<u64> {
+        Some(self.ai.timeout_seconds)
+    }
+
+    pub fn conversation_memory(&self) -> Option<usize> {
+        Some(self.ai.conversation_memory)
     }
 } 

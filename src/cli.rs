@@ -6,8 +6,8 @@ use std::time::Instant;
 use tokio::fs;
 use tracing::info;
 
-// Use library imports instead of crate imports for the binary
-use loregrep::{
+// Use crate imports since we're within the same crate
+use crate::{
     CliConfig,
     cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs},
     scanner::{RepositoryScanner, ScanConfig, ScanResult},
@@ -18,6 +18,8 @@ use loregrep::{
         function::FunctionSignature,
         struct_def::{StructSignature, ImportStatement, ExportStatement},
     },
+    conversation::ConversationEngine,
+    ai_tools::LocalAnalysisTools,
 };
 
 pub struct CliApp {
@@ -25,6 +27,7 @@ pub struct CliApp {
     repo_scanner: RepositoryScanner,
     repo_map: RepoMap,
     rust_analyzer: RustAnalyzer,
+    conversation_engine: Option<ConversationEngine>,
     verbose: bool,
     colors_enabled: bool,
 }
@@ -48,6 +51,46 @@ impl CliApp {
         let rust_analyzer = RustAnalyzer::new()
             .context("Failed to create Rust analyzer")?;
 
+        // Initialize conversation engine if API key is available
+        let conversation_engine = if config.ai.api_key.is_some() {
+            let repo_map_arc = std::sync::Arc::new(repo_map.clone());
+            
+            // Create new instances for the tools (since they don't support cloning)
+            let tools_scan_config = ScanConfig {
+                follow_symlinks: config.file_scanning.follow_symlinks,
+                max_depth: config.file_scanning.max_depth,
+                show_progress: !config.output.verbose,
+                parallel: true,
+            };
+            let tools_scanner = RepositoryScanner::new(&config.file_scanning, Some(tools_scan_config))
+                .context("Failed to create tools scanner")?;
+            let tools_analyzer = RustAnalyzer::new()
+                .context("Failed to create tools analyzer")?;
+            
+            let local_tools = LocalAnalysisTools::new(
+                repo_map_arc,
+                tools_scanner,
+                tools_analyzer,
+            );
+            
+            match ConversationEngine::from_config_and_tools(&config, local_tools) {
+                Ok(engine) => {
+                    if verbose {
+                        println!("{}", "✅ AI conversation engine initialized".green());
+                    }
+                    Some(engine)
+                }
+                Err(e) => {
+                    if verbose {
+                        println!("{}", format!("⚠️  Failed to initialize AI engine: {}", e).yellow());
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Create cache directory if it doesn't exist
         if config.cache.enabled {
             if let Some(parent) = config.cache.path.parent() {
@@ -61,6 +104,7 @@ impl CliApp {
             repo_scanner,
             repo_map,
             rust_analyzer,
+            conversation_engine,
             verbose,
             colors_enabled,
         })
@@ -287,20 +331,158 @@ impl CliApp {
     pub async fn query(&mut self, args: QueryArgs) -> Result<()> {
         self.print_header("AI Query Mode");
         
-        if self.config.ai.api_key.is_none() {
-            self.print_error("No API key configured. Set ANTHROPIC_API_KEY environment variable.");
+        // Early return checks to avoid borrow conflicts
+        if self.conversation_engine.is_none() {
+            if self.config.ai.api_key.is_none() {
+                self.print_error("No API key configured. Set ANTHROPIC_API_KEY environment variable or add it to your config file.");
+                self.print_info("You can get an API key from https://console.anthropic.com/");
+            } else {
+                self.print_error("AI conversation engine is not available.");
+            }
             return Ok(());
         }
 
-        self.print_warning("AI query mode not yet implemented in Phase 3A.");
-        self.print_info("This feature will be available in Phase 3B.");
+        // Show repository status
+        if self.repo_map.is_empty() {
+            self.print_warning("Repository map is empty. Consider running 'scan' first for better context.");
+            self.print_info(&format!("Current directory: {}", args.path.display()));
+        } else {
+            if self.verbose {
+                self.print_info(&format!("Repository contains {} analyzed files", self.repo_map.file_count()));
+            }
+        }
+
+        // Take ownership of the conversation engine temporarily
+        let mut conversation_engine = self.conversation_engine.take().unwrap();
         
-        if let Some(query) = args.query {
-            println!("Your query: {}", query.cyan());
-            println!("Directory: {}", args.path.display().to_string().cyan());
+        let result = match args.query {
+            Some(query) => {
+                // Single query mode
+                self.process_ai_query_with_engine(&mut conversation_engine, &query).await
+            }
+            None => {
+                // Interactive mode
+                self.start_interactive_mode_with_engine(&mut conversation_engine).await
+            }
+        };
+
+        // Put the conversation engine back
+        self.conversation_engine = Some(conversation_engine);
+        
+        result
+    }
+
+    async fn process_ai_query_with_engine(&self, conversation_engine: &mut ConversationEngine, query: &str) -> Result<()> {
+        if self.verbose {
+            println!("Query: {}", query.cyan());
+        }
+
+        let start_time = Instant::now();
+        
+        // Show thinking indicator
+        print!("🤔 Thinking");
+        for _ in 0..3 {
+            print!(".");
+            use std::io::Write;
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        }
+        println!();
+
+        // Process the query
+        match conversation_engine.process_user_message(query).await {
+            Ok(response) => {
+                let duration = start_time.elapsed();
+                println!("\n{}", "AI Response:".bold().green());
+                println!("{}", response);
+                
+                if self.verbose {
+                    println!("\n{}", format!("Response time: {:?}", duration).dimmed());
+                    println!("{}", format!("Conversation messages: {}", conversation_engine.get_message_count()).dimmed());
+                }
+            }
+            Err(e) => {
+                println!("{} {}", "✗".red(), format!("Failed to process query: {}", e));
+                if self.verbose {
+                    println!("Error details: {:?}", e);
+                }
+            }
         }
 
         Ok(())
+    }
+
+    async fn start_interactive_mode_with_engine(&self, conversation_engine: &mut ConversationEngine) -> Result<()> {
+        println!("{} {}", "ℹ".blue(), "Starting interactive AI mode. Type 'help' for commands, 'exit' to quit.");
+        
+        loop {
+            // Prompt for input
+            print!("\n{}> ", "loregrep".cyan().bold());
+            use std::io::Write;
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+
+            // Read user input
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_err() {
+                println!("{} {}", "✗".red(), "Failed to read input");
+                continue;
+            }
+
+            let input = input.trim();
+            
+            // Handle special commands
+            match input {
+                "exit" | "quit" | "q" => {
+                    println!("{} {}", "ℹ".blue(), "Goodbye! 👋");
+                    break;
+                }
+                "clear" | "reset" => {
+                    conversation_engine.clear_conversation();
+                    println!("{} {}", "ℹ".blue(), "Conversation history cleared.");
+                    continue;
+                }
+                "help" | "h" => {
+                    Self::print_help_interactive();
+                    continue;
+                }
+                "status" => {
+                    Self::print_status_static(conversation_engine, &self.repo_map, &self.config);
+                    continue;
+                }
+                "" => continue,
+                _ => {}
+            }
+
+            // Process AI query
+            if let Err(e) = self.process_ai_query_with_engine(conversation_engine, input).await {
+                println!("{} {}", "✗".red(), format!("Error: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn print_help_interactive() {
+        println!("\n{}", "Interactive AI Commands:".bold());
+        println!("  {}  - Get help with this menu", "help, h".cyan());
+        println!("  {}  - Clear conversation history", "clear, reset".cyan());
+        println!("  {}  - Show conversation status", "status".cyan());
+        println!("  {}  - Exit interactive mode", "exit, quit, q".cyan());
+        println!("\n{}", "Example queries:".bold());
+        println!("  {}  - What functions handle authentication?", "\"".dimmed());
+        println!("  {}  - Show me all public structs", "\"".dimmed());
+        println!("  {}  - Find functions that call parse_config", "\"".dimmed());
+        println!("  {}  - What would break if I change this function?", "\"".dimmed());
+        println!("  {}  - Analyze the dependencies in main.rs", "\"".dimmed());
+    }
+
+    fn print_status_static(conversation_engine: &ConversationEngine, repo_map: &RepoMap, config: &CliConfig) {
+        println!("\n{}", "AI Status:".bold());
+        println!("  API Key: {}", if conversation_engine.has_api_key() { "✅ Available".green() } else { "❌ Missing".red() });
+        println!("  Repository: {} files analyzed", repo_map.file_count().to_string().cyan());
+        println!("  Conversation: {} messages", conversation_engine.get_message_count().to_string().cyan());
+        println!("  Model: {}", config.ai.model.cyan());
+        println!("{}", conversation_engine.get_conversation_summary().dimmed());
     }
 
     // Helper methods
@@ -667,14 +849,84 @@ struct PrivateStruct {
         let config = create_test_config();
         let mut app = CliApp::new(config, false, false).await.unwrap();
         
-        let query_args = QueryArgs {
+        let args = QueryArgs {
             query: Some("test query".to_string()),
-            path: std::path::PathBuf::from("."),
+            path: PathBuf::from("."),
             interactive: false,
         };
         
-        let result = app.query(query_args).await;
+        // Should not panic, should handle gracefully
+        let result = app.query(args).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ai_query_with_engine() {
+        let mut config = create_test_config();
+        config.ai.api_key = Some("test-api-key".to_string());
+        
+        let mut app = CliApp::new(config, false, false).await.unwrap();
+        
+        // Conversation engine should be initialized
+        assert!(app.conversation_engine.is_some());
+        
+        let args = QueryArgs {
+            query: Some("What functions are available?".to_string()),
+            path: PathBuf::from("."),
+            interactive: false,
+        };
+        
+        // This will fail due to no real API, but should handle the error gracefully
+        let result = app.query(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_engine_initialization() {
+        let mut config = create_test_config();
+        config.ai.api_key = Some("test-key".to_string());
+        config.ai.model = "claude-3-5-sonnet-20241022".to_string();
+        
+        let app = CliApp::new(config, true, true).await.unwrap();
+        
+        // Should have conversation engine
+        assert!(app.conversation_engine.is_some());
+        
+        if let Some(engine) = &app.conversation_engine {
+            assert!(engine.has_api_key());
+            assert_eq!(engine.get_message_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_conversation_engine_without_api_key() {
+        let config = create_test_config(); // No API key by default
+        
+        let app = CliApp::new(config, false, false).await.unwrap();
+        
+        // Should not have conversation engine
+        assert!(app.conversation_engine.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ai_status_display() {
+        let mut config = create_test_config();
+        config.ai.api_key = Some("test-key".to_string());
+        
+        let app = CliApp::new(config, false, false).await.unwrap();
+        
+        if let Some(engine) = &app.conversation_engine {
+            // This should not panic
+            app.print_status(engine);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_interactive_commands() {
+        let app = CliApp::new(create_test_config(), false, false).await.unwrap();
+        
+        // These should not panic
+        app.print_help_interactive();
     }
 
     #[test]
