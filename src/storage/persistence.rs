@@ -142,15 +142,15 @@ impl PersistenceManager {
     }
 
     /// Check if cache is valid for a given repository
-    pub fn is_cache_valid(&self, name: &str, repo_path: &Path) -> bool {
-        let filename = format!("{}.cache", name);
+    pub fn is_cache_valid(&self, repo_path: &Path) -> bool {
+        let filename = format!("{}.cache", repo_path.file_name().unwrap().to_string_lossy());
         let cache_path = self.cache_dir.join(&filename);
         
         if !cache_path.exists() {
             return false;
         }
-
-        // Check if cache is newer than the most recent file in the repository
+        
+        // Check cache modification time vs repository modification time
         if let Ok(cache_metadata) = std::fs::metadata(&cache_path) {
             if let Ok(cache_modified) = cache_metadata.modified() {
                 // Simple heuristic: check if cache is newer than repo directory
@@ -448,7 +448,7 @@ impl PersistentRepoMap for RepoMap {
         Ok(repo_map)
     }
 
-    fn is_cache_valid(&self, repo_path: &Path) -> bool {
+    fn is_cache_valid(&self, _repo_path: &Path) -> bool {
         // This implementation would need access to the original cache file path
         // For now, return false to force regeneration
         false

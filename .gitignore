@@ -141,6 +141,7 @@ perf.data*
 # Local configuration files
 config.local.*
 *.local
+loregrep.toml
 
 # Database files (if any)
 *.db

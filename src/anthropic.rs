@@ -55,7 +55,7 @@ impl AnthropicClient {
         let response = self
             .client
             .post(&format!("{}/v1/messages", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("x-api-key", format!("{}", self.api_key))
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
             .json(&request)

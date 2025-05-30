@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use colored::*;
 use serde_json;
 use std::path::Path;
 use std::time::Instant;
@@ -20,6 +19,7 @@ use crate::{
     },
     conversation::ConversationEngine,
     ai_tools::LocalAnalysisTools,
+    ui::{UIManager, ThemeType, formatter::SearchResult},
 };
 
 pub struct CliApp {
@@ -29,12 +29,22 @@ pub struct CliApp {
     rust_analyzer: RustAnalyzer,
     conversation_engine: Option<ConversationEngine>,
     verbose: bool,
-    colors_enabled: bool,
+    ui: UIManager,
 }
 
 impl CliApp {
     pub async fn new(config: CliConfig, verbose: bool, colors_enabled: bool) -> Result<Self> {
         info!("Initializing Loregrep CLI");
+
+        // Initialize UI manager with theme
+        let theme_type = if let Ok(theme_str) = std::env::var("LOREGREP_THEME") {
+            ThemeType::from_str(&theme_str).unwrap_or(ThemeType::Auto)
+        } else {
+            ThemeType::Auto
+        };
+        
+        let ui = UIManager::new(colors_enabled, theme_type)
+            .context("Failed to create UI manager")?;
 
         // Initialize components
         let scan_config = ScanConfig {
@@ -76,13 +86,13 @@ impl CliApp {
             match ConversationEngine::from_config_and_tools(&config, local_tools) {
                 Ok(engine) => {
                     if verbose {
-                        println!("{}", "✅ AI conversation engine initialized".green());
+                        ui.print_success("AI conversation engine initialized");
                     }
                     Some(engine)
                 }
                 Err(e) => {
                     if verbose {
-                        println!("{}", format!("⚠️  Failed to initialize AI engine: {}", e).yellow());
+                        ui.print_warning(&format!("Failed to initialize AI engine: {}", e));
                     }
                     None
                 }
@@ -106,40 +116,59 @@ impl CliApp {
             rust_analyzer,
             conversation_engine,
             verbose,
-            colors_enabled,
+            ui,
         })
     }
 
     pub async fn scan(&mut self, args: ScanArgs) -> Result<()> {
         let start_time = Instant::now();
         
-        self.print_header("Repository Scan");
+        self.ui.print_header("Repository Scan");
         
         if self.verbose {
-            println!("Scanning directory: {}", args.path.display().to_string().cyan());
-            println!("Include patterns: {:?}", self.config.file_scanning.include_patterns);
-            println!("Exclude patterns: {:?}", self.config.file_scanning.exclude_patterns);
+            self.ui.print_info(&format!("Scanning directory: {}", args.path.display()));
+            self.ui.print_info(&format!("Include patterns: {:?}", self.config.file_scanning.include_patterns));
+            self.ui.print_info(&format!("Exclude patterns: {:?}", self.config.file_scanning.exclude_patterns));
         }
 
-        // Perform the scan
-        let scan_result = self.repo_scanner.scan(&args.path)
-            .with_context(|| format!("Failed to scan directory: {:?}", args.path))?;
+        // Perform the scan with progress indicator
+        let scan_result = if args.path.is_dir() {
+            // Get estimated file count for progress bar
+            let estimated_files = std::fs::read_dir(&args.path)
+                .map(|entries| entries.count() as u64)
+                .unwrap_or(100);
+            
+            let progress = self.ui.create_scan_progress(estimated_files);
+            progress.set_message("Discovering files...");
+            
+            let result = self.repo_scanner.scan(&args.path)
+                .with_context(|| format!("Failed to scan directory: {:?}", args.path))?;
+            
+            progress.finish_with_message(&format!("Discovered {} files", result.files.len()));
+            result
+        } else {
+            self.repo_scanner.scan(&args.path)
+                .with_context(|| format!("Failed to scan path: {:?}", args.path))?
+        };
 
         // Display results
         self.print_scan_results(&scan_result);
 
         // Analyze discovered files if requested
         if !scan_result.files.is_empty() {
-            self.print_info("Starting file analysis...");
+            self.ui.print_info("Starting file analysis...");
             
             let analysis_start = Instant::now();
+            let progress = self.ui.progress.create_analysis_progress(scan_result.files.len() as u64);
             
             for file in &scan_result.files {
                 if file.language == "rust" {
+                    progress.set_current_file(&file.relative_path.display().to_string());
+                    
                     match self.analyze_file_internal(&file.path).await {
                         Ok(analysis) => {
                             if let Err(e) = self.repo_map.add_file(analysis) {
-                                self.print_warning(&format!(
+                                self.ui.print_warning(&format!(
                                     "Failed to add {} to repository map: {}",
                                     file.relative_path.display(),
                                     e
@@ -147,22 +176,27 @@ impl CliApp {
                             }
                         }
                         Err(e) => {
-                            self.print_warning(&format!(
+                            self.ui.print_warning(&format!(
                                 "Failed to analyze {}: {}",
                                 file.relative_path.display(),
                                 e
                             ));
                         }
                     }
+                    progress.inc();
                 }
             }
 
             let analysis_duration = analysis_start.elapsed();
-            self.print_success(&format!(
-                "Analysis completed in {:?}. Repository map contains {} files",
-                analysis_duration,
-                self.repo_map.file_count()
-            ));
+            progress.finish_with_message("Analysis completed");
+            
+            let summary = self.ui.formatter.format_analysis_summary(
+                scan_result.files.len(),
+                self.repo_map.find_functions("").items.len(),
+                self.repo_map.find_structs("").items.len(),
+                analysis_duration
+            );
+            println!("{}", summary);
         }
 
         // Cache results if enabled
@@ -171,97 +205,87 @@ impl CliApp {
         }
 
         let total_duration = start_time.elapsed();
-        self.print_success(&format!("Total scan time: {:?}", total_duration));
+        self.ui.print_success(&format!("Total scan time: {:?}", total_duration));
 
         Ok(())
     }
 
     pub async fn search(&self, args: SearchArgs) -> Result<()> {
-        self.print_header("Search");
+        self.ui.print_header("Search");
 
         if self.repo_map.is_empty() {
-            self.print_warning("Repository map is empty. Run 'scan' first to populate data.");
+            self.ui.print_warning("Repository map is empty. Run 'scan' first to populate data.");
             return Ok(());
         }
 
         let start_time = Instant::now();
         
         if self.verbose {
-            println!("Query: {}", args.query.green());
-            println!("Search type: {}", args.r#type.cyan());
-            println!("Fuzzy matching: {}", if args.fuzzy { "enabled".green() } else { "disabled".red() });
+            self.ui.print_info(&format!("Query: {}", args.query));
+            self.ui.print_info(&format!("Search type: {}", args.r#type));
+            self.ui.print_info(&format!("Fuzzy matching: {}", if args.fuzzy { "enabled" } else { "disabled" }));
         }
 
         // Perform search based on type
         let results = match args.r#type.as_str() {
             "function" | "func" => {
                 let functions = self.repo_map.find_functions_with_options(&args.query, args.limit, args.fuzzy);
-                self.format_function_results(functions)
+                self.convert_function_results(functions)
             },
             "struct" => {
                 let structs = self.repo_map.find_structs_with_options(&args.query, args.limit, args.fuzzy);
-                self.format_struct_results(structs)
+                self.convert_struct_results(structs)
             },
             "import" => {
                 let imports = self.repo_map.find_imports(&args.query, args.limit);
-                self.format_import_results(imports)
+                self.convert_import_results(imports)
             },
             "export" => {
                 let exports = self.repo_map.find_exports(&args.query, args.limit);
-                self.format_export_results(exports)
+                self.convert_export_results(exports)
             },
             "all" => {
-                // Search across all types
                 let mut all_results = Vec::new();
                 
                 let functions = self.repo_map.find_functions_with_options(&args.query, args.limit / 4, args.fuzzy);
-                all_results.extend(self.format_function_results(functions));
+                all_results.extend(self.convert_function_results(functions));
                 
                 let structs = self.repo_map.find_structs_with_options(&args.query, args.limit / 4, args.fuzzy);
-                all_results.extend(self.format_struct_results(structs));
+                all_results.extend(self.convert_struct_results(structs));
                 
                 all_results
             },
             _ => {
-                self.print_error(&format!("Unknown search type: {}", args.r#type));
+                self.ui.print_error_with_suggestions(&format!("Unknown search type: {}", args.r#type), 
+                    Some("Available types: function, struct, import, export, all"));
                 return Ok(());
             }
         };
 
         let search_duration = start_time.elapsed();
 
-        // Display results
-        if results.is_empty() {
-            self.print_warning(&format!("No results found for query: {}", args.query));
-        } else {
-            self.print_success(&format!("Found {} results in {:?}", results.len(), search_duration));
-            println!();
-            
-            for (i, result) in results.iter().enumerate() {
-                if i >= args.limit {
-                    break;
-                }
-                println!("{}", result);
-                if i < results.len() - 1 {
-                    println!();
-                }
-            }
+        // Display results using the new formatter
+        let formatted_results = self.ui.formatter.format_search_results(&results, &args.query);
+        println!("{}", formatted_results);
+        
+        if self.verbose && !results.is_empty() {
+            self.ui.print_info(&format!("Search completed in {:?}", search_duration));
         }
 
         Ok(())
     }
 
     pub async fn analyze(&mut self, args: AnalyzeArgs) -> Result<()> {
-        self.print_header("File Analysis");
+        self.ui.print_header("File Analysis");
 
         if !args.file.exists() {
-            self.print_error(&format!("File not found: {}", args.file.display()));
+            self.ui.print_error(&format!("File not found: {}", args.file.display()));
             return Ok(());
         }
 
         if self.verbose {
-            println!("Analyzing file: {}", args.file.display().to_string().cyan());
-            println!("Output format: {}", args.format.cyan());
+            self.ui.print_info(&format!("Analyzing file: {}", args.file.display()));
+            self.ui.print_info(&format!("Output format: {}", args.format));
         }
 
         let start_time = Instant::now();
@@ -282,20 +306,20 @@ impl CliApp {
                 self.display_analysis_tree(&analysis);
             },
             _ => {
-                self.print_error(&format!("Unknown output format: {}", args.format));
+                self.ui.print_error(&format!("Unknown output format: {}", args.format));
                 return Ok(());
             }
         }
 
         if self.verbose {
-            println!("\n{}", format!("Analysis completed in {:?}", analysis_duration).green());
+            self.ui.print_info(&format!("\nAnalysis completed in {:?}", analysis_duration));
         }
 
         Ok(())
     }
 
     pub async fn show_config(&self) -> Result<()> {
-        self.print_header("Configuration");
+        self.ui.print_header("Configuration");
 
         let config_json = serde_json::to_string_pretty(&self.config)
             .context("Failed to serialize configuration")?;
@@ -303,52 +327,81 @@ impl CliApp {
         println!("{}", config_json);
         
         // Show cache status
-        println!("\n{}", "Cache Status:".bold());
+        self.ui.print_info("\nCache Status:");
         if self.config.cache.enabled {
-            println!("  Status: {}", "Enabled".green());
-            println!("  Path: {}", self.config.cache.path.display().to_string().cyan());
+            self.ui.print_info("  Status: Enabled");
+            self.ui.print_info(&format!("  Path: {}", self.config.cache.path.display().to_string()));
             
             if self.config.cache.path.exists() {
                 if let Ok(metadata) = std::fs::metadata(&self.config.cache.path) {
                     let size_mb = metadata.len() / (1024 * 1024);
-                    println!("  Size: {} MB", size_mb.to_string().yellow());
+                    self.ui.print_info(&format!("  Size: {} MB", size_mb.to_string()));
                 }
             } else {
-                println!("  Size: {} (no cache file found)", "0 MB".yellow());
+                self.ui.print_info("  Size: 0 MB (no cache file found)");
             }
         } else {
-            println!("  Status: {}", "Disabled".red());
+            self.ui.print_info("  Status: Disabled");
         }
 
         // Show repository map status
-        println!("\n{}", "Repository Map Status:".bold());
-        println!("  Files loaded: {}", self.repo_map.file_count().to_string().cyan());
-        println!("  Memory usage: {} MB", (self.repo_map.memory_usage() / (1024 * 1024)).to_string().yellow());
+        self.ui.print_info("\nRepository Map Status:");
+        self.ui.print_info(&format!("  Files loaded: {}", self.repo_map.file_count().to_string()));
+        self.ui.print_info(&format!("  Memory usage: {} MB", (self.repo_map.memory_usage() / (1024 * 1024)).to_string()));
 
         Ok(())
     }
 
     pub async fn query(&mut self, args: QueryArgs) -> Result<()> {
-        self.print_header("AI Query Mode");
+        self.ui.print_header("AI Query Mode");
+        
+        // Friendly welcome message - should be the very first thing users see
+        if args.query.is_none() {
+            // Only show welcome for interactive mode
+            self.ui.print_info("👻 Hey! I'm your friendly ghost in the shell! 👻");
+            self.ui.print_info("I'm here to help you explore and understand your codebase.");
+            self.ui.print_info("Type 'help' for commands, or just ask me anything about your code!");
+            self.ui.print_info("Ready to dig into some code mysteries? Let's go! 🚀");
+            println!(); // Add some space
+        }
         
         // Early return checks to avoid borrow conflicts
         if self.conversation_engine.is_none() {
             if self.config.ai.api_key.is_none() {
-                self.print_error("No API key configured. Set ANTHROPIC_API_KEY environment variable or add it to your config file.");
-                self.print_info("You can get an API key from https://console.anthropic.com/");
+                self.ui.print_error("No API key configured. Set ANTHROPIC_API_KEY environment variable or add it to your config file.");
+                self.ui.print_info("You can get an API key from https://console.anthropic.com/");
             } else {
-                self.print_error("AI conversation engine is not available.");
+                self.ui.print_error("AI conversation engine is not available.");
             }
             return Ok(());
         }
 
-        // Show repository status
+        // Show repository status and auto-scan if needed
         if self.repo_map.is_empty() {
-            self.print_warning("Repository map is empty. Consider running 'scan' first for better context.");
-            self.print_info(&format!("Current directory: {}", args.path.display()));
+            self.ui.print_warning("Repository map is empty. Auto-scanning current directory for better context...");
+            self.ui.print_info(&format!("Current directory: {}", args.path.display()));
+            
+            // Auto-scan the current directory
+            let scan_args = ScanArgs {
+                path: args.path.clone(),
+                include: vec![],
+                exclude: vec![],
+                follow_symlinks: false,
+                cache: true,
+            };
+            
+            match self.scan(scan_args).await {
+                Ok(()) => {
+                    self.ui.print_success(&format!("Auto-scan completed! Found {} files", self.repo_map.file_count()));
+                }
+                Err(e) => {
+                    self.ui.print_warning(&format!("Auto-scan failed: {}. Continuing with empty repository map.", e));
+                    self.ui.print_info("You can manually run 'scan .' to try again.");
+                }
+            }
         } else {
             if self.verbose {
-                self.print_info(&format!("Repository contains {} analyzed files", self.repo_map.file_count()));
+                self.ui.print_info(&format!("Repository contains {} analyzed files", self.repo_map.file_count()));
             }
         }
 
@@ -373,39 +426,35 @@ impl CliApp {
     }
 
     async fn process_ai_query_with_engine(&self, conversation_engine: &mut ConversationEngine, query: &str) -> Result<()> {
-        use std::io::Write;
-        
         if self.verbose {
-            println!("Query: {}", query.cyan());
+            self.ui.print_info(&format!("Query: {}", query));
         }
 
         let start_time = Instant::now();
         
         // Show thinking indicator
-        print!("🤔 Thinking");
-        for _ in 0..3 {
-            print!(".");
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        }
-        println!();
+        self.ui.show_thinking("Processing your query").await;
 
         // Process the query
         match conversation_engine.process_user_message(query).await {
             Ok(response) => {
                 let duration = start_time.elapsed();
-                println!("\n{}", "AI Response:".bold().green());
-                println!("{}", response);
+                self.ui.print_success("AI Response:");
+                let formatted_response = self.ui.formatter.format_ai_response(&response);
+                println!("{}", formatted_response);
                 
                 if self.verbose {
-                    println!("\n{}", format!("Response time: {:?}", duration).dimmed());
-                    println!("{}", format!("Conversation messages: {}", conversation_engine.get_message_count()).dimmed());
+                    self.ui.print_info(&format!("Response time: {:?}", duration));
+                    self.ui.print_info(&format!("Conversation messages: {}", conversation_engine.get_message_count()));
                 }
             }
             Err(e) => {
-                println!("{} {}", "✗".red(), format!("Failed to process query: {}", e));
+                self.ui.print_error_with_suggestions(
+                    &format!("Failed to process query: {}", e),
+                    Some("AI query processing")
+                );
                 if self.verbose {
-                    println!("Error details: {:?}", e);
+                    self.ui.print_info(&format!("Error details: {:?}", e));
                 }
             }
         }
@@ -413,20 +462,16 @@ impl CliApp {
         Ok(())
     }
 
-    async fn start_interactive_mode_with_engine(&self, conversation_engine: &mut ConversationEngine) -> Result<()> {
-        use std::io::Write;
-        
-        println!("{} {}", "ℹ".blue(), "Starting interactive AI mode. Type 'help' for commands, 'exit' to quit.");
-        
+    async fn start_interactive_mode_with_engine(&mut self, conversation_engine: &mut ConversationEngine) -> Result<()> {
         loop {
             // Prompt for input
-            print!("\n{}> ", "loregrep".cyan().bold());
+            print!("\n{}> ", "loregrep");
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             // Read user input
             let mut input = String::new();
             if std::io::stdin().read_line(&mut input).is_err() {
-                println!("{} {}", "✗".red(), "Failed to read input");
+                self.ui.print_error("Failed to read input");
                 continue;
             }
 
@@ -435,20 +480,44 @@ impl CliApp {
             // Handle special commands
             match input {
                 "exit" | "quit" | "q" => {
-                    println!("{} {}", "ℹ".blue(), "Goodbye! 👋");
+                    self.ui.print_success("Goodbye! 👋");
                     break;
                 }
                 "clear" | "reset" => {
                     conversation_engine.clear_conversation();
-                    println!("{} {}", "ℹ".blue(), "Conversation history cleared.");
+                    self.ui.print_info("Conversation history cleared.");
                     continue;
                 }
                 "help" | "h" => {
-                    Self::print_help_interactive();
+                    self.print_help_interactive();
                     continue;
                 }
                 "status" => {
-                    Self::print_status_static(conversation_engine, &self.repo_map, &self.config);
+                    self.print_status(conversation_engine);
+                    continue;
+                }
+                "scan" | "scan ." => {
+                    self.ui.print_info("Scanning current directory...");
+                    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    
+                    // Create a simple ScanArgs for the existing scan method
+                    let scan_args = ScanArgs {
+                        path: current_dir,
+                        include: vec![],
+                        exclude: vec![],
+                        follow_symlinks: false,
+                        cache: true,
+                    };
+                    
+                    // Use the existing scan method
+                    match self.scan(scan_args).await {
+                        Ok(()) => {
+                            self.ui.print_success(&format!("Scan completed! Found {} files", self.repo_map.file_count()));
+                        }
+                        Err(e) => {
+                            self.ui.print_error(&format!("Scan failed: {}", e));
+                        }
+                    }
                     continue;
                 }
                 "" => continue,
@@ -457,34 +526,35 @@ impl CliApp {
 
             // Process AI query
             if let Err(e) = self.process_ai_query_with_engine(conversation_engine, input).await {
-                println!("{} {}", "✗".red(), format!("Error: {}", e));
+                self.ui.print_error(&format!("Error: {}", e));
             }
         }
 
         Ok(())
     }
 
-    fn print_help_interactive() {
-        println!("\n{}", "Interactive AI Commands:".bold());
-        println!("  {}  - Get help with this menu", "help, h".cyan());
-        println!("  {}  - Clear conversation history", "clear, reset".cyan());
-        println!("  {}  - Show conversation status", "status".cyan());
-        println!("  {}  - Exit interactive mode", "exit, quit, q".cyan());
-        println!("\n{}", "Example queries:".bold());
-        println!("  {}  - What functions handle authentication?", "\"".dimmed());
-        println!("  {}  - Show me all public structs", "\"".dimmed());
-        println!("  {}  - Find functions that call parse_config", "\"".dimmed());
-        println!("  {}  - What would break if I change this function?", "\"".dimmed());
-        println!("  {}  - Analyze the dependencies in main.rs", "\"".dimmed());
+    fn print_help_interactive(&self) {
+        self.ui.print_header("Interactive Commands");
+        self.ui.print_info("Available commands:");
+        self.ui.print_info("  help, h          - Show this help message");
+        self.ui.print_info("  scan, scan .     - Scan current directory for files");
+        self.ui.print_info("  status           - Show AI engine status");
+        self.ui.print_info("  clear, reset     - Clear conversation history");
+        self.ui.print_info("  exit, quit, q    - Exit interactive mode");
+        self.ui.print_info("");
+        self.ui.print_info("Or ask any question about your code:");
+        self.ui.print_info("  > What functions handle configuration?");
+        self.ui.print_info("  > Show me all public structs");
+        self.ui.print_info("  > How does error handling work?");
     }
 
-    fn print_status_static(conversation_engine: &ConversationEngine, repo_map: &RepoMap, config: &CliConfig) {
-        println!("\n{}", "AI Status:".bold());
-        println!("  API Key: {}", if conversation_engine.has_api_key() { "✅ Available".green() } else { "❌ Missing".red() });
-        println!("  Repository: {} files analyzed", repo_map.file_count().to_string().cyan());
-        println!("  Conversation: {} messages", conversation_engine.get_message_count().to_string().cyan());
-        println!("  Model: {}", config.ai.model.cyan());
-        println!("{}", conversation_engine.get_conversation_summary().dimmed());
+    fn print_status(&self, conversation_engine: &ConversationEngine) {
+        self.ui.print_header("AI Status");
+        self.ui.print_info(&format!("  API Key: {}", if conversation_engine.has_api_key() { "✅ Available" } else { "❌ Missing" }));
+        self.ui.print_info(&format!("  Repository: {} files analyzed", self.repo_map.file_count()));
+        self.ui.print_info(&format!("  Conversation: {} messages", conversation_engine.get_message_count()));
+        self.ui.print_info(&format!("  Model: {}", self.config.ai.model));
+        self.ui.print_info(&conversation_engine.get_conversation_summary());
     }
 
     // Helper methods
@@ -498,205 +568,186 @@ impl CliApp {
         match language.as_str() {
             "rust" => {
                 let file_analysis = self.rust_analyzer.analyze_file(&content, &file_path.to_string_lossy()).await
-                    .context("Failed to analyze Rust file")?;
+                    .with_context(|| format!("Failed to analyze Rust file: {:?}", file_path))?;
                 Ok(file_analysis.tree_node)
-            },
+            }
             _ => {
-                anyhow::bail!("Unsupported language: {}", language);
+                Err(anyhow::anyhow!("Unsupported language: {}", language))
             }
         }
     }
 
     async fn save_cache(&self, _root_path: &Path) -> Result<()> {
-        if !self.config.cache.enabled {
-            return Ok(());
-        }
-
-        info!("Saving repository map to cache");
-        
-        // TODO: Implement actual caching once persistence layer is ready
+        // TODO: Implement cache saving
+        // For now, this is a placeholder
         if self.verbose {
-            self.print_info("Cache saving not yet implemented");
+            self.ui.print_info("Cache saving not yet implemented");
         }
-        
         Ok(())
     }
 
     fn print_scan_results(&self, result: &ScanResult) {
-        println!("\n{}", "Scan Results:".bold());
+        self.ui.print_success(&format!("Discovered {} files", result.files.len()));
         
-        println!("  Total files found: {}", result.total_files_found.to_string().cyan());
-        println!("  Files after filtering: {}", result.files.len().to_string().green());
-        println!("  Files filtered out: {}", result.total_files_filtered.to_string().yellow());
-        println!("  Scan duration: {:?}", result.scan_duration);
-        
-        if !result.languages_found.is_empty() {
-            println!("\n{}", "Languages found:".bold());
-            for (language, count) in &result.languages_found {
-                println!("  {}: {}", language.cyan(), count.to_string().green());
+        if self.verbose {
+            let mut language_counts = std::collections::HashMap::new();
+            for file in &result.files {
+                *language_counts.entry(&file.language).or_insert(0) += 1;
+            }
+            
+            for (language, count) in language_counts {
+                self.ui.print_info(&format!("  {}: {} files", language, count));
             }
         }
     }
 
-    fn format_function_results(&self, functions: Vec<&FunctionSignature>) -> Vec<String> {
+    // Convert methods for search results
+    fn convert_function_results(&self, functions: Vec<&FunctionSignature>) -> Vec<SearchResult> {
         functions.into_iter().map(|func| {
-            format!(
-                "{}fn {}{}\n  Lines: {}-{}",
-                if func.is_public { "pub " } else { "" }.green(),
-                func.name.cyan().bold(),
-                if func.parameters.is_empty() { 
-                    "()".to_string() 
-                } else { 
-                    format!("({})", func.parameters.len()) 
-                },
-                func.start_line, func.end_line
-            )
+            let signature = self.ui.formatter.format_function_signature(
+                &func.name,
+                &func.parameters.iter().map(|p| format!("{}: {}", p.name, p.param_type)).collect::<Vec<_>>(),
+                func.return_type.as_deref()
+            );
+            
+            SearchResult::new(
+                "function".to_string(),
+                signature,
+                "unknown".to_string(), // TODO: Add file_path to FunctionSignature
+                Some(func.start_line),
+            ).with_context(format!("Lines: {}-{}", func.start_line, func.end_line))
         }).collect()
     }
 
-    fn format_struct_results(&self, structs: Vec<&StructSignature>) -> Vec<String> {
+    fn convert_struct_results(&self, structs: Vec<&StructSignature>) -> Vec<SearchResult> {
         structs.into_iter().map(|s| {
-            format!(
-                "{}struct {}\n  Lines: {}-{}",
-                if s.is_public { "pub " } else { "" }.green(),
-                s.name.cyan().bold(),
-                s.start_line, s.end_line
-            )
+            let field_names: Vec<String> = s.fields.iter().map(|f| f.name.clone()).collect();
+            let signature = self.ui.formatter.format_struct_signature(&s.name, &field_names);
+            
+            SearchResult::new(
+                "struct".to_string(),
+                signature,
+                "unknown".to_string(), // TODO: Add file_path to StructSignature
+                Some(s.start_line),
+            ).with_context(format!("Lines: {}-{}, {} fields", s.start_line, s.end_line, s.fields.len()))
         }).collect()
     }
 
-    fn format_import_results(&self, imports: Vec<&ImportStatement>) -> Vec<String> {
+    fn convert_import_results(&self, imports: Vec<&ImportStatement>) -> Vec<SearchResult> {
         imports.into_iter().map(|import| {
-            format!(
-                "use {}\n  Line: {}",
-                import.module_path.cyan(),
-                import.line_number.to_string().dimmed()
+            SearchResult::new(
+                "import".to_string(),
+                format!("use {}", import.module_path),
+                "unknown".to_string(), // TODO: Add file_path to ImportStatement
+                Some(import.line_number),
             )
         }).collect()
     }
 
-    fn format_export_results(&self, exports: Vec<&ExportStatement>) -> Vec<String> {
+    fn convert_export_results(&self, exports: Vec<&ExportStatement>) -> Vec<SearchResult> {
         exports.into_iter().map(|export| {
-            format!(
-                "pub {}\n  Line: {}",
-                export.exported_item.cyan(),
-                export.line_number.to_string().dimmed()
+            SearchResult::new(
+                "export".to_string(),
+                format!("pub {}", export.exported_item),
+                "unknown".to_string(), // TODO: Add file_path to ExportStatement
+                Some(export.line_number),
             )
         }).collect()
     }
 
     fn display_analysis_text(&self, analysis: &TreeNode, args: &AnalyzeArgs) {
-        println!("{}", format!("File: {}", analysis.file_path).bold());
-        println!("Language: {}", analysis.language.cyan());
-        println!("Functions: {}", analysis.functions.len().to_string().green());
-        println!("Structs: {}", analysis.structs.len().to_string().green());
-        println!("Imports: {}", analysis.imports.len().to_string().green());
-        println!("Exports: {}", analysis.exports.len().to_string().green());
+        self.ui.print_info(&format!("File: {}", analysis.file_path));
+        self.ui.print_info(&format!("Language: {}", analysis.language));
+        self.ui.print_info(&format!("Functions: {}", analysis.functions.len()));
+        self.ui.print_info(&format!("Structs: {}", analysis.structs.len()));
+        self.ui.print_info(&format!("Imports: {}", analysis.imports.len()));
+        self.ui.print_info(&format!("Exports: {}", analysis.exports.len()));
         
         if args.functions || (!args.structs && !args.imports) {
             if !analysis.functions.is_empty() {
-                println!("\n{}", "Functions:".bold());
+                self.ui.print_header("Functions");
                 for func in &analysis.functions {
-                    println!("  {}fn {}", 
-                        if func.is_public { "pub " } else { "" }.green(),
-                        func.name.cyan()
+                    let signature = self.ui.formatter.format_function_signature(
+                        &func.name,
+                        &func.parameters.iter().map(|p| format!("{}: {}", p.name, p.param_type)).collect::<Vec<_>>(),
+                        func.return_type.as_deref()
                     );
+                    println!("  {}", signature);
                     if self.verbose && !func.parameters.is_empty() {
-                        println!("    Parameters: {}", func.parameters.len().to_string().yellow());
+                        self.ui.print_info(&format!("    Parameters: {}", func.parameters.len()));
                     }
-                    println!("    Lines: {}-{}", func.start_line, func.end_line);
+                    self.ui.print_info(&format!("    Lines: {}-{}", func.start_line, func.end_line));
                 }
             }
         }
 
         if args.structs || (!args.functions && !args.imports) {
             if !analysis.structs.is_empty() {
-                println!("\n{}", "Structs:".bold());
+                self.ui.print_header("Structs");
                 for s in &analysis.structs {
-                    println!("  {}struct {}", 
-                        if s.is_public { "pub " } else { "" }.green(),
-                        s.name.cyan()
-                    );
+                    let field_names: Vec<String> = s.fields.iter().map(|f| f.name.clone()).collect();
+                    let signature = self.ui.formatter.format_struct_signature(&s.name, &field_names);
+                    println!("  {}", signature);
                     if self.verbose && !s.fields.is_empty() {
-                        println!("    Fields: {}", s.fields.len().to_string().yellow());
+                        self.ui.print_info(&format!("    Fields: {}", s.fields.len()));
                     }
-                    println!("    Lines: {}-{}", s.start_line, s.end_line);
+                    self.ui.print_info(&format!("    Lines: {}-{}", s.start_line, s.end_line));
                 }
             }
         }
 
         if args.imports || (!args.functions && !args.structs) {
             if !analysis.imports.is_empty() {
-                println!("\n{}", "Imports:".bold());
+                self.ui.print_header("Imports");
                 for import in &analysis.imports {
-                    println!("  use {}", import.module_path.cyan());
+                    println!("  use {}", import.module_path);
                 }
             }
 
             if !analysis.exports.is_empty() {
-                println!("\n{}", "Exports:".bold());
+                self.ui.print_header("Exports");
                 for export in &analysis.exports {
-                    println!("  pub {}", export.exported_item.cyan());
+                    println!("  pub {}", export.exported_item);
                 }
             }
         }
     }
 
     fn display_analysis_tree(&self, analysis: &TreeNode) {
-        println!("{}", format!("📁 {}", analysis.file_path).bold());
+        println!("📁 {}", analysis.file_path);
         
         for func in &analysis.functions {
-            println!("├── 🔧 fn {}", func.name.cyan());
+            println!("├── 🔧 fn {}", func.name);
         }
         
         for s in &analysis.structs {
-            println!("├── 📦 struct {}", s.name.cyan());
+            println!("├── 📦 struct {}", s.name);
         }
         
         if !analysis.imports.is_empty() {
-            println!("└── 📥 {} imports", analysis.imports.len().to_string().yellow());
+            println!("└── 📥 {} imports", analysis.imports.len());
         }
     }
 
     // Utility methods for consistent output formatting
     fn print_header(&self, title: &str) {
-        if self.colors_enabled {
-            println!("\n{}", format!("=== {} ===", title).bold().cyan());
-        } else {
-            println!("\n=== {} ===", title);
-        }
+        self.ui.print_header(title);
     }
 
     fn print_success(&self, message: &str) {
-        if self.colors_enabled {
-            println!("{} {}", "✓".green(), message);
-        } else {
-            println!("✓ {}", message);
-        }
+        self.ui.print_success(message);
     }
 
     fn print_info(&self, message: &str) {
-        if self.colors_enabled {
-            println!("{} {}", "ℹ".blue(), message);
-        } else {
-            println!("ℹ {}", message);
-        }
+        self.ui.print_info(message);
     }
 
     fn print_warning(&self, message: &str) {
-        if self.colors_enabled {
-            eprintln!("{} {}", "⚠".yellow(), message);
-        } else {
-            eprintln!("⚠ {}", message);
-        }
+        self.ui.print_warning(message);
     }
 
     fn print_error(&self, message: &str) {
-        if self.colors_enabled {
-            eprintln!("{} {}", "✗".red(), message);
-        } else {
-            eprintln!("✗ {}", message);
-        }
+        self.ui.print_error(message);
     }
 }
 
@@ -919,8 +970,8 @@ struct PrivateStruct {
         let app = CliApp::new(config, false, false).await.unwrap();
         
         if let Some(engine) = &app.conversation_engine {
-            // This should not panic - use the static method
-            CliApp::print_status_static(engine, &app.repo_map, &app.config);
+            // This should not panic - use the instance method
+            app.print_status(engine);
         }
     }
 
@@ -928,12 +979,12 @@ struct PrivateStruct {
     async fn test_interactive_commands() {
         let app = CliApp::new(create_test_config(), false, false).await.unwrap();
         
-        // These should not panic - use the static method
-        CliApp::print_help_interactive();
+        // These should not panic - use the instance method
+        app.print_help_interactive();
     }
 
     #[test]
-    async fn test_format_function_results() {
+    async fn test_convert_function_results() {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
@@ -941,14 +992,14 @@ struct PrivateStruct {
             .with_visibility(true)
             .with_location(10, 20);
         
-        let results = app.format_function_results(vec![&func]);
+        let results = app.convert_function_results(vec![&func]);
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("test_func"));
-        assert!(results[0].contains("10-20"));
+        assert!(results[0].content.contains("test_func"));
+        assert!(results[0].context.as_ref().unwrap().contains("10-20"));
     }
 
     #[test]
-    async fn test_format_struct_results() {
+    async fn test_convert_struct_results() {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
@@ -956,38 +1007,38 @@ struct PrivateStruct {
             .with_visibility(true)
             .with_location(5, 15);
         
-        let results = app.format_struct_results(vec![&struct_def]);
+        let results = app.convert_struct_results(vec![&struct_def]);
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("TestStruct"));
-        assert!(results[0].contains("5-15"));
+        assert!(results[0].content.contains("TestStruct"));
+        assert!(results[0].context.as_ref().unwrap().contains("5-15"));
     }
 
     #[test]
-    async fn test_format_import_results() {
+    async fn test_convert_import_results() {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
         let import = ImportStatement::new("std::collections::HashMap".to_string())
             .with_line_number(1);
         
-        let results = app.format_import_results(vec![&import]);
+        let results = app.convert_import_results(vec![&import]);
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("std::collections::HashMap"));
-        assert!(results[0].contains("1"));
+        assert!(results[0].content.contains("std::collections::HashMap"));
+        assert_eq!(results[0].line, Some(1));
     }
 
     #[test]
-    async fn test_format_export_results() {
+    async fn test_convert_export_results() {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
         let export = ExportStatement::new("MyFunction".to_string())
             .with_line_number(10);
         
-        let results = app.format_export_results(vec![&export]);
+        let results = app.convert_export_results(vec![&export]);
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("MyFunction"));
-        assert!(results[0].contains("10"));
+        assert!(results[0].content.contains("MyFunction"));
+        assert_eq!(results[0].line, Some(10));
     }
 
     #[test]

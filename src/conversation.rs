@@ -30,14 +30,23 @@ impl ConversationEngine {
     }
 
     fn create_system_prompt() -> String {
-        r#"You are an AI assistant specialized in code analysis and repository understanding. You have access to local analysis tools that can help you understand codebases, search for functions and structures, analyze files, and explore dependencies.
+        r#"You are an AI assistant specialized in code analysis and repository understanding. You have access to powerful local analysis tools that can help you understand codebases, search for functions and structures, analyze files, and explore dependencies.
 
-When users ask about code, you should:
-1. Use the available tools to gather relevant information
-2. Provide clear, accurate analysis based on the tool results
-3. Explain code patterns, relationships, and potential issues
-4. Suggest improvements or alternatives when appropriate
-5. Ask clarifying questions if the user's request is ambiguous
+IMPORTANT: You MUST use the available tools to answer user questions. Don't just say you'll search - actually use the tools!
+
+When users ask about code, you should IMMEDIATELY use the appropriate tools:
+1. Use `analyze_file` to examine specific files (like src/anthropic.rs)
+2. Use `search_functions` to find functions by name pattern
+3. Use `search_structs` to find structs/classes by name pattern  
+4. Use `scan_repository` to analyze directories
+5. Use `get_dependencies` to understand file relationships
+6. Use `find_callers` to see where functions are called
+7. Use `get_repository_overview` to get high-level information
+
+For example, if someone asks "Where is the anthropic authentication code?":
+- FIRST use `analyze_file` with "src/anthropic.rs"
+- Then use `search_functions` with pattern "auth" or "api_key"
+- Provide clear, actionable analysis based on the tool results
 
 Available tools:
 - scan_repository: Scan a directory to analyze all code files
@@ -48,7 +57,7 @@ Available tools:
 - find_callers: Find where a function is called
 - get_repository_overview: Get high-level repository information
 
-Always be helpful, accurate, and provide actionable insights about the code."#.to_string()
+Always use tools first, then provide clear explanations based on the results."#.to_string()
     }
 
     pub async fn process_user_message(&mut self, user_input: &str) -> Result<String> {
@@ -66,6 +75,10 @@ Always be helpful, accurate, and provide actionable insights about the code."#.t
 
         // Get available tools
         let tools = self.local_tools.get_tool_schemas();
+        println!("🔧 DEBUG: Sending {} tools to Claude", tools.len());
+        for tool in &tools {
+            println!("🔧 DEBUG: Tool: {}", tool.name);
+        }
 
         // Send initial request to Claude
         let claude_response = self.claude_client.send_message(messages.clone(), tools).await?;
@@ -79,75 +92,92 @@ Always be helpful, accurate, and provide actionable insights about the code."#.t
         Ok(final_response)
     }
 
-    async fn process_claude_response(&self, response: crate::anthropic::ClaudeResponse) -> Result<String> {
-        let mut text_parts = Vec::new();
-        let mut tool_calls = Vec::new();
+    async fn process_claude_response(&self, initial_response: crate::anthropic::ClaudeResponse) -> Result<String> {
+        const MAX_ITERATIONS: usize = 8;
+        let mut current_response = initial_response;
+        let mut iteration = 0;
+        let mut accumulated_text = Vec::new();
 
-        // Extract text and tool calls from response
-        for content_block in response.content {
-            match content_block {
-                ContentBlock::Text { text } => {
-                    text_parts.push(text);
-                }
-                ContentBlock::ToolUse { id, name, input } => {
-                    tool_calls.push((id, name, input));
+        loop {
+            iteration += 1;
+            println!("🔧 DEBUG: Tool iteration {} of {}", iteration, MAX_ITERATIONS);
+
+            let mut text_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+
+            // Extract text and tool calls from current response
+            for content_block in current_response.content {
+                match content_block {
+                    ContentBlock::Text { text } => {
+                        text_parts.push(text);
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        println!("🔧 DEBUG: Tool call detected - {} with id: {}", name, id);
+                        tool_calls.push((id, name, input));
+                    }
                 }
             }
-        }
 
-        // If there are no tool calls, just return the text
-        if tool_calls.is_empty() {
-            return Ok(text_parts.join("\n"));
-        }
+            // Add any text from this response to accumulated text
+            if !text_parts.is_empty() {
+                accumulated_text.extend(text_parts.clone());
+            }
 
-        // Execute tool calls
-        let mut tool_results = Vec::new();
-        for (id, tool_name, input) in tool_calls {
-            let result = self.local_tools.execute_tool(&tool_name, input).await
-                .unwrap_or_else(|e| ToolResult::error(format!("Tool execution failed: {}", e)));
-            
-            tool_results.push((id, tool_name, result));
-        }
+            println!("🔧 DEBUG: Found {} tool calls in iteration {}", tool_calls.len(), iteration);
 
-        // Prepare follow-up message with tool results
-        let mut follow_up_messages = vec![
-            Message {
+            // If there are no tool calls, we're done
+            if tool_calls.is_empty() {
+                println!("🔧 DEBUG: No more tool calls, conversation complete after {} iterations", iteration);
+                return Ok(accumulated_text.join("\n"));
+            }
+
+            // Check max iterations
+            if iteration >= MAX_ITERATIONS {
+                println!("⚠️  WARNING: Reached maximum tool iterations ({}), stopping", MAX_ITERATIONS);
+                accumulated_text.push(format!("\n[Note: Reached maximum tool iterations ({}) - conversation truncated]", MAX_ITERATIONS));
+                return Ok(accumulated_text.join("\n"));
+            }
+
+            // Execute tool calls
+            let mut tool_results = Vec::new();
+            for (id, tool_name, input) in tool_calls {
+                let result = self.local_tools.execute_tool(&tool_name, input).await
+                    .unwrap_or_else(|e| ToolResult::error(format!("Tool execution failed: {}", e)));
+                
+                tool_results.push((id, tool_name, result));
+            }
+
+            // Prepare follow-up message with tool results
+            let mut follow_up_messages = vec![
+                Message {
+                    role: MessageRole::User,
+                    content: self.system_prompt.clone(),
+                }
+            ];
+            follow_up_messages.extend(self.context.get_messages());
+
+            // Add the assistant's response with tool calls
+            let assistant_content = if text_parts.is_empty() {
+                "I'll analyze this using the available tools.".to_string()
+            } else {
+                text_parts.join("\n")
+            };
+            follow_up_messages.push(Message {
+                role: MessageRole::Assistant,
+                content: assistant_content,
+            });
+
+            // Add tool results as user message
+            let tool_results_content = self.format_tool_results(&tool_results);
+            follow_up_messages.push(Message {
                 role: MessageRole::User,
-                content: self.system_prompt.clone(),
-            }
-        ];
-        follow_up_messages.extend(self.context.get_messages());
+                content: format!("Tool results:\n\n{}", tool_results_content),
+            });
 
-        // Add the assistant's response with tool calls
-        let assistant_content = if text_parts.is_empty() {
-            "I'll analyze this using the available tools.".to_string()
-        } else {
-            text_parts.join("\n")
-        };
-        follow_up_messages.push(Message {
-            role: MessageRole::Assistant,
-            content: assistant_content,
-        });
-
-        // Add tool results as user message
-        let tool_results_content = self.format_tool_results(&tool_results);
-        follow_up_messages.push(Message {
-            role: MessageRole::User,
-            content: format!("Tool results:\n\n{}", tool_results_content),
-        });
-
-        // Send follow-up request to get final response
-        let final_response = self.claude_client.send_message(follow_up_messages, vec![]).await?;
-
-        // Extract final text response
-        let mut final_text = Vec::new();
-        for content_block in final_response.content {
-            if let ContentBlock::Text { text } = content_block {
-                final_text.push(text);
-            }
+            // Send follow-up request WITH TOOLS AVAILABLE for next iteration
+            let tool_schemas = self.local_tools.get_tool_schemas();
+            current_response = self.claude_client.send_message(follow_up_messages, tool_schemas).await?;
         }
-
-        Ok(final_text.join("\n"))
     }
 
     fn format_tool_results(&self, tool_results: &[(String, String, ToolResult)]) -> String {
