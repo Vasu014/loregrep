@@ -1,5 +1,6 @@
 use super::themes::ColorTheme;
 use super::suggestions::Suggestion;
+use tabled::{Table, Tabled, settings::{Style, Alignment, Modify, Width, object::{Rows, Columns}}};
 
 /// Centralized output formatting with theme support
 pub struct OutputFormatter {
@@ -287,32 +288,69 @@ impl OutputFormatter {
         
         output.push_str(&self.format_success("Analysis Complete"));
         output.push('\n');
+        output.push('\n');
         
-        let stats = vec![
-            ("Files", file_count),
-            ("Functions", function_count),
-            ("Structs", struct_count),
-        ];
-        
-        for (label, count) in stats {
-            if self.colors_enabled {
-                output.push_str(&format!("  {}: {}",
-                    self.theme.format_muted(label),
-                    self.theme.format_number(&count.to_string())
-                ));
-            } else {
-                output.push_str(&format!("  {}: {}", label, count));
-            }
-            output.push('\n');
+        // Create table data
+        #[derive(Tabled)]
+        struct AnalysisRow {
+            #[tabled(rename = "Metric")]
+            metric: String,
+            #[tabled(rename = "Count")]
+            count: String,
+            #[tabled(rename = "Details")]
+            details: String,
         }
         
+        let rows = vec![
+            AnalysisRow {
+                metric: "Files Analyzed".to_string(),
+                count: file_count.to_string(),
+                details: if file_count == 1 { "file scanned".to_string() } else { "files scanned".to_string() },
+            },
+            AnalysisRow {
+                metric: "Functions Found".to_string(),
+                count: function_count.to_string(),
+                details: if function_count == 1 { "function extracted".to_string() } else { "functions extracted".to_string() },
+            },
+            AnalysisRow {
+                metric: "Structs Found".to_string(),
+                count: struct_count.to_string(),
+                details: if struct_count == 1 { "struct/type found".to_string() } else { "structs/types found".to_string() },
+            },
+            AnalysisRow {
+                metric: "Processing Time".to_string(),
+                count: format!("{:.2?}", duration),
+                details: "total analysis time".to_string(),
+            },
+        ];
+        
+        let mut table = Table::new(rows);
+        
+        // Apply styling with better column width control
+        table
+            .with(Style::rounded())
+            .with(Modify::new(Rows::first()).with(Alignment::center()))
+            .with(Modify::new(Columns::single(0)).with(Alignment::left()))
+            .with(Modify::new(Columns::single(1)).with(Alignment::center())) // Center align count for better look
+            .with(Modify::new(Columns::single(2)).with(Alignment::left()))
+            .with(Width::list([20, 10, 25])); // Set explicit column widths: Metric(20), Count(10), Details(25)
+        
+        // Apply colors if enabled
         if self.colors_enabled {
-            output.push_str(&format!("  {}: {}",
-                self.theme.format_muted("Duration"),
-                self.theme.format_muted(&format!("{:.2?}", duration))
-            ));
+            // For now, we'll add the table as-is since tabled doesn't directly support
+            // colored integration, but we can enhance this further
+            output.push_str("  ");
+            for line in table.to_string().lines() {
+                output.push_str(&self.theme.format_muted(line));
+                output.push('\n');
+            }
         } else {
-            output.push_str(&format!("  Duration: {:.2?}", duration));
+            // Indent the table
+            for line in table.to_string().lines() {
+                output.push_str("  ");
+                output.push_str(line);
+                output.push('\n');
+            }
         }
         
         output
@@ -767,6 +805,93 @@ impl OutputFormatter {
         }
         
         output
+    }
+
+    /// Create a beautifully formatted table with optional colors
+    pub fn format_table<T: Tabled>(&self, data: Vec<T>, title: Option<&str>) -> String {
+        let mut output = String::new();
+        
+        if let Some(title) = title {
+            output.push_str(&self.format_header(title));
+            output.push('\n');
+            output.push('\n');
+        }
+        
+        if data.is_empty() {
+            output.push_str(&self.theme.format_muted("  No data to display"));
+            output.push('\n');
+            return output;
+        }
+        
+        let mut table = Table::new(data);
+        
+        // Apply styling
+        table
+            .with(Style::rounded())
+            .with(Modify::new(Rows::first()).with(Alignment::center()))
+            .with(Modify::new(Columns::new(1..)).with(Alignment::left()));
+        
+        // Apply colors and indentation
+        if self.colors_enabled {
+            for line in table.to_string().lines() {
+                output.push_str("  ");
+                output.push_str(&self.theme.format_muted(line));
+                output.push('\n');
+            }
+        } else {
+            for line in table.to_string().lines() {
+                output.push_str("  ");
+                output.push_str(line);
+                output.push('\n');
+            }
+        }
+        
+        output
+    }
+
+    /// Format a simple key-value table
+    pub fn format_key_value_table(&self, data: Vec<(&str, &str)>, title: Option<&str>) -> String {
+        #[derive(Tabled)]
+        struct KeyValueRow {
+            #[tabled(rename = "Property")]
+            key: String,
+            #[tabled(rename = "Value")]
+            value: String,
+        }
+        
+        let rows: Vec<KeyValueRow> = data
+            .into_iter()
+            .map(|(k, v)| KeyValueRow {
+                key: k.to_string(),
+                value: v.to_string(),
+            })
+            .collect();
+        
+        self.format_table(rows, title)
+    }
+
+    /// Format search results as a table
+    pub fn format_search_results_table(&self, results: Vec<(&str, &str, u32)>, title: Option<&str>) -> String {
+        #[derive(Tabled)]
+        struct SearchResultRow {
+            #[tabled(rename = "Name")]
+            name: String,
+            #[tabled(rename = "File")]
+            file: String,
+            #[tabled(rename = "Line")]
+            line: String,
+        }
+        
+        let rows: Vec<SearchResultRow> = results
+            .into_iter()
+            .map(|(name, file, line)| SearchResultRow {
+                name: name.to_string(),
+                file: file.to_string(),
+                line: line.to_string(),
+            })
+            .collect();
+        
+        self.format_table(rows, title)
     }
 }
 
@@ -1321,4 +1446,4 @@ Final paragraph."#;
         let result = formatter.format_ai_response("   \n  \n   ");
         assert!(result.trim().is_empty() || result.chars().all(|c| c.is_whitespace()));
     }
-} 
+}
