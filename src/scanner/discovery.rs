@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
 
-use crate::config::FileScanningConfig;
+use crate::internal::config::FileScanningConfig;
 
 #[derive(Debug, Clone)]
 pub struct FileFilters {

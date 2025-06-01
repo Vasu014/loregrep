@@ -1,60 +1,32 @@
 use crate::{
     analyzers::{rust::RustAnalyzer, LanguageAnalyzer},
-    scanner::RepositoryScanner,
     storage::memory::RepoMap,
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
-use crate::anthropic::ToolSchema;
+use crate::internal::anthropic::ToolSchema;
 
 pub struct LocalAnalysisTools {
-    repo_map: Arc<RepoMap>,
-    scanner: RepositoryScanner,
+    repo_map: Arc<Mutex<RepoMap>>,
     rust_analyzer: RustAnalyzer,
 }
 
 impl LocalAnalysisTools {
     pub fn new(
-        repo_map: Arc<RepoMap>,
-        scanner: RepositoryScanner,
+        repo_map: Arc<Mutex<RepoMap>>,
         rust_analyzer: RustAnalyzer,
     ) -> Self {
         Self {
             repo_map,
-            scanner,
             rust_analyzer,
         }
     }
 
     pub fn get_tool_schemas(&self) -> Vec<ToolSchema> {
         vec![
-            ToolSchema {
-                name: "scan_repository".to_string(),
-                description: "Scan a repository directory to analyze all code files and build an index".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the repository directory to scan"
-                        },
-                        "include_patterns": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "File patterns to include (e.g., ['*.rs', '*.py'])"
-                        },
-                        "exclude_patterns": {
-                            "type": "array", 
-                            "items": {"type": "string"},
-                            "description": "File patterns to exclude (e.g., ['target/', '*.test.js'])"
-                        }
-                    },
-                    "required": ["path"]
-                }),
-            },
             ToolSchema {
                 name: "search_functions".to_string(),
                 description: "Search for functions by name pattern or regex across the analyzed codebase".to_string(),
@@ -154,38 +126,19 @@ impl LocalAnalysisTools {
                 }),
             },
             ToolSchema {
-                name: "get_repository_overview".to_string(),
-                description: "Get high-level repository information including metadata, file counts, and languages".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "include_file_list": {
-                            "type": "boolean",
-                            "description": "Whether to include a list of all files",
-                            "default": false
-                        },
-                        "include_tree": {
-                            "type": "boolean",
-                            "description": "Whether to include the repository tree structure",
-                            "default": false
-                        }
-                    }
-                })
-            },
-            ToolSchema {
                 name: "get_repository_tree".to_string(),
-                description: "Get the complete repository tree structure with directory hierarchy, file skeletons, and comprehensive statistics".to_string(),
+                description: "Get complete repository information including hierarchical directory structure, file details, statistics, and metadata. Use include_file_details=false and max_depth=1 for overview-style information, or full defaults for comprehensive repository analysis.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "include_file_details": {
                             "type": "boolean",
-                            "description": "Whether to include detailed file skeletons with functions and structs",
+                            "description": "Whether to include detailed file skeletons with functions and structs. Set to false for overview-style information.",
                             "default": true
                         },
                         "max_depth": {
                             "type": "integer",
-                            "description": "Maximum directory depth to include (0 for unlimited)",
+                            "description": "Maximum directory depth to include (0 for unlimited). Use 1 for overview-style information.",
                             "default": 0
                         }
                     }
@@ -196,41 +149,22 @@ impl LocalAnalysisTools {
 
     pub async fn execute_tool(&self, tool_name: &str, input: Value) -> Result<ToolResult> {
         match tool_name {
-            "scan_repository" => self.scan_repository(input).await,
             "search_functions" => self.search_functions(input).await,
             "search_structs" => self.search_structs(input).await,
             "analyze_file" => self.analyze_file(input).await,
             "get_dependencies" => self.get_dependencies(input).await,
             "find_callers" => self.find_callers(input).await,
-            "get_repository_overview" => self.get_repository_overview(input).await,
             "get_repository_tree" => self.get_repository_tree(input).await,
             _ => Ok(ToolResult::error(format!("Unknown tool: {}", tool_name))),
         }
-    }
-
-    async fn scan_repository(&self, input: Value) -> Result<ToolResult> {
-        let scan_input: ScanRepositoryInput = serde_json::from_value(input)
-            .context("Invalid scan_repository input")?;
-
-        // Note: In a real implementation, we would actually scan here
-        // For now, we'll return information about what would be scanned
-        let result = json!({
-            "status": "success",
-            "message": format!("Repository scan initiated for path: {}", scan_input.path),
-            "path": scan_input.path,
-            "include_patterns": scan_input.include_patterns.unwrap_or_default(),
-            "exclude_patterns": scan_input.exclude_patterns.unwrap_or_default(),
-            "note": "Actual scanning implementation would go here"
-        });
-
-        Ok(ToolResult::success(result))
     }
 
     async fn search_functions(&self, input: Value) -> Result<ToolResult> {
         let search_input: SearchFunctionsInput = serde_json::from_value(input)
             .context("Invalid search_functions input")?;
 
-        let results = self.repo_map.find_functions(&search_input.pattern);
+        let repo_map = self.repo_map.lock().unwrap();
+        let results = repo_map.find_functions(&search_input.pattern);
         let limited_results: Vec<_> = results.items
             .into_iter()
             .take(search_input.limit.unwrap_or(20))
@@ -250,7 +184,8 @@ impl LocalAnalysisTools {
         let search_input: SearchStructsInput = serde_json::from_value(input)
             .context("Invalid search_structs input")?;
 
-        let results = self.repo_map.find_structs(&search_input.pattern);
+        let repo_map = self.repo_map.lock().unwrap();
+        let results = repo_map.find_structs(&search_input.pattern);
         let limited_results: Vec<_> = results.items
             .into_iter()
             .take(search_input.limit.unwrap_or(20))
@@ -302,7 +237,7 @@ impl LocalAnalysisTools {
         let deps_input: GetDependenciesInput = serde_json::from_value(input)
             .context("Invalid get_dependencies input")?;
 
-        let dependencies = self.repo_map.get_file_dependencies(&deps_input.file_path);
+        let dependencies = self.repo_map.lock().unwrap().get_file_dependencies(&deps_input.file_path);
 
         let result = json!({
             "status": "success",
@@ -317,7 +252,7 @@ impl LocalAnalysisTools {
         let callers_input: FindCallersInput = serde_json::from_value(input)
             .context("Invalid find_callers input")?;
 
-        let callers = self.repo_map.find_function_callers(&callers_input.function_name);
+        let callers = self.repo_map.lock().unwrap().find_function_callers(&callers_input.function_name);
         let limited_callers: Vec<_> = callers
             .into_iter()
             .take(callers_input.limit.unwrap_or(50))
@@ -333,46 +268,6 @@ impl LocalAnalysisTools {
         Ok(ToolResult::success(result))
     }
 
-    async fn get_repository_overview(&self, input: Value) -> Result<ToolResult> {
-        let overview_input: GetRepositoryOverviewInput = serde_json::from_value(input).unwrap_or_default();
-
-        let metadata = self.repo_map.get_metadata();
-        let total_files = self.repo_map.file_count();
-        let languages: Vec<String> = metadata.languages.iter().cloned().collect();
-
-        let mut result = json!({
-            "status": "success",
-            "total_files": total_files,
-            "languages": languages,
-            "metadata": metadata
-        });
-
-        // Include repository tree structure if requested or if files are few enough
-        let include_tree = overview_input.include_tree.unwrap_or(total_files <= 50);
-        if include_tree {
-            // We need to create a mutable reference to get the repository tree
-            // For now, we'll include a note about tree availability
-            result.as_object_mut().unwrap().insert(
-                "repository_tree_available".to_string(), 
-                json!(true)
-            );
-            result.as_object_mut().unwrap().insert(
-                "note".to_string(), 
-                json!("Repository tree structure available - use get_repository_tree for detailed structure")
-            );
-        }
-
-        if overview_input.include_file_list.unwrap_or(false) {
-            let files: Vec<_> = self.repo_map.get_all_files()
-                .iter()
-                .map(|f| f.file_path.clone())
-                .collect();
-            result.as_object_mut().unwrap().insert("files".to_string(), json!(files));
-        }
-
-        Ok(ToolResult::success(result))
-    }
-
     async fn get_repository_tree(&self, input: Value) -> Result<ToolResult> {
         let tree_input: GetRepositoryTreeInput = serde_json::from_value(input)
             .unwrap_or_else(|_| GetRepositoryTreeInput {
@@ -380,75 +275,167 @@ impl LocalAnalysisTools {
                 max_depth: None,
             });
 
-        // For now, we'll provide a structured overview of the repository
-        // In a future enhancement, we could add interior mutability to RepoMap
-        // to allow building the tree from immutable references
-        
-        let metadata = self.repo_map.get_metadata();
-        let all_files = self.repo_map.get_all_files();
-        
-        // Build a simplified tree structure from current data
-        let mut file_structure: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        let mut directory_stats: std::collections::HashMap<String, (usize, u32)> = std::collections::HashMap::new();
-        
-        for file in all_files {
-            let path = std::path::Path::new(&file.file_path);
-            let dir_path = path.parent()
-                .unwrap_or_else(|| std::path::Path::new("/"))
-                .to_string_lossy()
-                .to_string();
-            
-            let file_name = path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            
-            file_structure.entry(dir_path.clone())
-                .or_insert_with(Vec::new)
-                .push(file_name);
-            
-            let stats = directory_stats.entry(dir_path).or_insert((0, 0));
-            stats.0 += 1; // file count
-            // Estimate lines based on content since line_count is not available
-            let estimated_lines = (file.functions.len() * 10 + file.structs.len() * 5) as u32;
-            stats.1 += estimated_lines; // estimated line count
-        }
-        
-        let include_details = tree_input.include_file_details.unwrap_or(true);
-        let tree_structure = if include_details {
-            json!({
-                "directories": file_structure,
-                "directory_stats": directory_stats,
-                "file_details": all_files.iter().map(|f| {
-                    let estimated_lines = (f.functions.len() * 10 + f.structs.len() * 5) as u32;
-                    json!({
-                        "path": f.file_path,
-                        "language": f.language,
-                        "functions": f.functions.len(),
-                        "structs": f.structs.len(),
-                        "imports": f.imports.len(),
-                        "exports": f.exports.len(),
-                        "estimated_line_count": estimated_lines
-                    })
-                }).collect::<Vec<_>>()
-            })
-        } else {
-            json!({
-                "directories": file_structure,
-                "directory_stats": directory_stats
-            })
+        // Get the actual repository tree structure from repo_map
+        // This will build the full hierarchical structure if it doesn't exist
+        let (repository_tree_opt, file_count, metadata) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            (
+                repo_map.get_repository_tree(),
+                repo_map.file_count(),
+                repo_map.get_metadata().clone()
+            )
         };
 
-        let result = json!({
-            "status": "success",
-            "total_files": all_files.len(),
-            "total_directories": file_structure.len(),
-            "metadata": metadata,
-            "tree_structure": tree_structure,
-            "note": "Enhanced repository tree with full hierarchy will be available in future updates"
-        });
+        match repository_tree_opt {
+            Some(repository_tree) => {
+                // Apply depth filtering if requested
+                let filtered_tree_root = if let Some(max_depth) = tree_input.max_depth {
+                    if max_depth > 0 {
+                        self.apply_depth_filter(&repository_tree.root, max_depth)
+                    } else {
+                        repository_tree.root.clone()
+                    }
+                } else {
+                    repository_tree.root.clone()
+                };
 
-        Ok(ToolResult::success(result))
+                // Apply file detail filtering if requested
+                let final_tree_root = if tree_input.include_file_details.unwrap_or(true) {
+                    filtered_tree_root
+                } else {
+                    self.remove_file_details(&filtered_tree_root)
+                };
+
+                let result = json!({
+                    "status": "success",
+                    "repository_tree": final_tree_root,
+                    "metadata": {
+                        "total_files": final_tree_root.file_count,
+                        "total_lines": final_tree_root.total_lines,
+                        "languages": final_tree_root.languages.iter().collect::<Vec<_>>(),
+                        "root_path": final_tree_root.path,
+                        "include_file_details": tree_input.include_file_details.unwrap_or(true),
+                        "max_depth": tree_input.max_depth
+                    }
+                });
+
+                Ok(ToolResult::success(result))
+            }
+            None => {
+                // Instead of returning an error, provide useful information about the empty repository
+                let result = json!({
+                    "status": "success",
+                    "repository_tree": {
+                        "name": "empty_repository",
+                        "path": ".",
+                        "children": [],
+                        "file_count": 0,
+                        "total_lines": 0,
+                        "languages": []
+                    },
+                    "metadata": {
+                        "total_files": file_count,
+                        "total_lines": 0,
+                        "languages": metadata.languages.iter().collect::<Vec<_>>(),
+                        "root_path": ".",
+                        "include_file_details": tree_input.include_file_details.unwrap_or(true),
+                        "max_depth": tree_input.max_depth,
+                        "note": "Repository is empty. Files need to be analyzed through the CLI scan command before they appear in the repository tree.",
+                        "available_files": file_count
+                    }
+                });
+                Ok(ToolResult::success(result))
+            }
+        }
+    }
+
+    /// Apply depth filtering to repository tree
+    fn apply_depth_filter(&self, tree: &crate::storage::memory::DirectoryNode, max_depth: usize) -> crate::storage::memory::DirectoryNode {
+        self.apply_depth_filter_recursive(tree, max_depth, 0)
+    }
+
+    fn apply_depth_filter_recursive(&self, node: &crate::storage::memory::DirectoryNode, max_depth: usize, current_depth: usize) -> crate::storage::memory::DirectoryNode {
+        let mut filtered_node = crate::storage::memory::DirectoryNode {
+            name: node.name.clone(),
+            path: node.path.clone(),
+            children: Vec::new(),
+            file_count: 0,
+            total_lines: 0,
+            languages: std::collections::HashSet::new(),
+        };
+
+        if current_depth < max_depth {
+            for child in &node.children {
+                match child {
+                    crate::storage::memory::RepositoryTreeNode::File(file_node) => {
+                        filtered_node.children.push(crate::storage::memory::RepositoryTreeNode::File(file_node.clone()));
+                        filtered_node.file_count += 1;
+                        filtered_node.total_lines += file_node.skeleton.line_count;
+                        if !file_node.skeleton.language.is_empty() {
+                            filtered_node.languages.insert(file_node.skeleton.language.clone());
+                        }
+                    }
+                    crate::storage::memory::RepositoryTreeNode::Directory(dir_node) => {
+                        let filtered_subdir = self.apply_depth_filter_recursive(dir_node, max_depth, current_depth + 1);
+                        filtered_node.file_count += filtered_subdir.file_count;
+                        filtered_node.total_lines += filtered_subdir.total_lines;
+                        for lang in &filtered_subdir.languages {
+                            filtered_node.languages.insert(lang.clone());
+                        }
+                        filtered_node.children.push(crate::storage::memory::RepositoryTreeNode::Directory(filtered_subdir));
+                    }
+                }
+            }
+        }
+
+        filtered_node
+    }
+
+    /// Remove file details (skeletons) from tree to provide just structure
+    fn remove_file_details(&self, tree: &crate::storage::memory::DirectoryNode) -> crate::storage::memory::DirectoryNode {
+        let mut simplified_node = crate::storage::memory::DirectoryNode {
+            name: tree.name.clone(),
+            path: tree.path.clone(),
+            children: Vec::new(),
+            file_count: tree.file_count,
+            total_lines: tree.total_lines,
+            languages: tree.languages.clone(),
+        };
+
+        for child in &tree.children {
+            match child {
+                crate::storage::memory::RepositoryTreeNode::File(file_node) => {
+                    // Create a simplified file node without detailed skeleton
+                    let simplified_skeleton = crate::storage::memory::FileSkeleton {
+                        path: file_node.skeleton.path.clone(),
+                        language: file_node.skeleton.language.clone(),
+                        size_bytes: file_node.skeleton.size_bytes,
+                        line_count: file_node.skeleton.line_count,
+                        functions: Vec::new(), // Remove function details
+                        structs: Vec::new(),   // Remove struct details
+                        imports: Vec::new(),   // Remove import details
+                        exports: Vec::new(),   // Remove export details
+                        is_public: file_node.skeleton.is_public,
+                        is_test: file_node.skeleton.is_test,
+                        last_modified: file_node.skeleton.last_modified,
+                    };
+
+                    let simplified_file = crate::storage::memory::FileNode {
+                        name: file_node.name.clone(),
+                        path: file_node.path.clone(),
+                        skeleton: simplified_skeleton,
+                    };
+
+                    simplified_node.children.push(crate::storage::memory::RepositoryTreeNode::File(simplified_file));
+                }
+                crate::storage::memory::RepositoryTreeNode::Directory(dir_node) => {
+                    let simplified_subdir = self.remove_file_details(dir_node);
+                    simplified_node.children.push(crate::storage::memory::RepositoryTreeNode::Directory(simplified_subdir));
+                }
+            }
+        }
+
+        simplified_node
     }
 }
 
@@ -487,13 +474,6 @@ impl ToolResult {
 
 // Input types for tool functions
 #[derive(Debug, Deserialize)]
-struct ScanRepositoryInput {
-    path: String,
-    include_patterns: Option<Vec<String>>,
-    exclude_patterns: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
 struct SearchFunctionsInput {
     pattern: String,
     limit: Option<usize>,
@@ -525,12 +505,6 @@ struct FindCallersInput {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct GetRepositoryOverviewInput {
-    include_file_list: Option<bool>,
-    include_tree: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
 struct GetRepositoryTreeInput {
     include_file_details: Option<bool>,
     max_depth: Option<usize>,
@@ -539,23 +513,11 @@ struct GetRepositoryTreeInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FileScanningConfig;
+    use crate::internal::config::FileScanningConfig;
 
     // Helper to create minimal test instances
-    fn create_test_repo_map() -> Arc<RepoMap> {
-        Arc::new(RepoMap::new())
-    }
-
-    fn create_test_scanner() -> RepositoryScanner {
-        // Create with minimal config
-        let config = FileScanningConfig {
-            include_patterns: vec!["*.rs".to_string()],
-            exclude_patterns: vec![],
-            max_file_size: 1024 * 1024,
-            follow_symlinks: false,
-            max_depth: Some(10),
-        };
-        RepositoryScanner::new(&config, None).unwrap()
+    fn create_test_repo_map() -> Arc<Mutex<RepoMap>> {
+        Arc::new(Mutex::new(RepoMap::new()))
     }
 
     fn create_test_analyzer() -> RustAnalyzer {
@@ -564,10 +526,9 @@ mod tests {
 
     fn create_mock_tools() -> LocalAnalysisTools {
         let repo_map = create_test_repo_map();
-        let scanner = create_test_scanner();
         let rust_analyzer = create_test_analyzer();
         
-        LocalAnalysisTools::new(repo_map, scanner, rust_analyzer)
+        LocalAnalysisTools::new(repo_map, rust_analyzer)
     }
 
     // === Tool Schema Tests ===
@@ -577,16 +538,14 @@ mod tests {
         let tools = create_mock_tools();
         let schemas = tools.get_tool_schemas();
         
-        assert_eq!(schemas.len(), 8, "Should have exactly 8 tool schemas");
+        assert_eq!(schemas.len(), 6, "Should have exactly 6 tool schemas");
         
         let tool_names: Vec<_> = schemas.iter().map(|s| &s.name).collect();
-        assert!(tool_names.contains(&&"scan_repository".to_string()));
         assert!(tool_names.contains(&&"search_functions".to_string()));
         assert!(tool_names.contains(&&"search_structs".to_string()));
         assert!(tool_names.contains(&&"analyze_file".to_string()));
         assert!(tool_names.contains(&&"get_dependencies".to_string()));
         assert!(tool_names.contains(&&"find_callers".to_string()));
-        assert!(tool_names.contains(&&"get_repository_overview".to_string()));
         assert!(tool_names.contains(&&"get_repository_tree".to_string()));
     }
 
@@ -605,51 +564,6 @@ mod tests {
             assert_eq!(input_schema.get("type").unwrap(), "object");
             assert!(input_schema.contains_key("properties"));
         }
-    }
-
-    // === Scan Repository Tests ===
-
-    #[tokio::test]
-    async fn test_scan_repository_tool() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "path": "/test/path",
-            "include_patterns": ["*.rs"],
-            "exclude_patterns": ["target/"]
-        });
-
-        let result = tools.execute_tool("scan_repository", input).await.unwrap();
-        assert!(result.success);
-        assert_eq!(result.data["status"], "success");
-        assert_eq!(result.data["path"], "/test/path");
-        assert_eq!(result.data["include_patterns"].as_array().unwrap().len(), 1);
-        assert_eq!(result.data["exclude_patterns"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_scan_repository_minimal_input() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "path": "/minimal/path"
-        });
-
-        let result = tools.execute_tool("scan_repository", input).await.unwrap();
-        assert!(result.success);
-        assert_eq!(result.data["status"], "success");
-        assert_eq!(result.data["path"], "/minimal/path");
-        assert!(result.data["include_patterns"].as_array().unwrap().is_empty());
-        assert!(result.data["exclude_patterns"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_scan_repository_invalid_input() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "invalid_field": "value"
-        });
-
-        let result = tools.execute_tool("scan_repository", input).await;
-        assert!(result.is_err());
     }
 
     // === Search Functions Tests ===
@@ -852,49 +766,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // === Repository Overview Tests ===
-
-    #[tokio::test]
-    async fn test_get_repository_overview_tool() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "include_file_list": false
-        });
-
-        let result = tools.execute_tool("get_repository_overview", input).await.unwrap();
-        assert!(result.success);
-        assert_eq!(result.data["status"], "success");
-        assert!(result.data.get("total_files").is_some());
-        assert!(result.data.get("languages").is_some());
-        assert!(result.data.get("metadata").is_some());
-        assert!(!result.data.get("files").is_some()); // Should not include files
-    }
-
-    #[tokio::test]
-    async fn test_get_repository_overview_with_file_list() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "include_file_list": true,
-            "include_tree": false
-        });
-
-        let result = tools.execute_tool("get_repository_overview", input).await.unwrap();
-        assert!(result.success);
-        assert!(result.data.get("files").is_some()); // Should include files
-        assert!(result.data["files"].is_array());
-    }
-
-    #[tokio::test]
-    async fn test_get_repository_overview_empty_input() {
-        let tools = create_mock_tools();
-        let input = json!({});
-
-        let result = tools.execute_tool("get_repository_overview", input).await.unwrap();
-        assert!(result.success);
-        assert_eq!(result.data["status"], "success");
-        assert!(result.data.get("total_files").is_some());
-    }
-
     // === Repository Tree Tests ===
 
     #[tokio::test]
@@ -908,10 +779,15 @@ mod tests {
         let result = tools.execute_tool("get_repository_tree", input).await.unwrap();
         assert!(result.success);
         assert_eq!(result.data["status"], "success");
-        assert!(result.data.get("total_files").is_some());
-        assert!(result.data.get("total_directories").is_some());
+        assert!(result.data.get("repository_tree").is_some());
         assert!(result.data.get("metadata").is_some());
-        assert!(result.data.get("tree_structure").is_some());
+        
+        let metadata = &result.data["metadata"];
+        assert!(metadata.get("total_files").is_some());
+        assert!(metadata.get("total_lines").is_some());
+        assert!(metadata.get("languages").is_some());
+        assert_eq!(metadata["max_depth"], 3);
+        assert_eq!(metadata["include_file_details"], true);
     }
 
     #[tokio::test]
@@ -923,10 +799,11 @@ mod tests {
 
         let result = tools.execute_tool("get_repository_tree", input).await.unwrap();
         assert!(result.success);
-        let tree_structure = &result.data["tree_structure"];
-        assert!(tree_structure.get("directories").is_some());
-        assert!(tree_structure.get("directory_stats").is_some());
-        assert!(!tree_structure.get("file_details").is_some()); // Should not include file details
+        assert!(result.data.get("repository_tree").is_some());
+        
+        let metadata = &result.data["metadata"];
+        assert_eq!(metadata["include_file_details"], false);
+        // Since we're using simplified tree without details, the structure should be simpler
     }
 
     #[tokio::test]
@@ -937,9 +814,13 @@ mod tests {
         let result = tools.execute_tool("get_repository_tree", input).await.unwrap();
         assert!(result.success);
         assert_eq!(result.data["status"], "success");
+        assert!(result.data.get("repository_tree").is_some());
+        assert!(result.data.get("metadata").is_some());
+        
+        let metadata = &result.data["metadata"];
         // Should use defaults: include_file_details = true, max_depth = None
-        let tree_structure = &result.data["tree_structure"];
-        assert!(tree_structure.get("file_details").is_some()); // Should include file details by default
+        assert_eq!(metadata["include_file_details"], true);
+        assert!(metadata["max_depth"].is_null());
     }
 
     // === Error Handling Tests ===
@@ -1010,25 +891,21 @@ mod tests {
     async fn test_all_tools_execute_without_panic() {
         let tools = create_mock_tools();
         let tool_names = vec![
-            "scan_repository",
             "search_functions", 
             "search_structs",
             "analyze_file",
             "get_dependencies",
             "find_callers",
-            "get_repository_overview",
             "get_repository_tree"
         ];
 
         for tool_name in tool_names {
             let minimal_input = match tool_name {
-                "scan_repository" => json!({"path": "/test"}),
                 "search_functions" => json!({"pattern": "test"}),
                 "search_structs" => json!({"pattern": "Test"}),
                 "analyze_file" => json!({"file_path": "/test.rs"}),
                 "get_dependencies" => json!({"file_path": "/test.rs"}),
                 "find_callers" => json!({"function_name": "test"}),
-                "get_repository_overview" => json!({}),
                 "get_repository_tree" => json!({}),
                 _ => json!({})
             };

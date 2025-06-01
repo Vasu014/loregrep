@@ -936,8 +936,8 @@ impl SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::themes::{ColorTheme, ThemeType};
-    use crate::ui::suggestions::{Suggestion, SuggestionPriority, SuggestionType};
+    use crate::internal::ui::themes::{ColorTheme, ThemeType};
+    use crate::internal::ui::suggestions::{Suggestion, SuggestionPriority, SuggestionType};
 
     fn create_test_formatter(colors_enabled: bool) -> OutputFormatter {
         let theme = ColorTheme::new(ThemeType::Dark);

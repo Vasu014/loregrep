@@ -8,6 +8,8 @@ use std::time::SystemTime;
 use regex::Regex;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use serde::{Serialize, Deserialize};
+use anyhow::Context;
+use std::sync::RwLock;
 
 // Create our own Result type alias for this module  
 type Result<T> = std::result::Result<T, AnalysisError>;
@@ -156,13 +158,13 @@ impl Default for RepoMapMetadata {
 }
 
 /// Enhanced RepoMap with fast lookups and comprehensive indexing
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RepoMap {
     // Core data
     files: Vec<TreeNode>,
     
-    // Repository tree structure
-    repository_tree: Option<RepositoryTree>,
+    // Repository tree structure (uses RwLock for interior mutability)
+    repository_tree: RwLock<Option<RepositoryTree>>,
     
     // Fast indexes
     file_index: HashMap<String, usize>,                    // file_path -> index
@@ -186,6 +188,29 @@ pub struct RepoMap {
     cache_ttl_seconds: u64,
 }
 
+impl Clone for RepoMap {
+    fn clone(&self) -> Self {
+        // Clone the repository tree by reading it
+        let repository_tree_clone = self.repository_tree.read().unwrap().clone();
+        
+        Self {
+            files: self.files.clone(),
+            repository_tree: RwLock::new(repository_tree_clone),
+            file_index: self.file_index.clone(),
+            function_index: self.function_index.clone(),
+            struct_index: self.struct_index.clone(),
+            import_index: self.import_index.clone(),
+            export_index: self.export_index.clone(),
+            language_index: self.language_index.clone(),
+            call_graph: self.call_graph.clone(),
+            metadata: self.metadata.clone(),
+            max_files: self.max_files,
+            query_cache: self.query_cache.clone(),
+            cache_ttl_seconds: self.cache_ttl_seconds,
+        }
+    }
+}
+
 impl Default for RepoMap {
     fn default() -> Self {
         Self::new()
@@ -196,7 +221,7 @@ impl RepoMap {
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
-            repository_tree: None,
+            repository_tree: RwLock::new(None),
             file_index: HashMap::new(),
             function_index: HashMap::new(),
             struct_index: HashMap::new(),
@@ -251,7 +276,7 @@ impl RepoMap {
         self.query_cache.clear();
         
         // Invalidate repository tree - will be rebuilt when next accessed
-        self.repository_tree = None;
+        self.repository_tree.write().unwrap().take();
         
         Ok(())
     }
@@ -264,7 +289,7 @@ impl RepoMap {
             self.query_cache.clear();
             
             // Invalidate repository tree - will be rebuilt when next accessed
-            self.repository_tree = None;
+            self.repository_tree.write().unwrap().take();
             
             Ok(true)
         } else {
@@ -405,6 +430,7 @@ impl RepoMap {
 
         let duration = start_time.elapsed().as_millis() as u64;
         let len = results.len();
+        //println!("find_structs: {:?}", results);
         QueryResult::new(results, len, duration)
     }
 
@@ -567,11 +593,26 @@ impl RepoMap {
     }
 
     /// Get the repository tree (building it if necessary)
-    pub fn get_repository_tree(&mut self) -> Result<&RepositoryTree> {
-        if self.repository_tree.is_none() {
+    pub fn get_repository_tree(&self) -> Option<RepositoryTree> {
+        // First try to read existing tree
+        if let Ok(tree_guard) = self.repository_tree.read() {
+            if tree_guard.is_some() {
+                return tree_guard.clone();
+            }
+        }
+        
+        // If tree doesn't exist, we need to build it
+        // Since we can't mutate self in this immutable method, return None
+        // The caller should use build_repository_tree_if_needed instead
+        None
+    }
+    
+    /// Build repository tree if it doesn't exist (for mutable access)
+    pub fn build_repository_tree_if_needed(&mut self) -> Result<()> {
+        if self.repository_tree.read().unwrap().is_none() {
             self.build_repository_tree()?;
         }
-        Ok(self.repository_tree.as_ref().unwrap())
+        Ok(())
     }
 
     /// Build the complete repository tree structure from current files
@@ -635,11 +676,13 @@ impl RepoMap {
         let summary = self.generate_repository_summary()?;
         
         // Create repository tree
-        self.repository_tree = Some(RepositoryTree {
+        let repository_tree = RepositoryTree {
             root,
             summary,
             generated_at: SystemTime::now(),
-        });
+        };
+        
+        *self.repository_tree.write().unwrap() = Some(repository_tree);
         
         Ok(())
     }
@@ -709,14 +752,57 @@ impl RepoMap {
         mut directory_map: HashMap<String, DirectoryNode>,
         file_nodes: Vec<FileNode>
     ) -> Result<DirectoryNode> {
-        // Find or create root directory
+        // Find the common root path for all files
         let root_path = self.find_common_root_path();
+        
+        // Build a proper nested directory structure
+        let mut path_to_node: HashMap<String, DirectoryNode> = HashMap::new();
+        
+        // First, ensure all directory paths exist
+        let mut all_dir_paths: HashSet<String> = HashSet::new();
+        
+        // Collect all directory paths from files
+        for file_node in &file_nodes {
+            let mut current_path = std::path::Path::new(&file_node.path);
+            while let Some(parent) = current_path.parent() {
+                let parent_str = parent.to_string_lossy().to_string();
+                if parent_str != root_path {
+                    all_dir_paths.insert(parent_str);
+                }
+                current_path = parent;
+            }
+        }
+        
+        // Create directory nodes for all paths
+        for dir_path in &all_dir_paths {
+            let dir_name = std::path::Path::new(dir_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            
+            // Check if we already have this directory from the directory_map
+            let dir_node = directory_map.remove(dir_path).unwrap_or_else(|| {
+                DirectoryNode {
+                    name: dir_name,
+                    path: dir_path.clone(),
+                    children: Vec::new(),
+                    file_count: 0,
+                    total_lines: 0,
+                    languages: HashSet::new(),
+                }
+            });
+            
+            path_to_node.insert(dir_path.clone(), dir_node);
+        }
+        
+        // Create root directory
         let root_name = std::path::Path::new(&root_path)
             .file_name()
             .unwrap_or_else(|| std::path::Path::new(&root_path).as_os_str())
             .to_string_lossy()
             .to_string();
-        
+            
         let mut root = directory_map.remove(&root_path).unwrap_or_else(|| {
             DirectoryNode {
                 name: if root_name.is_empty() { "root".to_string() } else { root_name },
@@ -737,23 +823,77 @@ impl RepoMap {
                 .to_string();
             
             if file_dir_path == root_path {
+                // File belongs directly in root - update stats before moving
+                root.file_count += 1;
+                if let Some(lang) = self.get_file_language(&file_node.skeleton) {
+                    root.languages.insert(lang);
+                }
+                root.total_lines += file_node.skeleton.line_count;
                 root.children.push(RepositoryTreeNode::File(file_node));
-            } else {
-                // Add to appropriate subdirectory (simplified - in a full implementation
-                // we'd need to handle nested directory hierarchies)
-                if let Some(mut dir_node) = directory_map.remove(&file_dir_path) {
-                    dir_node.children.push(RepositoryTreeNode::File(file_node));
-                    root.children.push(RepositoryTreeNode::Directory(dir_node));
+            } else if let Some(dir_node) = path_to_node.get_mut(&file_dir_path) {
+                // File belongs in a subdirectory - update stats before moving
+                dir_node.file_count += 1;
+                if let Some(lang) = self.get_file_language(&file_node.skeleton) {
+                    dir_node.languages.insert(lang);
+                }
+                dir_node.total_lines += file_node.skeleton.line_count;
+                dir_node.children.push(RepositoryTreeNode::File(file_node));
+            }
+        }
+        
+        // Now build the nested structure by organizing directories hierarchically
+        // Sort paths by depth (shallowest first) to ensure proper nesting
+        let mut sorted_paths: Vec<_> = all_dir_paths.into_iter().collect();
+        sorted_paths.sort_by_key(|path| path.matches('/').count());
+        
+        // Process directories from deepest to shallowest to build bottom-up
+        for dir_path in sorted_paths.iter().rev() {
+            if let Some(dir_node) = path_to_node.remove(dir_path) {
+                // Find this directory's parent
+                let parent_path = std::path::Path::new(dir_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string());
+                
+                match parent_path {
+                    Some(parent_path) if parent_path == root_path => {
+                        // This directory's parent is root - update stats before moving
+                        root.file_count += dir_node.file_count;
+                        root.total_lines += dir_node.total_lines;
+                        for lang in &dir_node.languages {
+                            root.languages.insert(lang.clone());
+                        }
+                        root.children.push(RepositoryTreeNode::Directory(dir_node));
+                    }
+                    Some(parent_path) => {
+                        // This directory has another directory as parent
+                        if let Some(parent_node) = path_to_node.get_mut(&parent_path) {
+                            // Update parent stats before moving
+                            parent_node.file_count += dir_node.file_count;
+                            parent_node.total_lines += dir_node.total_lines;
+                            for lang in &dir_node.languages {
+                                parent_node.languages.insert(lang.clone());
+                            }
+                            parent_node.children.push(RepositoryTreeNode::Directory(dir_node));
+                        }
+                    }
+                    None => {
+                        // This shouldn't happen, but fallback to root
+                        root.children.push(RepositoryTreeNode::Directory(dir_node));
+                    }
                 }
             }
         }
         
-        // Add remaining directories as subdirectories
-        for (_, dir_node) in directory_map {
-            root.children.push(RepositoryTreeNode::Directory(dir_node));
-        }
-        
         Ok(root)
+    }
+    
+    /// Helper to extract language from file skeleton
+    fn get_file_language(&self, skeleton: &FileSkeleton) -> Option<String> {
+        if skeleton.language.is_empty() {
+            None
+        } else {
+            Some(skeleton.language.clone())
+        }
     }
 
     /// Find the common root path of all files
@@ -867,14 +1007,17 @@ impl RepoMap {
 
     /// Force rebuild of repository tree (useful when files are added/removed)
     pub fn rebuild_repository_tree(&mut self) -> Result<()> {
-        self.repository_tree = None;
+        self.repository_tree.write().unwrap().take();
         self.build_repository_tree()
     }
 
     /// Get repository tree as JSON for AI tools
-    pub fn get_repository_tree_json(&mut self) -> Result<serde_json::Value> {
-        let tree = self.get_repository_tree()?;
-        Ok(serde_json::to_value(tree)?)
+    pub fn get_repository_tree_json(&self) -> Result<serde_json::Value> {
+        if let Some(tree) = self.get_repository_tree() {
+            Ok(serde_json::to_value(tree)?)
+        } else {
+            Err(AnalysisError::Other("Repository tree not available".to_string()))
+        }
     }
 
     // Private helper methods

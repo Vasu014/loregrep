@@ -161,4 +161,9 @@ test-output/
 
 # Backup files
 *.bak
-*.backup 
+*.backup
+
+# Test repositories and testing files
+test-repos/
+TESTING_REPOS.md
+test_serde.sh 

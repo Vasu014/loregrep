@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tokio;
 
-// Use the library instead of declaring local modules
-use loregrep::{CliConfig, CliApp, cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs}};
+// Use the CLI wrapper for clean access to CLI functionality
+use loregrep::cli_main::{CliConfig, CliApp, AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs};
 
 #[derive(Parser)]
 #[command(name = "loregrep")]

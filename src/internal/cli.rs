@@ -4,11 +4,17 @@ use std::path::Path;
 use std::time::Instant;
 use tokio::fs;
 use tracing::info;
+use std::sync::{Arc, Mutex};
 
 // Use crate imports since we're within the same crate
 use crate::{
-    CliConfig,
-    cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs},
+    internal::{
+        config::CliConfig,
+        cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs},
+        conversation::ConversationEngine,
+        ai_tools::LocalAnalysisTools,
+        ui::{UIManager, ThemeType, formatter::SearchResult},
+    },
     scanner::{RepositoryScanner, ScanConfig, ScanResult},
     storage::memory::RepoMap,
     analyzers::{rust::RustAnalyzer, LanguageAnalyzer},
@@ -17,15 +23,12 @@ use crate::{
         function::FunctionSignature,
         struct_def::{StructSignature, ImportStatement, ExportStatement},
     },
-    conversation::ConversationEngine,
-    ai_tools::LocalAnalysisTools,
-    ui::{UIManager, ThemeType, formatter::SearchResult},
 };
 
 pub struct CliApp {
     config: CliConfig,
     repo_scanner: RepositoryScanner,
-    repo_map: RepoMap,
+    repo_map: Arc<Mutex<RepoMap>>,
     rust_analyzer: RustAnalyzer,
     conversation_engine: Option<ConversationEngine>,
     verbose: bool,
@@ -57,29 +60,22 @@ impl CliApp {
         let repo_scanner = RepositoryScanner::new(&config.file_scanning, Some(scan_config))
             .context("Failed to create repository scanner")?;
 
-        let repo_map = RepoMap::new();
+        // Create shared RepoMap instance
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
         let rust_analyzer = RustAnalyzer::new()
             .context("Failed to create Rust analyzer")?;
 
         // Initialize conversation engine if API key is available
         let conversation_engine = if config.ai.api_key.is_some() {
-            let repo_map_arc = std::sync::Arc::new(repo_map.clone());
+            // Use the same shared RepoMap instance (not a clone)
+            let repo_map_arc = repo_map.clone();
             
-            // Create new instances for the tools (since they don't support cloning)
-            let tools_scan_config = ScanConfig {
-                follow_symlinks: config.file_scanning.follow_symlinks,
-                max_depth: config.file_scanning.max_depth,
-                show_progress: !config.output.verbose,
-                parallel: true,
-            };
-            let tools_scanner = RepositoryScanner::new(&config.file_scanning, Some(tools_scan_config))
-                .context("Failed to create tools scanner")?;
+            // Create new analyzer instance for the tools
             let tools_analyzer = RustAnalyzer::new()
                 .context("Failed to create tools analyzer")?;
             
             let local_tools = LocalAnalysisTools::new(
                 repo_map_arc,
-                tools_scanner,
                 tools_analyzer,
             );
             
@@ -125,8 +121,11 @@ impl CliApp {
         
         self.ui.print_header("Repository Scan");
         
+        // Show absolute path for clarity
+        let abs_path = args.path.canonicalize().unwrap_or_else(|_| args.path.clone());
+        self.ui.print_info(&format!("Scanning directory: {}", abs_path.display()));
+        
         if self.verbose {
-            self.ui.print_info(&format!("Scanning directory: {}", args.path.display()));
             self.ui.print_info(&format!("Include patterns: {:?}", self.config.file_scanning.include_patterns));
             self.ui.print_info(&format!("Exclude patterns: {:?}", self.config.file_scanning.exclude_patterns));
         }
@@ -167,7 +166,7 @@ impl CliApp {
                     
                     match self.analyze_file_internal(&file.path).await {
                         Ok(analysis) => {
-                            if let Err(e) = self.repo_map.add_file(analysis) {
+                            if let Err(e) = self.repo_map.lock().unwrap().add_file(analysis) {
                                 self.ui.print_warning(&format!(
                                     "Failed to add {} to repository map: {}",
                                     file.relative_path.display(),
@@ -190,10 +189,20 @@ impl CliApp {
             let analysis_duration = analysis_start.elapsed();
             progress.finish_with_message("Analysis completed");
             
+            // Get repo_map data once to avoid multiple lock calls
+            let (function_count, struct_count) = {
+                let repo_map = self.repo_map.lock().unwrap();
+                let metadata = repo_map.get_metadata();
+                (
+                    metadata.total_functions,
+                    metadata.total_structs
+                )
+            };
+            
             let summary = self.ui.formatter.format_analysis_summary(
                 scan_result.files.len(),
-                self.repo_map.find_functions("").items.len(),
-                self.repo_map.find_structs("").items.len(),
+                function_count,
+                struct_count,
                 analysis_duration
             );
             println!("{}", summary);
@@ -213,7 +222,7 @@ impl CliApp {
     pub async fn search(&self, args: SearchArgs) -> Result<()> {
         self.ui.print_header("Search");
 
-        if self.repo_map.is_empty() {
+        if self.repo_map.lock().unwrap().is_empty() {
             self.ui.print_warning("Repository map is empty. Run 'scan' first to populate data.");
             return Ok(());
         }
@@ -229,29 +238,39 @@ impl CliApp {
         // Perform search based on type
         let results = match args.r#type.as_str() {
             "function" | "func" => {
-                let functions = self.repo_map.find_functions_with_options(&args.query, args.limit, args.fuzzy);
+                let repo_map = self.repo_map.lock().unwrap();
+                let functions = repo_map.find_functions_with_options(&args.query, args.limit, args.fuzzy);
                 self.convert_function_results(functions)
             },
             "struct" => {
-                let structs = self.repo_map.find_structs_with_options(&args.query, args.limit, args.fuzzy);
+                let repo_map = self.repo_map.lock().unwrap();
+                let structs = repo_map.find_structs_with_options(&args.query, args.limit, args.fuzzy);
                 self.convert_struct_results(structs)
             },
             "import" => {
-                let imports = self.repo_map.find_imports(&args.query, args.limit);
+                let repo_map = self.repo_map.lock().unwrap();
+                let imports = repo_map.find_imports(&args.query, args.limit);
                 self.convert_import_results(imports)
             },
             "export" => {
-                let exports = self.repo_map.find_exports(&args.query, args.limit);
+                let repo_map = self.repo_map.lock().unwrap();
+                let exports = repo_map.find_exports(&args.query, args.limit);
                 self.convert_export_results(exports)
             },
             "all" => {
                 let mut all_results = Vec::new();
                 
-                let functions = self.repo_map.find_functions_with_options(&args.query, args.limit / 4, args.fuzzy);
-                all_results.extend(self.convert_function_results(functions));
+                {
+                    let repo_map = self.repo_map.lock().unwrap();
+                    let functions = repo_map.find_functions_with_options(&args.query, args.limit / 4, args.fuzzy);
+                    all_results.extend(self.convert_function_results(functions));
+                }
                 
-                let structs = self.repo_map.find_structs_with_options(&args.query, args.limit / 4, args.fuzzy);
-                all_results.extend(self.convert_struct_results(structs));
+                {
+                    let repo_map = self.repo_map.lock().unwrap();
+                    let structs = repo_map.find_structs_with_options(&args.query, args.limit / 4, args.fuzzy);
+                    all_results.extend(self.convert_struct_results(structs));
+                }
                 
                 all_results
             },
@@ -346,8 +365,8 @@ impl CliApp {
 
         // Show repository map status
         self.ui.print_info("\nRepository Map Status:");
-        self.ui.print_info(&format!("  Files loaded: {}", self.repo_map.file_count().to_string()));
-        self.ui.print_info(&format!("  Memory usage: {} MB", (self.repo_map.memory_usage() / (1024 * 1024)).to_string()));
+        self.ui.print_info(&format!("  Files loaded: {}", self.repo_map.lock().unwrap().file_count().to_string()));
+        self.ui.print_info(&format!("  Memory usage: {} MB", (self.repo_map.lock().unwrap().memory_usage() / (1024 * 1024)).to_string()));
 
         Ok(())
     }
@@ -377,7 +396,7 @@ impl CliApp {
         }
 
         // Show repository status and auto-scan if needed
-        if self.repo_map.is_empty() {
+        if self.repo_map.lock().unwrap().is_empty() {
             self.ui.print_warning("Repository map is empty. Auto-scanning current directory for better context...");
             self.ui.print_info(&format!("Current directory: {}", args.path.display()));
             
@@ -392,7 +411,10 @@ impl CliApp {
             
             match self.scan(scan_args).await {
                 Ok(()) => {
-                    self.ui.print_success(&format!("Auto-scan completed! Found {} files", self.repo_map.file_count()));
+                    self.ui.print_success(&format!("Auto-scan completed! Found {} files", self.repo_map.lock().unwrap().file_count()));
+                    // Ensure output is flushed before transitioning to interactive mode
+                    use std::io::Write;
+                    std::io::stdout().flush().unwrap();
                 }
                 Err(e) => {
                     self.ui.print_warning(&format!("Auto-scan failed: {}. Continuing with empty repository map.", e));
@@ -401,7 +423,7 @@ impl CliApp {
             }
         } else {
             if self.verbose {
-                self.ui.print_info(&format!("Repository contains {} analyzed files", self.repo_map.file_count()));
+                self.ui.print_info(&format!("Repository contains {} analyzed files", self.repo_map.lock().unwrap().file_count()));
             }
         }
 
@@ -463,16 +485,26 @@ impl CliApp {
     }
 
     async fn start_interactive_mode_with_engine(&mut self, conversation_engine: &mut ConversationEngine) -> Result<()> {
+        // Ensure any previous output is flushed before starting interactive mode
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        
         loop {
-            // Prompt for input
+            // Prompt for input with better error handling
             print!("\n{}> ", "loregrep");
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            if let Err(e) = std::io::stdout().flush() {
+                self.ui.print_error(&format!("Failed to flush stdout: {}", e));
+                return Err(anyhow::anyhow!("Interactive mode failed: stdout flush error"));
+            }
 
-            // Read user input
+            // Read user input with better error handling
             let mut input = String::new();
-            if std::io::stdin().read_line(&mut input).is_err() {
-                self.ui.print_error("Failed to read input");
-                continue;
+            match std::io::stdin().read_line(&mut input) {
+                Ok(_) => {},
+                Err(e) => {
+                    self.ui.print_error(&format!("Failed to read input: {}", e));
+                    continue;
+                }
             }
 
             let input = input.trim();
@@ -512,7 +544,7 @@ impl CliApp {
                     // Use the existing scan method
                     match self.scan(scan_args).await {
                         Ok(()) => {
-                            self.ui.print_success(&format!("Scan completed! Found {} files", self.repo_map.file_count()));
+                            self.ui.print_success(&format!("Scan completed! Found {} files", self.repo_map.lock().unwrap().file_count()));
                         }
                         Err(e) => {
                             self.ui.print_error(&format!("Scan failed: {}", e));
@@ -551,7 +583,7 @@ impl CliApp {
     fn print_status(&self, conversation_engine: &ConversationEngine) {
         self.ui.print_header("AI Status");
         self.ui.print_info(&format!("  API Key: {}", if conversation_engine.has_api_key() { "✅ Available" } else { "❌ Missing" }));
-        self.ui.print_info(&format!("  Repository: {} files analyzed", self.repo_map.file_count()));
+        self.ui.print_info(&format!("  Repository: {} files analyzed", self.repo_map.lock().unwrap().file_count()));
         self.ui.print_info(&format!("  Conversation: {} messages", conversation_engine.get_message_count()));
         self.ui.print_info(&format!("  Model: {}", self.config.ai.model));
         self.ui.print_info(&conversation_engine.get_conversation_summary());
@@ -840,7 +872,7 @@ use std::collections::HashMap;
         assert!(result.is_ok());
         
         // Check that files were added to repo map
-        assert!(app.repo_map.file_count() > 0);
+        assert!(app.repo_map.lock().unwrap().file_count() > 0);
     }
 
     #[test]

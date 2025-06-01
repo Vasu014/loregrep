@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde_json::json;
 
-use crate::anthropic::{AnthropicClient, ConversationContext, MessageRole, Message, ContentBlock};
-use crate::ai_tools::{LocalAnalysisTools, ToolResult};
-use crate::config::CliConfig;
+use crate::internal::anthropic::{AnthropicClient, ConversationContext, MessageRole, Message, ContentBlock};
+use crate::internal::ai_tools::{LocalAnalysisTools, ToolResult};
+use crate::internal::config::CliConfig;
 
 pub struct ConversationEngine {
     claude_client: AnthropicClient,
@@ -38,24 +38,23 @@ When users ask about code, you should IMMEDIATELY use the appropriate tools:
 1. Use `analyze_file` to examine specific files (like src/anthropic.rs)
 2. Use `search_functions` to find functions by name pattern
 3. Use `search_structs` to find structs/classes by name pattern  
-4. Use `scan_repository` to analyze directories
-5. Use `get_dependencies` to understand file relationships
-6. Use `find_callers` to see where functions are called
-7. Use `get_repository_overview` to get high-level information
+4. Use `get_dependencies` to understand file relationships
+5. Use `find_callers` to see where functions are called
+6. Use `get_repository_tree` to get high-level information, a repo map, and a tree of the repository which contains high level overview of all functions and classes in each file
 
 For example, if someone asks "Where is the anthropic authentication code?":
-- FIRST use `analyze_file` with "src/anthropic.rs"
+- FIRST use `get_repository_overview` to get detailed overview of the repository
 - Then use `search_functions` with pattern "auth" or "api_key"
 - Provide clear, actionable analysis based on the tool results
 
 Available tools:
-- scan_repository: Scan a directory to analyze all code files
+- get_repository_tree: Get high-level repository information
 - search_functions: Search for functions by name pattern
 - search_structs: Search for structs/classes by name pattern  
 - analyze_file: Analyze a specific file in detail
 - get_dependencies: Get import/export dependencies for a file
 - find_callers: Find where a function is called
-- get_repository_overview: Get high-level repository information
+
 
 Always use tools first, then provide clear explanations based on the results."#.to_string()
     }
@@ -75,9 +74,9 @@ Always use tools first, then provide clear explanations based on the results."#.
 
         // Get available tools
         let tools = self.local_tools.get_tool_schemas();
-        println!("🔧 DEBUG: Sending {} tools to Claude", tools.len());
+        //println!("🔧 DEBUG: Sending {} tools to Claude", tools.len());
         for tool in &tools {
-            println!("🔧 DEBUG: Tool: {}", tool.name);
+          //  println!("🔧 DEBUG: Tool: {}", tool.name);
         }
 
         // Send initial request to Claude
@@ -92,7 +91,7 @@ Always use tools first, then provide clear explanations based on the results."#.
         Ok(final_response)
     }
 
-    async fn process_claude_response(&self, initial_response: crate::anthropic::ClaudeResponse) -> Result<String> {
+    async fn process_claude_response(&self, initial_response: crate::internal::anthropic::ClaudeResponse) -> Result<String> {
         const MAX_ITERATIONS: usize = 8;
         let mut current_response = initial_response;
         let mut iteration = 0;
@@ -100,7 +99,7 @@ Always use tools first, then provide clear explanations based on the results."#.
 
         loop {
             iteration += 1;
-            println!("🔧 DEBUG: Tool iteration {} of {}", iteration, MAX_ITERATIONS);
+            //println!("🔧 DEBUG: Tool iteration {} of {}", iteration, MAX_ITERATIONS);
 
             let mut text_parts = Vec::new();
             let mut tool_calls = Vec::new();
@@ -112,7 +111,7 @@ Always use tools first, then provide clear explanations based on the results."#.
                         text_parts.push(text);
                     }
                     ContentBlock::ToolUse { id, name, input } => {
-                        println!("🔧 DEBUG: Tool call detected - {} with id: {}", name, id);
+                        //println!("🔧 DEBUG: Tool call detected - {} with id: {}", name, id);
                         tool_calls.push((id, name, input));
                     }
                 }
@@ -123,7 +122,7 @@ Always use tools first, then provide clear explanations based on the results."#.
                 accumulated_text.extend(text_parts.clone());
             }
 
-            println!("🔧 DEBUG: Found {} tool calls in iteration {}", tool_calls.len(), iteration);
+            //println!("🔧 DEBUG: Found {} tool calls in iteration {}", tool_calls.len(), iteration);
 
             // If there are no tool calls, we're done
             if tool_calls.is_empty() {
@@ -253,7 +252,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use crate::storage::memory::RepoMap;
-    use crate::scanner::discovery::RepositoryScanner;
     use crate::analyzers::rust::RustAnalyzer;
 
     fn create_mock_conversation_engine() -> ConversationEngine {
@@ -265,19 +263,9 @@ mod tests {
             Some(30),
         );
 
-        let repo_map = Arc::new(RepoMap::new());
-        
-        // Create scanner with proper config
-        let config = crate::config::FileScanningConfig {
-            include_patterns: vec!["*.rs".to_string()],
-            exclude_patterns: vec![],
-            max_file_size: 1024 * 1024,
-            follow_symlinks: false,
-            max_depth: Some(10),
-        };
-        let scanner = RepositoryScanner::new(&config, None).unwrap();
+        let repo_map = Arc::new(std::sync::Mutex::new(RepoMap::new()));
         let rust_analyzer = RustAnalyzer::new().unwrap();
-        let local_tools = LocalAnalysisTools::new(repo_map, scanner, rust_analyzer);
+        let local_tools = LocalAnalysisTools::new(repo_map, rust_analyzer);
 
         ConversationEngine::new(claude_client, local_tools, Some(10))
     }
@@ -293,7 +281,7 @@ mod tests {
     fn test_system_prompt_creation() {
         let prompt = ConversationEngine::create_system_prompt();
         assert!(prompt.contains("code analysis"));
-        assert!(prompt.contains("scan_repository"));
+        assert!(prompt.contains("get_repository_tree"));
         assert!(prompt.contains("search_functions"));
         assert!(prompt.len() > 100); // Should be substantial
     }
@@ -356,19 +344,9 @@ mod tests {
             None,
             None,
         );
-        let repo_map = Arc::new(RepoMap::new());
-        
-        // Create scanner with proper config for empty key test
-        let config = crate::config::FileScanningConfig {
-            include_patterns: vec!["*.rs".to_string()],
-            exclude_patterns: vec![],
-            max_file_size: 1024 * 1024,
-            follow_symlinks: false,
-            max_depth: Some(10),
-        };
-        let scanner = RepositoryScanner::new(&config, None).unwrap();
+        let repo_map = Arc::new(std::sync::Mutex::new(RepoMap::new()));
         let rust_analyzer = RustAnalyzer::new().unwrap();
-        let local_tools = LocalAnalysisTools::new(repo_map, scanner, rust_analyzer);
+        let local_tools = LocalAnalysisTools::new(repo_map, rust_analyzer);
         
         let engine_no_key = ConversationEngine::new(claude_client, local_tools, None);
         assert!(!engine_no_key.has_api_key()); // empty key
@@ -387,6 +365,6 @@ mod tests {
         // Test that we can get tool schemas
         let tools = engine.local_tools.get_tool_schemas();
         assert!(tools.len() > 0);
-        assert!(tools.iter().any(|t| t.name == "scan_repository"));
+        assert!(tools.iter().any(|t| t.name == "get_repository_tree"));
     }
 } 

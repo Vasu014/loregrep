@@ -1074,4 +1074,4 @@ pub const MAX_USERS: usize = 1000;
         let generate_id_function = tree_node.functions.iter().find(|f| f.name == "generate_id").unwrap();
         assert!(generate_id_function.is_extern);
     }
-} 
+}
