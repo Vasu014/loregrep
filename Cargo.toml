@@ -3,11 +3,24 @@ name = "loregrep"
 version = "0.3.0"
 edition = "2021"
 authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
-description = "Lightweight Code Analysis Server with Tree-sitter + MCP + CLI + Multi-language Code Understanding"
+description = "Fast code analysis library with LLM tool integration. Tree-sitter based parsing, in-memory indexing, and structured API for coding assistants."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Vasu014/loregrep"
-keywords = ["code-analysis", "tree-sitter", "mcp", "cli", "ast"]
-categories = ["command-line-utilities", "development-tools", "parsing"]
+keywords = ["code-analysis", "tree-sitter", "parsing", "llm-tools", "ast"]
+categories = ["development-tools", "parsing", "api-bindings"]
+readme = "README.md"
+homepage = "https://github.com/Vasu014/loregrep"
+exclude = [
+    "test-repos/",
+    "target/",
+    ".git/",
+    "*.log",
+    "loregrep.toml",
+    "test_*.sh",
+    "TESTING_REPOS.md",
+    "tasks.md",
+    "CLAUDE.md"
+]
 
 [[bin]]
 name = "loregrep"

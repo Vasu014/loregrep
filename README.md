@@ -50,7 +50,8 @@ loregrep config
 
 ## Quick Start
 
-### Basic Repository Analysis
+### Command Line Tool
+
 ```bash
 # Scan and analyze current directory
 loregrep scan .
@@ -60,6 +61,51 @@ loregrep analyze src/main.rs
 
 # Search for functions
 loregrep search "parse_*" --type function
+```
+
+### Library Usage
+
+LoreGrep can also be used as a library in your Rust projects for code analysis and LLM integration:
+
+```rust
+use loregrep::{LoreGrep, Result};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize LoreGrep
+    let mut loregrep = LoreGrep::builder()
+        .with_rust_analyzer()
+        .max_files(1000)
+        .build()?;
+
+    // Scan repository
+    let scan_result = loregrep.scan("/path/to/repo").await?;
+    println!("Scanned {} files", scan_result.files_scanned);
+
+    // Get tool definitions for LLM integration
+    let tools = LoreGrep::get_tool_definitions();
+    
+    // Execute tool calls (from LLM)
+    let result = loregrep.execute_tool("search_functions", json!({
+        "pattern": "main",
+        "limit": 10
+    })).await?;
+    
+    if result.success {
+        println!("Found functions: {}", result.data);
+    }
+
+    Ok(())
+}
+```
+
+Add to your `Cargo.toml`:
+```toml
+[dependencies]
+loregrep = "0.1.0"
+tokio = { version = "1.0", features = ["full"] }
+serde_json = "1.0"
 ```
 
 ### AI-Powered Queries
@@ -185,6 +231,59 @@ loregrep "What are the main entry points?"
 loregrep "How is this project structured?"
 ```
 
+## Library API
+
+### LLM Integration
+
+LoreGrep provides a tool-based interface designed for seamless LLM integration:
+
+```rust
+use loregrep::{LoreGrep, ToolSchema};
+
+// Get tool definitions for your LLM
+let tools: Vec<ToolSchema> = LoreGrep::get_tool_definitions();
+
+// Send tools to your LLM as available functions
+// When LLM wants to call a tool:
+let result = loregrep.execute_tool("search_functions", params).await?;
+```
+
+### Available Tools
+
+1. **search_functions** - Search for functions by pattern
+2. **search_structs** - Search for structs/classes by pattern  
+3. **analyze_file** - Analyze a specific file for functions, structs, imports
+4. **get_dependencies** - Get import/export dependencies for a file
+5. **find_callers** - Find all locations where a function is called
+6. **get_repository_tree** - Get complete repository structure
+
+### Builder Configuration
+
+```rust
+let loregrep = LoreGrep::builder()
+    .with_rust_analyzer()                    // Enable Rust support
+    .max_files(5000)                         // Limit files to scan
+    .cache_ttl(600)                          // Cache timeout in seconds
+    .include_patterns(vec!["**/*.rs".to_string()])
+    .exclude_patterns(vec!["**/target/**".to_string()])
+    .max_file_size(1024 * 1024)             // 1MB max file size
+    .follow_symlinks(false)
+    .build()?;
+```
+
+### Coding Assistant Integration
+
+See `examples/coding_assistant.rs` for a complete example of building a coding assistant with LoreGrep.
+
+### Examples
+
+The `examples/` directory contains complete integration examples:
+
+- **basic_scan.rs** - Simple repository scanning
+- **tool_execution.rs** - LLM tool integration patterns
+- **file_watcher.rs** - Automatic re-indexing on file changes
+- **coding_assistant.rs** - Complete coding assistant implementation
+
 ## Architecture
 
 Loregrep is built with a modular architecture:
@@ -194,6 +293,7 @@ Loregrep is built with a modular architecture:
 - **Scanner**: File discovery with gitignore support
 - **AI Tools**: Local analysis tools that work with Anthropic's Claude
 - **CLI**: Command-line interface with enhanced user experience
+- **Public API**: Clean library interface for external integration
 
 ## Performance
 
