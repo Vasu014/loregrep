@@ -134,7 +134,7 @@
 //! | JavaScript | 📋 Roadmap | -         | -       | -       | -     |
 //! | Go         | 📋 Roadmap | -         | -       | -       | -     |
 //!
-//! *Note: Languages marked "📋 Roadmap" are future planned additions, not currently in development.*
+//! *Note: Languages marked "📋 Roadmap" are future planned additions. Coming soon...*
 //!
 //! ## Integration Examples
 //!
@@ -152,7 +152,7 @@
 //! ### With MCP (Model Context Protocol)
 //!
 //! ```rust
-//! // Early roadmap: MCP server integration is planned for future releases
+//! // MCP server integration is planned for future releases
 //! // Will provide standard MCP interface for tool calling
 //! ```
 //!
@@ -242,11 +242,25 @@
 //!
 //! ## Future Roadmap
 //!
-//! - **Multi-language support**: Python, TypeScript, JavaScript, Go analyzers
-//! - **MCP server integration**: Standard Model Context Protocol interface
-//! - **Incremental updates**: Smart re-indexing on file changes
-//! - **Call graph visualization**: Advanced relationship mapping
-//! - **Database persistence**: Optional disk-based storage for large codebases
+//! ### Language Support
+//! - **Python Analyzer**: Full Python support with functions, classes, imports, and method calls
+//! - **TypeScript/JavaScript Analyzers**: Support for modern JS/TS features including interfaces, types, and ES6+ syntax
+//! - **Go Analyzer**: Package declarations, interfaces, and Go-specific function signatures
+//!
+//! ### Advanced Analysis Features  
+//! - **Call Graph Analysis**: Function call extraction and visualization across files
+//! - **Dependency Tracking**: Advanced import/export analysis and impact assessment
+//! - **Incremental Updates**: Smart re-indexing when files change to avoid full rescans
+//!
+//! ### Performance & Optimization
+//! - **Memory Optimization**: Improved handling of large repositories with better memory management
+//! - **Query Performance**: Enhanced caching and lookup optimization for faster results
+//! - **Database Persistence**: Optional disk-based storage for very large codebases
+//!
+//! ### Integration & Architecture
+//! - **MCP Server Integration**: Standard Model Context Protocol interface for tool calling
+//! - **Editor Integrations**: VS Code, IntelliJ, and other popular editor plugins
+//! - **API Enhancements**: Additional tools and query capabilities for LLM integration
 
 // ================================================================================================
 // PUBLIC API EXPORTS
