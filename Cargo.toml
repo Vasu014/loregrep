@@ -1,13 +1,13 @@
 [package]
 name = "loregrep"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
-description = "Fast code analysis library with LLM tool integration. Tree-sitter based parsing, in-memory indexing, and structured API for coding assistants."
+description = "Repository indexing library for AI coding assistants. Tree-sitter parsing, fast in-memory indexing, and tool APIs for LLM integration."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Vasu014/loregrep"
-keywords = ["code-analysis", "tree-sitter", "parsing", "llm-tools", "ast"]
-categories = ["development-tools", "parsing", "api-bindings"]
+keywords = ["code-indexing", "tree-sitter", "parsing", "coding-assistant", "repository-analysis"]
+categories = ["development-tools", "parsing", "data-structures"]
 readme = "README.md"
 homepage = "https://github.com/Vasu014/loregrep"
 exclude = [
