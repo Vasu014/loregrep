@@ -312,3 +312,238 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // NOTE: LoreGrepConfig is intentionally not exported as it's an implementation detail.
 // Users should configure through the builder pattern instead.
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+/// Creates the Python module
+#[cfg(feature = "python")]
+#[pymodule]
+#[pyo3(name = "loregrep")]
+fn loregrep_py(_py: Python, m: &PyModule) -> PyResult<()> {
+    // Register the main high-level API only
+    m.add_class::<python_bindings::PyLoreGrep>()?;
+    m.add_class::<python_bindings::PyLoreGrepBuilder>()?;
+    m.add_class::<python_bindings::PyScanResult>()?;  
+    m.add_class::<python_bindings::PyToolResult>()?;
+    m.add_class::<python_bindings::PyToolSchema>()?;
+    
+    // Add module version
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    
+    Ok(())
+}
+
+#[cfg(feature = "python")]
+pub mod python_bindings {
+    use super::*;
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+    use crate::loregrep::{LoreGrep, LoreGrepBuilder};
+    use crate::core::types::{ScanResult, ToolResult};
+    use serde_json::Value;
+
+    /// High-level Python API for LoreGrep - matches the Rust API exactly
+    #[pyclass(name = "LoreGrep")]
+    pub struct PyLoreGrep {
+        inner: LoreGrep,
+    }
+
+    #[pymethods]
+    impl PyLoreGrep {
+        /// Create a new LoreGrep builder
+        #[staticmethod]
+        fn builder() -> PyLoreGrepBuilder {
+            PyLoreGrepBuilder {
+                inner: LoreGrep::builder(),
+            }
+        }
+
+        /// Scan a repository and build the index
+        fn scan<'py>(&mut self, py: Python<'py>, path: &str) -> PyResult<&'py PyAny> {
+            let inner = self.inner.clone();
+            let path = path.to_string();
+            
+            pyo3_asyncio::tokio::future_into_py(py, async move {
+                let mut loregrep = inner;
+                let result = loregrep.scan(&path).await
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Scan failed: {}", e)))?;
+                
+                Ok(PyScanResult {
+                    files_processed: result.files_scanned,
+                    functions_found: result.functions_found,
+                    structs_found: result.structs_found,
+                    errors: Vec::new(), // TODO: Collect actual errors from scan
+                    duration_ms: result.duration_ms,
+                })
+            })
+        }
+
+        /// Execute one of the 6 AI tools
+        fn execute_tool<'py>(&self, py: Python<'py>, tool_name: &str, args: &PyDict) -> PyResult<&'py PyAny> {
+            let inner = self.inner.clone();
+            let tool_name = tool_name.to_string();
+            
+            // Convert PyDict to serde_json::Value
+            let args_json: Value = pythonize::depythonize(args)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid arguments: {}", e)))?;
+            
+            pyo3_asyncio::tokio::future_into_py(py, async move {
+                let result = inner.execute_tool(&tool_name, args_json).await
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool execution failed: {}", e)))?;
+                
+                // Convert ToolResult to Python-compatible format
+                let metadata_str = serde_json::to_string(&result.data)
+                    .unwrap_or_else(|_| "{}".to_string());
+                
+                Ok(PyToolResult {
+                    content: if result.success {
+                        serde_json::to_string(&result.data).unwrap_or_else(|_| "{}".to_string())
+                    } else {
+                        result.error.unwrap_or_else(|| "Unknown error".to_string())
+                    },
+                    metadata: metadata_str,
+                })
+            })
+        }
+
+        /// Get available tool definitions for AI systems
+        #[staticmethod]
+        fn get_tool_definitions() -> Vec<PyToolSchema> {
+            LoreGrep::get_tool_definitions()
+                .iter()
+                .map(|schema| {
+                    PyToolSchema {
+                        name: schema.name.clone(),
+                        description: schema.description.clone(),
+                        parameters: serde_json::to_string(&schema.input_schema).unwrap_or_else(|_| "{}".to_string()),
+                    }
+                })
+                .collect()
+        }
+
+        /// Get current version
+        #[staticmethod]
+        fn version() -> &'static str {
+            env!("CARGO_PKG_VERSION")
+        }
+
+        fn __repr__(&self) -> String {
+            "LoreGrep(configured and ready for repository analysis)".to_string()
+        }
+    }
+
+    /// Python wrapper for LoreGrepBuilder - enables fluent configuration
+    #[pyclass(name = "LoreGrepBuilder")]
+    pub struct PyLoreGrepBuilder {
+        inner: LoreGrepBuilder,
+    }
+
+    #[pymethods]
+    impl PyLoreGrepBuilder {
+        /// Set maximum file size to process
+        fn max_file_size(mut slf: PyRefMut<Self>, size: u64) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().max_file_size(size);
+            slf
+        }
+
+        /// Set maximum directory depth to scan
+        fn max_depth(mut slf: PyRefMut<Self>, depth: u32) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().max_depth(depth);
+            slf
+        }
+
+        /// Set file patterns to include
+        fn file_patterns(mut slf: PyRefMut<Self>, patterns: Vec<String>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().file_patterns(patterns);
+            slf
+        }
+
+        /// Set patterns to exclude
+        fn exclude_patterns(mut slf: PyRefMut<Self>, patterns: Vec<String>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().exclude_patterns(patterns);
+            slf
+        }
+
+        /// Enable or disable gitignore respect
+        fn respect_gitignore(mut slf: PyRefMut<Self>, respect: bool) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().respect_gitignore(respect);
+            slf
+        }
+
+        /// Build the configured LoreGrep instance
+        fn build(slf: PyRefMut<Self>) -> PyResult<PyLoreGrep> {
+            let loregrep = slf.inner.clone().build()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Build failed: {}", e)))?;
+            
+            Ok(PyLoreGrep { inner: loregrep })
+        }
+
+        fn __repr__(&self) -> String {
+            "LoreGrepBuilder(configurable repository analyzer)".to_string()
+        }
+    }
+
+    /// Python wrapper for ScanResult
+    #[pyclass(name = "ScanResult")]
+    pub struct PyScanResult {
+        #[pyo3(get)]
+        pub files_processed: usize,
+        #[pyo3(get)]
+        pub functions_found: usize,
+        #[pyo3(get)]
+        pub structs_found: usize,
+        #[pyo3(get)]
+        pub errors: Vec<String>,
+        #[pyo3(get)]
+        pub duration_ms: u64,
+    }
+
+    #[pymethods]
+    impl PyScanResult {
+        fn __repr__(&self) -> String {
+            format!(
+                "ScanResult(files={}, functions={}, structs={}, duration={}ms)",
+                self.files_processed, self.functions_found, self.structs_found, self.duration_ms
+            )
+        }
+    }
+
+    /// Python wrapper for ToolResult
+    #[pyclass(name = "ToolResult")]
+    pub struct PyToolResult {
+        #[pyo3(get)]
+        pub content: String,
+        #[pyo3(get)]
+        pub metadata: String,
+    }
+
+    #[pymethods]
+    impl PyToolResult {
+        fn __repr__(&self) -> String {
+            format!("ToolResult(content_len={})", self.content.len())
+        }
+    }
+
+    /// Python wrapper for ToolSchema
+    #[pyclass(name = "ToolSchema")]
+    pub struct PyToolSchema {
+        #[pyo3(get)]
+        pub name: String,
+        #[pyo3(get)]
+        pub description: String,
+        #[pyo3(get)]
+        pub parameters: String,
+    }
+
+    #[pymethods]
+    impl PyToolSchema {
+        fn __repr__(&self) -> String {
+            format!("ToolSchema(name='{}')", self.name)
+        }
+    }
+}
+
+// Re-export Python types when python feature is enabled
+#[cfg(feature = "python")]
+pub use python_bindings::*; 

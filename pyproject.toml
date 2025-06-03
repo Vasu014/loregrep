@@ -1,0 +1,70 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "loregrep"
+description = "Repository indexing library for AI coding assistants"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT OR Apache-2.0"}
+authors = [
+    {name = "Vasu Bhardwaj", email = "voodoorapter014@gmail.com"},
+]
+keywords = ["code-indexing", "tree-sitter", "parsing", "coding-assistant", "repository-analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/Vasu014/loregrep"
+Repository = "https://github.com/Vasu014/loregrep"
+Issues = "https://github.com/Vasu014/loregrep/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module", "python"]
+module-name = "loregrep"
+python-source = "python"
+manifest-path = "Cargo.toml"
+
+# Development dependencies for testing
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=22.0",
+    "isort>=5.0",
+    "mypy>=1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+strict = true 

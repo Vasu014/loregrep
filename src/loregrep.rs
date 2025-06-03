@@ -8,6 +8,7 @@ use crate::analyzers::{rust::RustAnalyzer, traits::LanguageAnalyzer};
 use crate::internal::{ai_tools::LocalAnalysisTools, config::FileScanningConfig};
 
 /// The main struct for interacting with LoreGrep
+#[derive(Clone)]
 pub struct LoreGrep {
     repo_map: Arc<Mutex<RepoMap>>,
     scanner: RepositoryScanner,
@@ -62,15 +63,13 @@ impl LoreGrep {
             .map_err(|e| LoreGrepError::InternalError(format!("File scanning failed: {}", e)))?;
         let discovered_files = scan_result.files;
 
-        let mut repo_map = self.repo_map.lock()
-            .map_err(|e| LoreGrepError::InternalError(format!("Failed to lock repo map: {}", e)))?;
-
         let mut files_scanned = 0;
         let mut functions_found = 0;
         let mut structs_found = 0;
         let mut languages = std::collections::HashSet::new();
+        let mut analysis_results = Vec::new();
 
-        // Analyze each file
+        // Analyze each file (without holding the mutex)
         for file_info in discovered_files {
             if let Some(max_files) = self.config.max_files {
                 if files_scanned >= max_files {
@@ -94,11 +93,8 @@ impl LoreGrep {
                     structs_found += analysis.tree_node.structs.len();
                     languages.insert(file_info.language.clone());
 
-                    // Store in repo map
-                    if let Err(e) = repo_map.add_file(analysis.tree_node) {
-                        eprintln!("Warning: Failed to store analysis for {}: {}", file_info.path.display(), e);
-                    }
-                    
+                    // Store analysis for later addition to repo map
+                    analysis_results.push(analysis.tree_node);
                     files_scanned += 1;
                 }
                 Err(e) => {
@@ -106,6 +102,18 @@ impl LoreGrep {
                 }
             }
         }
+
+        // Now add all analysis results to repo map (holding mutex only briefly)
+        {
+            let mut repo_map = self.repo_map.lock()
+                .map_err(|e| LoreGrepError::InternalError(format!("Failed to lock repo map: {}", e)))?;
+            
+            for tree_node in analysis_results {
+                if let Err(e) = repo_map.add_file(tree_node) {
+                    eprintln!("Warning: Failed to store analysis: {}", e);
+                }
+            }
+        } // Mutex guard is dropped here
 
         let duration = start_time.elapsed();
         
@@ -178,6 +186,7 @@ impl LoreGrep {
 }
 
 /// Builder for configuring LoreGrep instances
+#[derive(Clone)]
 pub struct LoreGrepBuilder {
     config: LoreGrepConfig,
     rust_analyzer_enabled: bool,
@@ -234,6 +243,11 @@ impl LoreGrepBuilder {
         self
     }
 
+    /// Add file patterns to include (alias for include_patterns)
+    pub fn file_patterns(self, patterns: Vec<String>) -> Self {
+        self.include_patterns(patterns)
+    }
+
     /// Add exclude patterns for file scanning
     pub fn exclude_patterns(mut self, patterns: Vec<String>) -> Self {
         self.config.exclude_patterns = patterns;
@@ -256,6 +270,13 @@ impl LoreGrepBuilder {
     pub fn follow_symlinks(mut self, follow: bool) -> Self {
         self.config.follow_symlinks = follow;
         self
+    }
+
+    /// Enable or disable respecting .gitignore files (alias for follow_symlinks for now)
+    pub fn respect_gitignore(self, respect: bool) -> Self {
+        // For now, map this to follow_symlinks as a placeholder
+        // In a more complete implementation, this would be a separate config field
+        self.follow_symlinks(!respect)
     }
 
     /// Disable maximum depth limit

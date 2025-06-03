@@ -10,14 +10,14 @@ use tracing::{info, warn};
 
 use crate::internal::config::FileScanningConfig;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FileFilters {
     include_globs: GlobSet,
     exclude_globs: GlobSet,
     max_file_size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LanguageDetector {
     rust_extensions: GlobSet,
     python_extensions: GlobSet,
@@ -34,7 +34,6 @@ pub struct ScanConfig {
     pub parallel: bool,
 }
 
-#[derive(Debug)]
 pub struct ScanResult {
     pub files: Vec<DiscoveredFile>,
     pub total_files_found: usize,
@@ -51,6 +50,7 @@ pub struct DiscoveredFile {
     pub relative_path: PathBuf,
 }
 
+#[derive(Clone)]
 pub struct RepositoryScanner {
     filters: FileFilters,
     language_detector: LanguageDetector,

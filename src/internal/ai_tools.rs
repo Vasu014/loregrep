@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::internal::anthropic::ToolSchema;
 
+#[derive(Clone)]
 pub struct LocalAnalysisTools {
     repo_map: Arc<Mutex<RepoMap>>,
     rust_analyzer: RustAnalyzer,

@@ -10,6 +10,7 @@ use crate::types::{
     FunctionCall, Parameter, StructField
 };
 
+#[derive(Clone)]
 pub struct RustAnalyzer {
     language: Language,
 }
