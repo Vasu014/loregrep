@@ -66,7 +66,7 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = { version = "1.0", features = ["full"] }
 
 # HTTP client for Claude API
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], defaut-features = false }
 
 # CLI and terminal
 clap = { version = "4.4", features = ["derive", "env"] }
