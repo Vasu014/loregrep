@@ -48,8 +48,6 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -81,8 +79,6 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -110,8 +106,6 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -138,8 +132,6 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        env:
-          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:

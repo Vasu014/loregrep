@@ -282,6 +282,10 @@ pub mod cli_main;
 pub mod core;
 mod loregrep;
 
+// PyO3 imports for Python bindings
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
 // ================================================================================================
 // CLEAN PUBLIC API EXPORTS
 // ================================================================================================
@@ -313,14 +317,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 // NOTE: LoreGrepConfig is intentionally not exported as it's an implementation detail.
 // Users should configure through the builder pattern instead.
 
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-
 /// Creates the Python module
 #[cfg(feature = "python")]
 #[pymodule]
 #[pyo3(name = "loregrep")]
-fn loregrep_py(_py: Python, m: &PyModule) -> PyResult<()> {
+fn loregrep_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register the main high-level API only
     m.add_class::<python_bindings::PyLoreGrep>()?;
     m.add_class::<python_bindings::PyLoreGrepBuilder>()?;
@@ -360,11 +361,11 @@ pub mod python_bindings {
         }
 
         /// Scan a repository and build the index
-        fn scan<'py>(&mut self, py: Python<'py>, path: &str) -> PyResult<&'py PyAny> {
+        fn scan<'py>(&mut self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
             let inner = self.inner.clone();
             let path = path.to_string();
             
-            pyo3_asyncio::tokio::future_into_py(py, async move {
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 let mut loregrep = inner;
                 let result = loregrep.scan(&path).await
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Scan failed: {}", e)))?;
@@ -380,7 +381,7 @@ pub mod python_bindings {
         }
 
         /// Execute one of the 6 AI tools
-        fn execute_tool<'py>(&self, py: Python<'py>, tool_name: &str, args: &PyDict) -> PyResult<&'py PyAny> {
+        fn execute_tool<'py>(&self, py: Python<'py>, tool_name: &str, args: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyAny>> {
             let inner = self.inner.clone();
             let tool_name = tool_name.to_string();
             
@@ -388,7 +389,7 @@ pub mod python_bindings {
             let args_json: Value = pythonize::depythonize(args)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid arguments: {}", e)))?;
             
-            pyo3_asyncio::tokio::future_into_py(py, async move {
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 let result = inner.execute_tool(&tool_name, args_json).await
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool execution failed: {}", e)))?;
                 
