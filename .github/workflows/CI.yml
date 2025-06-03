@@ -28,8 +28,8 @@ jobs:
             target: x86_64
           - runner: ubuntu-22.04
             target: x86
-          - runner: ubuntu-22.04
-            target: aarch64
+          #- runner: ubuntu-22.04
+          #  target: aarch64
           #- runner: ubuntu-22.04
           #  target: armv7
           #- runner: ubuntu-22.04
@@ -48,12 +48,12 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-        env:
+        # env:
           # Fix ARM compilation issues with ring crate
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          # CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          # CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          # AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          # CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -69,8 +69,8 @@ jobs:
             target: x86_64
           - runner: ubuntu-22.04
             target: x86
-          - runner: ubuntu-22.04
-            target: aarch64
+          #- runner: ubuntu-22.04
+          #  target: aarch64
           #- runner: ubuntu-22.04
           #  target: armv7
     steps:
@@ -85,12 +85,12 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
-        env:
+        # env:
           # Fix ARM compilation issues with ring crate
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          # CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          # CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          # AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          # CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
