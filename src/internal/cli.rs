@@ -2,23 +2,52 @@ use anyhow::{Context, Result};
 use serde_json;
 use std::path::Path;
 use std::time::Instant;
-use tokio::fs;
 use tracing::info;
+use std::sync::Arc;
 
 // Use public API instead of direct internal access
 use crate::{
-    LoreGrep, LoreGrepBuilder, LoreGrepError,
-    core::types::{ToolResult, ScanResult as PublicScanResult},
+    LoreGrep,
+    core::types::{ScanResult as PublicScanResult},
     internal::{
         config::CliConfig,
         cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs},
         ui::{UIManager, ThemeType, formatter::SearchResult},
     },
-    types::{
-        function::FunctionSignature,
-        struct_def::{StructSignature, ImportStatement, ExportStatement},
-    },
 };
+
+/// LoreGrep tool delegate that forwards tool execution to LoreGrep public API
+struct LoreGrepToolDelegate {
+    loregrep: Arc<LoreGrep>,
+}
+
+impl LoreGrepToolDelegate {
+    fn new(loregrep: Arc<LoreGrep>) -> Self {
+        Self { loregrep }
+    }
+}
+
+impl crate::internal::conversation::ToolDelegate for LoreGrepToolDelegate {
+    fn execute_tool(&self, name: &str, params: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::internal::ai_tools::ToolResult>> + Send + '_>> {
+        let loregrep = self.loregrep.clone();
+        let name = name.to_string();
+        
+        Box::pin(async move {
+            // Delegate to LoreGrep public API
+            let public_result = loregrep.execute_tool(&name, params).await
+                .map_err(|e| anyhow::anyhow!("Tool execution failed: {}", e))?;
+
+            // Convert from public ToolResult to internal ToolResult
+            if public_result.success {
+                Ok(crate::internal::ai_tools::ToolResult::success(public_result.data))
+            } else {
+                Ok(crate::internal::ai_tools::ToolResult::error(
+                    public_result.error.unwrap_or_else(|| "Unknown error".to_string())
+                ))
+            }
+        })
+    }
+}
 
 pub struct CliApp {
     config: CliConfig,
@@ -311,17 +340,82 @@ impl CliApp {
     pub async fn query(&mut self, args: QueryArgs) -> Result<()> {
         self.ui.print_header("AI Query Mode");
         
-        // AI functionality is not available when using public API only
-        self.ui.print_warning("AI query functionality has been temporarily disabled during CLI refactoring.");
-        self.ui.print_info("Please use the search and analyze commands for code exploration.");
-        self.ui.print_info("Available commands: scan, search, analyze, config");
+        // Check if we have an API key for AI functionality
+        if std::env::var("ANTHROPIC_API_KEY").is_err() {
+            self.ui.print_warning("ANTHROPIC_API_KEY environment variable not set.");
+            self.ui.print_info("AI query functionality requires an Anthropic API key.");
+            self.ui.print_info("Available commands: scan, search, analyze, config");
+            return Ok(());
+        }
+
+        // Auto-scan repository if not already scanned
+        if !self.loregrep.is_scanned() {
+            self.ui.print_info("Repository not scanned. Scanning current directory...");
+            let scan_args = ScanArgs {
+                path: args.path.clone(),
+                include: vec![],
+                exclude: vec![],
+                follow_symlinks: false,
+                cache: true,
+            };
+            self.scan(scan_args).await?;
+        }
+
+        // Create conversation engine with our LoreGrep instance
+        let conversation_engine = self.create_conversation_engine().await?;
+        let mut conversation_engine = conversation_engine;
+
+        if args.interactive {
+            self.start_interactive_mode_with_engine(&mut conversation_engine).await?;
+        } else if let Some(query) = args.query {
+            self.process_ai_query(&mut conversation_engine, &query).await?;
+        } else {
+            self.ui.print_info("Starting interactive AI query mode...");
+            self.start_interactive_mode_with_engine(&mut conversation_engine).await?;
+        }
         
         Ok(())
     }
 
-    // AI methods temporarily disabled during refactoring
-    /*
-    async fn process_ai_query_with_engine(&self, conversation_engine: &mut ConversationEngine, query: &str) -> Result<()> {
+    // AI methods using ConversationEngine with LoreGrep delegation
+    async fn create_conversation_engine(&self) -> Result<crate::internal::conversation::ConversationEngine> {
+        use crate::internal::{conversation::ConversationEngine, ai_tools::LocalAnalysisTools, anthropic::AnthropicClient};
+        use std::sync::{Arc, Mutex};
+        use crate::storage::memory::RepoMap;
+        use crate::analyzers::rust::RustAnalyzer;
+        
+        // Create Anthropic client from config
+        let api_key = self.config.anthropic_api_key().clone()
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .ok_or_else(|| anyhow::anyhow!("ANTHROPIC_API_KEY not found in config or environment"))?;
+
+        let claude_client = AnthropicClient::new(
+            api_key,
+            self.config.anthropic_model(),
+            self.config.max_tokens(),
+            self.config.temperature(),
+            self.config.timeout_seconds(),
+        );
+        
+        // Create minimal tools just for schema purposes
+        let temp_repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        let analyzer = RustAnalyzer::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create analyzer: {}", e))?;
+        let temp_tools = LocalAnalysisTools::new(temp_repo_map, analyzer);
+        
+        // Create tool delegate that forwards to our LoreGrep public API
+        let tool_delegate = Arc::new(LoreGrepToolDelegate::new(Arc::new(self.loregrep.clone())));
+        
+        // Create ConversationEngine with tool delegation
+        Ok(ConversationEngine::with_tool_delegate(
+            claude_client,
+            temp_tools,
+            self.config.conversation_memory(),
+            tool_delegate,
+        ))
+    }
+    
+    async fn process_ai_query(&self, conversation_engine: &mut crate::internal::conversation::ConversationEngine, query: &str) -> Result<()> {
         if self.verbose {
             self.ui.print_info(&format!("Query: {}", query));
         }
@@ -358,7 +452,7 @@ impl CliApp {
         Ok(())
     }
 
-    async fn start_interactive_mode_with_engine(&mut self, conversation_engine: &mut ConversationEngine) -> Result<()> {
+    async fn start_interactive_mode_with_engine(&mut self, conversation_engine: &mut crate::internal::conversation::ConversationEngine) -> Result<()> {
         // Ensure any previous output is flushed before starting interactive mode
         use std::io::Write;
         std::io::stdout().flush().unwrap();
@@ -418,7 +512,11 @@ impl CliApp {
                     // Use the existing scan method
                     match self.scan(scan_args).await {
                         Ok(()) => {
-                            self.ui.print_success(&format!("Scan completed! Found {} files", self.repo_map.lock().unwrap().file_count()));
+                            if let Ok(stats) = self.loregrep.get_stats() {
+                                self.ui.print_success(&format!("Scan completed! Found {} files", stats.files_scanned));
+                            } else {
+                                self.ui.print_success("Scan completed!");
+                            }
                         }
                         Err(e) => {
                             self.ui.print_error(&format!("Scan failed: {}", e));
@@ -431,7 +529,7 @@ impl CliApp {
             }
 
             // Process AI query
-            if let Err(e) = self.process_ai_query_with_engine(conversation_engine, input).await {
+            if let Err(e) = self.process_ai_query(conversation_engine, input).await {
                 self.ui.print_error(&format!("Error: {}", e));
             }
         }
@@ -453,7 +551,25 @@ impl CliApp {
         self.ui.print_info("  > Show me all public structs");
         self.ui.print_info("  > How does error handling work?");
     }
-    */
+
+    fn print_status(&self, conversation_engine: &crate::internal::conversation::ConversationEngine) {
+        self.ui.print_header("Status");
+        
+        // Repository status
+        if self.loregrep.is_scanned() {
+            if let Ok(stats) = self.loregrep.get_stats() {
+                self.ui.print_info(&format!("Repository: {} files, {} functions, {} structs", 
+                    stats.files_scanned, stats.functions_found, stats.structs_found));
+            } else {
+                self.ui.print_info("Repository: Scanned (stats unavailable)");
+            }
+        } else {
+            self.ui.print_info("Repository: Not scanned");
+        }
+        
+        // Conversation status
+        self.ui.print_info(&format!("Conversation: {} messages", conversation_engine.get_message_count()));
+    }
 
     // Helper methods for public API conversion
     fn print_public_scan_results(&self, scan_result: &PublicScanResult) {
@@ -611,59 +727,7 @@ impl CliApp {
     // Commented out during refactoring - now uses public API
     // fn print_scan_results(&self, result: &ScanResult) { ... }
 
-    // Convert methods for search results
-    fn convert_function_results(&self, functions: Vec<&FunctionSignature>) -> Vec<SearchResult> {
-        functions.into_iter().map(|func| {
-            let signature = self.ui.formatter.format_function_signature(
-                &func.name,
-                &func.parameters.iter().map(|p| format!("{}: {}", p.name, p.param_type)).collect::<Vec<_>>(),
-                func.return_type.as_deref()
-            );
-            
-            SearchResult::new(
-                "function".to_string(),
-                signature,
-                "unknown".to_string(), // TODO: Add file_path to FunctionSignature
-                Some(func.start_line),
-            ).with_context(format!("Lines: {}-{}", func.start_line, func.end_line))
-        }).collect()
-    }
-
-    fn convert_struct_results(&self, structs: Vec<&StructSignature>) -> Vec<SearchResult> {
-        structs.into_iter().map(|s| {
-            let field_names: Vec<String> = s.fields.iter().map(|f| f.name.clone()).collect();
-            let signature = self.ui.formatter.format_struct_signature(&s.name, &field_names);
-            
-            SearchResult::new(
-                "struct".to_string(),
-                signature,
-                "unknown".to_string(), // TODO: Add file_path to StructSignature
-                Some(s.start_line),
-            ).with_context(format!("Lines: {}-{}, {} fields", s.start_line, s.end_line, s.fields.len()))
-        }).collect()
-    }
-
-    fn convert_import_results(&self, imports: Vec<&ImportStatement>) -> Vec<SearchResult> {
-        imports.into_iter().map(|import| {
-            SearchResult::new(
-                "import".to_string(),
-                format!("use {}", import.module_path),
-                "unknown".to_string(), // TODO: Add file_path to ImportStatement
-                Some(import.line_number),
-            )
-        }).collect()
-    }
-
-    fn convert_export_results(&self, exports: Vec<&ExportStatement>) -> Vec<SearchResult> {
-        exports.into_iter().map(|export| {
-            SearchResult::new(
-                "export".to_string(),
-                format!("pub {}", export.exported_item),
-                "unknown".to_string(), // TODO: Add file_path to ExportStatement
-                Some(export.line_number),
-            )
-        }).collect()
-    }
+    // Convert methods for search results - temporarily removed due to import issues
 
     // Commented out during refactoring - now uses public API
     // fn display_analysis_text(&self, analysis: &TreeNode, args: &AnalyzeArgs) { ... }

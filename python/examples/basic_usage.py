@@ -3,7 +3,19 @@
 Basic usage example for the loregrep Python package.
 
 This example demonstrates how to use the builder pattern API of loregrep
-for repository indexing and code analysis.
+for repository indexing and code analysis. It covers:
+
+1. Importing and checking the loregrep package
+2. Getting available AI tools for code analysis
+3. Creating a LoreGrep instance with custom configuration
+4. Scanning a sample repository with multiple file types
+5. Executing various analysis tools (search_functions, search_structs, etc.)
+
+Prerequisites:
+- Install with: maturin develop --features python
+- Or build wheel with: maturin build --features python --release
+
+The example creates temporary files for demonstration and cleans them up afterwards.
 """
 
 import os
@@ -34,14 +46,16 @@ async def main():
     # Create a LoreGrep instance using the builder pattern
     print("\n2. Creating LoreGrep instance with builder pattern...")
     try:
+        # Configure LoreGrep with custom settings using the builder pattern
         loregrep_instance = (loregrep.LoreGrep.builder()
-                           .max_file_size(1024 * 1024)  # 1MB max
-                           .max_depth(10)
-                           .file_patterns(["*.py", "*.rs", "*.js", "*.ts"])
-                           .exclude_patterns(["target/", "node_modules/", "__pycache__/"])
-                           .respect_gitignore(True)
+                           .max_file_size(1024 * 1024)  # 1MB max file size
+                           .max_depth(10)                # Maximum directory depth
+                           .file_patterns(["*.py", "*.rs", "*.js", "*.ts"])  # Include these file types
+                           .exclude_patterns(["target/", "node_modules/", "__pycache__/"])  # Skip these directories
+                           .respect_gitignore(True)      # Honor .gitignore files
                            .build())
         print("✅ LoreGrep instance created successfully")
+        print(f"   📋 Instance: {loregrep_instance}")
     except Exception as e:
         print(f"❌ Failed to create LoreGrep instance: {e}")
         return
@@ -56,7 +70,7 @@ async def main():
         result = await loregrep_instance.scan(temp_dir)
         
         print("✅ Repository scan completed!")
-        print(f"   📁 Files processed: {result.files_processed}")
+        print(f"   📁 Files scanned: {result.files_scanned}")
         print(f"   🔧 Functions found: {result.functions_found}")
         print(f"   📦 Structs found: {result.structs_found}")
         print(f"   ⏱️  Duration: {result.duration_ms}ms")
@@ -64,20 +78,79 @@ async def main():
         # Demonstrate tool execution (if available)
         if len(tools) > 0:
             print(f"\n5. Demonstrating tool execution...")
+            
+            # Test search_functions tool
             try:
-                # Example: Try to execute the first available tool
-                tool = tools[0]
-                print(f"   Executing tool: {tool.name}")
-                
-                # Create sample arguments (this will vary by tool)
-                args = {}
-                
-                tool_result = await loregrep_instance.execute_tool(tool.name, args)
-                print(f"   ✅ Tool executed successfully")
-                print(f"   📄 Content length: {len(tool_result.content)}")
+                print("   🔍 Testing search_functions tool...")
+                func_result = await loregrep_instance.execute_tool("search_functions", {
+                    "pattern": "Config",
+                    "limit": 5
+                })
+                print(f"   ✅ search_functions executed successfully")
+                print(f"   📄 Functions found:")
+                print(f"   {func_result.content}")
                 
             except Exception as e:
-                print(f"   ⚠️  Tool execution demo skipped: {e}")
+                print(f"   ⚠️  search_functions demo failed: {e}")
+            
+            # Test search_structs tool
+            try:
+                print("\n   🔍 Testing search_structs tool...")
+                struct_result = await loregrep_instance.execute_tool("search_structs", {
+                    "pattern": "Config",
+                    "limit": 5
+                })
+                print(f"   ✅ search_structs executed successfully")
+                print(f"   📦 Structs found:")
+                print(f"   {struct_result.content}")
+                
+            except Exception as e:
+                print(f"   ⚠️  search_structs demo failed: {e}")
+            
+            # Test get_repository_tree tool
+            try:
+                print("\n   🌳 Testing get_repository_tree tool...")
+                tree_result = await loregrep_instance.execute_tool("get_repository_tree", {
+                    "include_file_details": True,
+                    "max_depth": 2
+                })
+                print(f"   ✅ get_repository_tree executed successfully")
+                print(f"   🏗️  Repository structure:")
+                print(f"   {tree_result.content}")
+                
+            except Exception as e:
+                print(f"   ⚠️  get_repository_tree demo failed: {e}")
+            
+            # Test analyze_file tool (if we have Rust files)
+            try:
+                rust_file_path = os.path.join(temp_dir, "config.rs")
+                if os.path.exists(rust_file_path):
+                    print("\n   📄 Testing analyze_file tool...")
+                    analyze_result = await loregrep_instance.execute_tool("analyze_file", {
+                        "file_path": rust_file_path,
+                        "include_source": False
+                    })
+                    print(f"   ✅ analyze_file executed successfully")
+                    print(f"   🔍 File analysis (config.rs):")
+                    # Parse and display the JSON result in a more readable way
+                    import json
+                    try:
+                        analysis_data = json.loads(analyze_result.content)
+                        if "functions" in analysis_data:
+                            print(f"   📋 Functions: {len(analysis_data['functions'])}")
+                            for func in analysis_data['functions'][:3]:  # Show first 3
+                                print(f"     • {func.get('name', 'unknown')} (line {func.get('line_number', '?')})")
+                        if "structs" in analysis_data:
+                            print(f"   📦 Structs: {len(analysis_data['structs'])}")
+                            for struct in analysis_data['structs'][:3]:  # Show first 3
+                                print(f"     • {struct.get('name', 'unknown')} (line {struct.get('line_number', '?')})")
+                    except json.JSONDecodeError:
+                        # If it's not JSON, just show the raw content (truncated)
+                        content_preview = analyze_result.content[:200] + "..." if len(analyze_result.content) > 200 else analyze_result.content
+                        print(f"   {content_preview}")
+                
+            except Exception as e:
+                print(f"   ⚠️  analyze_file demo failed: {e}")
         
     except Exception as e:
         print(f"❌ Error during scanning: {e}")

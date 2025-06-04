@@ -4,14 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "loregrep"
-description = "Repository indexing library for AI coding assistants"
-readme = "README.md"
+description = "Fast repository indexing and code analysis tools for AI coding assistants - 6 standardized tools for Claude, GPT, and more"
+readme = "README-python.md"
 requires-python = ">=3.8"
 license = {text = "MIT OR Apache-2.0"}
 authors = [
     {name = "Vasu Bhardwaj", email = "voodoorapter014@gmail.com"},
 ]
-keywords = ["code-indexing", "tree-sitter", "parsing", "coding-assistant", "repository-analysis"]
+keywords = ["ai", "claude", "gpt", "code-analysis", "tree-sitter", "coding-assistant", "repository-indexing", "python", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

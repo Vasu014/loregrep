@@ -1,5 +1,8 @@
 use anyhow::Result;
 use serde_json::json;
+use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::internal::anthropic::{AnthropicClient, ConversationContext, MessageRole, Message, ContentBlock};
 use crate::internal::ai_tools::{LocalAnalysisTools, ToolResult};
@@ -10,6 +13,12 @@ pub struct ConversationEngine {
     local_tools: LocalAnalysisTools,
     context: ConversationContext,
     system_prompt: String,
+    tool_delegate: Option<Arc<dyn ToolDelegate>>,
+}
+
+/// Trait for delegating tool execution to external implementations
+pub trait ToolDelegate: Send + Sync {
+    fn execute_tool(&self, name: &str, params: serde_json::Value) -> Pin<Box<dyn Future<Output = Result<ToolResult>> + Send + '_>>;
 }
 
 impl ConversationEngine {
@@ -26,6 +35,26 @@ impl ConversationEngine {
             local_tools,
             context,
             system_prompt,
+            tool_delegate: None,
+        }
+    }
+
+    /// Create ConversationEngine with tool delegate for external tool execution
+    pub fn with_tool_delegate(
+        claude_client: AnthropicClient,
+        local_tools: LocalAnalysisTools,
+        max_history: Option<usize>,
+        tool_delegate: Arc<dyn ToolDelegate>,
+    ) -> Self {
+        let system_prompt = Self::create_system_prompt();
+        let context = ConversationContext::new(max_history.unwrap_or(20));
+
+        Self {
+            claude_client,
+            local_tools,
+            context,
+            system_prompt,
+            tool_delegate: Some(tool_delegate),
         }
     }
 
@@ -137,11 +166,18 @@ Always use tools first, then provide clear explanations based on the results."#.
                 return Ok(accumulated_text.join("\n"));
             }
 
-            // Execute tool calls
+            // Execute tool calls - use delegate if available, otherwise use local tools
             let mut tool_results = Vec::new();
             for (id, tool_name, input) in tool_calls {
-                let result = self.local_tools.execute_tool(&tool_name, input).await
-                    .unwrap_or_else(|e| ToolResult::error(format!("Tool execution failed: {}", e)));
+                let result = if let Some(delegate) = &self.tool_delegate {
+                    // Use delegated tool execution (e.g., LoreGrep public API)
+                    delegate.execute_tool(&tool_name, input).await
+                        .unwrap_or_else(|e| ToolResult::error(format!("Delegated tool execution failed: {}", e)))
+                } else {
+                    // Use local tools as fallback
+                    self.local_tools.execute_tool(&tool_name, input).await
+                        .unwrap_or_else(|e| ToolResult::error(format!("Tool execution failed: {}", e)))
+                };
                 
                 tool_results.push((id, tool_name, result));
             }
@@ -245,6 +281,7 @@ impl ConversationEngine {
             config.conversation_memory(),
         ))
     }
+
 }
 
 #[cfg(test)]

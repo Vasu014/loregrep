@@ -52,7 +52,7 @@
 //!     let scan_result = loregrep.scan("/path/to/your/repo").await?;
 //!     
 //!     println!("Indexed {} files with {} functions", 
-//!              scan_result.files_processed, 
+//!              scan_result.files_scanned, 
 //!              scan_result.functions_found);
 //!     
 //!     Ok(())
@@ -137,6 +137,16 @@
 //! *Note: Languages marked "📋 Roadmap" are future planned additions. Coming soon...*
 //!
 //! ## Integration Examples
+//!
+//! ### CLI Interactive Mode
+//!
+//! ```bash
+//! # Start interactive AI-powered query session
+//! loregrep query --interactive
+//! 
+//! # Or run a single query
+//! loregrep query "What functions handle authentication?"
+//! ```
 //!
 //! ### With Claude/OpenAI
 //!
@@ -343,11 +353,12 @@ pub mod python_bindings {
     use crate::loregrep::{LoreGrep, LoreGrepBuilder};
     use crate::core::types::{ScanResult, ToolResult};
     use serde_json::Value;
+    use std::sync::{Arc, Mutex};
 
     /// High-level Python API for LoreGrep - matches the Rust API exactly
     #[pyclass(name = "LoreGrep")]
     pub struct PyLoreGrep {
-        inner: LoreGrep,
+        inner: Arc<Mutex<LoreGrep>>,
     }
 
     #[pymethods]
@@ -361,17 +372,34 @@ pub mod python_bindings {
         }
 
         /// Scan a repository and build the index
-        fn scan<'py>(&mut self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
+        fn scan<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
             let inner = self.inner.clone();
             let path = path.to_string();
             
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                let mut loregrep = inner;
+                // Clone the LoreGrep to avoid holding the mutex guard across await
+                let mut loregrep = {
+                    let guard = inner.lock()
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to acquire lock: {}", e)))?;
+                    guard.clone()
+                }; // mutex guard is dropped here
+                
                 let result = loregrep.scan(&path).await
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Scan failed: {}", e)))?;
+                    .map_err(|e| match e {
+                        crate::LoreGrepError::IoError(io_err) => PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("IO error during scan: {}", io_err)),
+                        crate::LoreGrepError::AnalysisError(analysis_err) => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Analysis error: {}", analysis_err)),
+                        _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Scan failed: {}", e)),
+                    })?;
+                
+                // Update the shared state with the scanned data
+                {
+                    let mut guard = inner.lock()
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to acquire lock for update: {}", e)))?;
+                    *guard = loregrep;
+                } // mutex guard is dropped here
                 
                 Ok(PyScanResult {
-                    files_processed: result.files_scanned,
+                    files_scanned: result.files_scanned,
                     functions_found: result.functions_found,
                     structs_found: result.structs_found,
                     errors: Vec::new(), // TODO: Collect actual errors from scan
@@ -385,24 +413,39 @@ pub mod python_bindings {
             let inner = self.inner.clone();
             let tool_name = tool_name.to_string();
             
-            // Convert PyDict to serde_json::Value
+            // Convert PyDict to serde_json::Value with better error handling
             let args_json: Value = pythonize::depythonize(args)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid arguments: {}", e)))?;
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid tool arguments - could not convert to JSON: {}", e)))?;
             
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                let result = inner.execute_tool(&tool_name, args_json).await
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool execution failed: {}", e)))?;
+                // Clone the LoreGrep to avoid holding the mutex guard across await
+                let loregrep = {
+                    let guard = inner.lock()
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to acquire lock: {}", e)))?;
+                    guard.clone()
+                }; // mutex guard is dropped here
+                    
+                let result = loregrep.execute_tool(&tool_name, args_json).await
+                    .map_err(|e| match e {
+                        crate::LoreGrepError::ToolError(tool_err) => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool '{}' execution failed: {}", tool_name, tool_err)),
+                        crate::LoreGrepError::JsonError(json_err) => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Tool JSON error: {}", json_err)),
+                        crate::LoreGrepError::IoError(io_err) => PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Tool IO error: {}", io_err)),
+                        _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool execution failed: {}", e)),
+                    })?;
                 
-                // Convert ToolResult to Python-compatible format
+                // Convert ToolResult to Python-compatible format with better error handling
                 let metadata_str = serde_json::to_string(&result.data)
-                    .unwrap_or_else(|_| "{}".to_string());
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to serialize tool result metadata: {}", e)))?;
+                
+                let content = if result.success {
+                    serde_json::to_string(&result.data)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to serialize tool result data: {}", e)))?
+                } else {
+                    result.error.unwrap_or_else(|| "Unknown tool error".to_string())
+                };
                 
                 Ok(PyToolResult {
-                    content: if result.success {
-                        serde_json::to_string(&result.data).unwrap_or_else(|_| "{}".to_string())
-                    } else {
-                        result.error.unwrap_or_else(|| "Unknown error".to_string())
-                    },
+                    content,
                     metadata: metadata_str,
                 })
             })
@@ -477,7 +520,7 @@ pub mod python_bindings {
             let loregrep = slf.inner.clone().build()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Build failed: {}", e)))?;
             
-            Ok(PyLoreGrep { inner: loregrep })
+            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
         }
 
         fn __repr__(&self) -> String {
@@ -489,7 +532,7 @@ pub mod python_bindings {
     #[pyclass(name = "ScanResult")]
     pub struct PyScanResult {
         #[pyo3(get)]
-        pub files_processed: usize,
+        pub files_scanned: usize,
         #[pyo3(get)]
         pub functions_found: usize,
         #[pyo3(get)]
@@ -505,7 +548,7 @@ pub mod python_bindings {
         fn __repr__(&self) -> String {
             format!(
                 "ScanResult(files={}, functions={}, structs={}, duration={}ms)",
-                self.files_processed, self.functions_found, self.structs_found, self.duration_ms
+                self.files_scanned, self.functions_found, self.structs_found, self.duration_ms
             )
         }
     }
