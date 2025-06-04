@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::{
     LoreGrep,
     core::types::{ScanResult as PublicScanResult},
+    types::{FunctionSignature, StructSignature, ImportStatement, ExportStatement},
     internal::{
         config::CliConfig,
         cli_types::{AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs},
@@ -716,11 +717,8 @@ impl CliApp {
     // async fn analyze_file_internal(&self, file_path: &Path) -> Result<TreeNode> { ... }
 
     async fn save_cache(&self, _root_path: &Path) -> Result<()> {
-        // TODO: Implement cache saving
+        // Cache operations would be implemented here
         // For now, this is a placeholder
-        if self.verbose {
-            self.ui.print_info("Cache saving not yet implemented");
-        }
         Ok(())
     }
 
@@ -754,6 +752,62 @@ impl CliApp {
 
     fn print_error(&self, message: &str) {
         self.ui.print_error(message);
+    }
+
+    fn convert_function_results(&self, functions: Vec<&FunctionSignature>) -> Vec<SearchResult> {
+        functions.into_iter().map(|func| {
+            let context = if func.start_line > 0 && func.end_line > 0 {
+                Some(format!("{}-{}", func.start_line, func.end_line))
+            } else {
+                None
+            };
+            
+            SearchResult::new(
+                "function".to_string(),
+                func.format(),
+                "".to_string(), // file_path would be set by caller
+                Some(func.start_line),
+            ).with_context(context.unwrap_or_default())
+        }).collect()
+    }
+
+    fn convert_struct_results(&self, structs: Vec<&StructSignature>) -> Vec<SearchResult> {
+        structs.into_iter().map(|struct_def| {
+            let context = if struct_def.start_line > 0 && struct_def.end_line > 0 {
+                Some(format!("{}-{}", struct_def.start_line, struct_def.end_line))
+            } else {
+                None
+            };
+            
+            SearchResult::new(
+                "struct".to_string(),
+                struct_def.format(),
+                "".to_string(), // file_path would be set by caller
+                Some(struct_def.start_line),
+            ).with_context(context.unwrap_or_default())
+        }).collect()
+    }
+
+    fn convert_import_results(&self, imports: Vec<&ImportStatement>) -> Vec<SearchResult> {
+        imports.into_iter().map(|import| {
+            SearchResult::new(
+                "import".to_string(),
+                format!("use {};", import.module_path),
+                "".to_string(), // file_path would be set by caller
+                Some(import.line_number),
+            )
+        }).collect()
+    }
+
+    fn convert_export_results(&self, exports: Vec<&ExportStatement>) -> Vec<SearchResult> {
+        exports.into_iter().map(|export| {
+            SearchResult::new(
+                "export".to_string(),
+                format!("pub {}", export.exported_item),
+                "".to_string(), // file_path would be set by caller
+                Some(export.line_number),
+            )
+        }).collect()
     }
 }
 

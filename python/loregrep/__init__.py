@@ -43,7 +43,7 @@ except ImportError as e:
     ) from e
 
 # Package metadata
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __author__ = "Vasu Bhardwaj"
 __email__ = "voodoorapter014@gmail.com"
 
