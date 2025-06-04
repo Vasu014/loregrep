@@ -43,6 +43,14 @@ pip install loregrep
 - **Memory**: 100MB+ available RAM (scales with repository size)
 - **OS**: Linux, macOS, Windows
 
+## Documentation
+
+**Looking for language-specific documentation?**
+
+- 🦀 **Rust Developers**: See [README-rust.md](README-rust.md) for Rust-specific API, CLI usage, performance tips, and integration patterns
+- 🐍 **Python Developers**: See [README-python.md](README-python.md) for Python-specific examples, async patterns, and AI integration
+- 📖 **General Overview**: Continue reading this README for project overview and cross-language examples
+
 ## Quick Start
 
 ### 30-Second Example

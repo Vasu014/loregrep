@@ -1,6 +1,6 @@
 [package]
 name = "loregrep"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
 description = "Repository indexing library for AI coding assistants. Tree-sitter parsing, fast in-memory indexing, and tool APIs for LLM integration."
@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Vasu014/loregrep"
 keywords = ["code-indexing", "tree-sitter", "parsing", "coding-assistant", "repository-analysis"]
 categories = ["development-tools", "parsing", "data-structures"]
-readme = "README.md"
+readme = "README-rust.md"
 homepage = "https://github.com/Vasu014/loregrep"
 exclude = [
     "test-repos/",
