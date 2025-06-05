@@ -73,25 +73,25 @@ import asyncio
 import loregrep
 
 async def analyze_repository():
-    # Option 1: Zero-configuration auto-discovery (Recommended)
+    # Easiest way: Zero-configuration auto-discovery (Recommended)
     lg = loregrep.LoreGrep.auto_discover(".")
     # 🔍 Detected project languages: rust, python
     # ✅ Rust analyzer registered successfully
     # ✅ Python analyzer registered successfully
     
-    # Option 2: Enhanced builder with convenience methods
-    lg = (loregrep.LoreGrep.builder()
-          .with_rust_analyzer()         # ✅ Real-time feedback
-          .with_python_analyzer()       # ✅ Registration confirmation  
-          .optimize_for_performance()   # 🚀 Speed-optimized preset
-          .exclude_test_dirs()          # 🚫 Skip test directories
-          .max_file_size(1024 * 1024)  # 1MB limit
-          .build())                     # 🎆 Configuration summary
+    # Alternative: Enhanced builder for fine control
+    # lg = (loregrep.LoreGrep.builder()
+    #       .with_rust_analyzer()         # ✅ Real-time feedback
+    #       .with_python_analyzer()       # ✅ Registration confirmation  
+    #       .optimize_for_performance()   # 🚀 Speed-optimized preset
+    #       .exclude_test_dirs()          # 🚫 Skip test directories
+    #       .max_file_size(1024 * 1024)  # 1MB limit
+    #       .build())                     # 🎆 Configuration summary
     
-    # Option 3: Project-specific presets
-    lg = loregrep.LoreGrep.rust_project(".")      # Rust-optimized
-    # Or: loregrep.LoreGrep.python_project(".")   # Python-optimized
-    # Or: loregrep.LoreGrep.polyglot_project(".") # Multi-language
+    # Alternative: Project-specific presets
+    # lg = loregrep.LoreGrep.rust_project(".")      # Rust-optimized
+    # lg = loregrep.LoreGrep.python_project(".")    # Python-optimized
+    # lg = loregrep.LoreGrep.polyglot_project(".")  # Multi-language
     
     # Scan your repository with enhanced feedback
     result = await lg.scan("/path/to/your/project")
@@ -316,8 +316,8 @@ import asyncio
 
 # Multiple concurrent operations
 async def parallel_analysis():
-    lg1 = loregrep.LoreGrep.builder().build()
-    lg2 = loregrep.LoreGrep.builder().build()
+    lg1 = loregrep.LoreGrep.auto_discover("/project1")
+    lg2 = loregrep.LoreGrep.auto_discover("/project2")
     
     # Concurrent scanning
     results = await asyncio.gather(
@@ -355,7 +355,7 @@ import json
 from typing import List, Dict
 
 async def code_analysis_bot(user_question: str, repo_path: str):
-    lg = loregrep.LoreGrep.builder().build()
+    lg = loregrep.LoreGrep.auto_discover(repo_path)
     await lg.scan(repo_path)
     
     if "functions" in user_question.lower():

@@ -55,16 +55,22 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Enhanced builder with real-time feedback
-    let mut loregrep = LoreGrep::builder()
-        .with_rust_analyzer()            // ✅ Rust analyzer registered successfully
-        .with_python_analyzer()          // ✅ Python analyzer registered successfully
-        .max_file_size(2 * 1024 * 1024) // 2MB limit
-        .max_depth(10)
-        .file_patterns(vec!["*.rs".to_string(), "*.py".to_string()])
-        .exclude_patterns(vec!["target/".to_string(), ".git/".to_string()])
-        .respect_gitignore(true)
-        .build()?;                       // 🎆 LoreGrep configured with 2 languages
+    // Easiest way: Zero-configuration auto-discovery
+    let mut loregrep = LoreGrep::auto_discover("./my-project")?;
+    // 🔍 Detected project languages: rust, python
+    // ✅ Rust analyzer registered successfully
+    // ✅ Python analyzer registered successfully
+    
+    // Alternative: Enhanced builder for fine control
+    // let mut loregrep = LoreGrep::builder()
+    //     .with_rust_analyzer()            // ✅ Rust analyzer registered successfully
+    //     .with_python_analyzer()          // ✅ Python analyzer registered successfully
+    //     .max_file_size(2 * 1024 * 1024) // 2MB limit
+    //     .max_depth(10)
+    //     .file_patterns(vec!["*.rs".to_string(), "*.py".to_string()])
+    //     .exclude_patterns(vec!["target/".to_string(), ".git/".to_string()])
+    //     .respect_gitignore(true)
+    //     .build()?;                       // 🎆 LoreGrep configured with 2 languages
     
     // Enhanced scan with progress indicators and summary
     let result = loregrep.scan("./my-project").await?;
@@ -92,12 +98,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API Reference
 
-### Enhanced Builder Pattern with Real-time Feedback
+### Advanced Configuration with Builder Pattern
+
+For cases where you need fine-grained control beyond auto-discovery:
 
 ```rust
 use loregrep::LoreGrep;
 
-// Enhanced builder with language analyzer registration
+// Enhanced builder with detailed configuration
 let mut loregrep = LoreGrep::builder()
     .with_rust_analyzer()                // ✅ Rust analyzer registered successfully
     .with_python_analyzer()              // ✅ Python analyzer registered successfully  
@@ -422,9 +430,7 @@ async fn search_handler(
 #[tokio::main]
 async fn main() {
     let loregrep = Arc::new(
-        LoreGrep::builder()
-            .with_rust_analyzer()    // ✅ Enhanced with feedback
-            .build()
+        LoreGrep::auto_discover(".")    // ✅ Zero-configuration setup
             .unwrap()
     );
     
@@ -448,7 +454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     
     rt.block_on(async {
-        let loregrep = LoreGrep::builder().build()?;
+        let loregrep = LoreGrep::auto_discover("src")?;
         let result = loregrep.scan("src").await?;
         
         // Generate code based on analysis

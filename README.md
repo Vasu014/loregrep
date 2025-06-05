@@ -71,8 +71,8 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create and scan the current repository
-    let mut loregrep = LoreGrep::builder().build()?;
+    // Zero-configuration setup - auto-detects project type
+    let mut loregrep = LoreGrep::auto_discover(".")?;
     let scan_result = loregrep.scan(".").await?;
     
     println!("📁 Scanned loregrep repository");
@@ -97,8 +97,8 @@ import loregrep
 import os
 
 async def main():
-    # Create and scan the current repository
-    loregrep_instance = loregrep.LoreGrep.builder().build()
+    # Zero-configuration setup - auto-detects project type
+    loregrep_instance = loregrep.LoreGrep.auto_discover(".")
     scan_result = await loregrep_instance.scan(".")
     
     repo_name = os.path.basename(os.getcwd())
@@ -132,8 +132,19 @@ async_main (src/internal/ai/conversation.rs:45) - Main conversation loop
 
 Once you understand the basics, scan your own projects:
 
+**Rust:**
+```rust
+// Easiest way - auto-discover project type and scan
+let mut loregrep = LoreGrep::auto_discover("/path/to/your/project")?;
+let scan_result = loregrep.scan("/path/to/your/project").await?;
+println!("📁 Found {} functions in {} files", 
+         scan_result.functions_found, scan_result.files_scanned);
+```
+
+**Python:**
 ```python
-# Scan any repository
+# Easiest way - auto-discover project type and scan
+loregrep_instance = loregrep.LoreGrep.auto_discover("/path/to/your/project")
 scan_result = await loregrep_instance.scan("/path/to/your/project")
 print(f"📁 Found {scan_result.functions_found} functions in {scan_result.files_scanned} files")
 ```
@@ -250,22 +261,33 @@ tree = await loregrep.execute_tool("get_repository_tree", {
 
 ## API Examples
 
+### Setup Options
+
+Loregrep provides three convenient ways to create instances:
+
+1. **`auto_discover()`** - Zero configuration, automatically detects project languages
+2. **`builder()`** - Full control with fluent configuration methods
+3. **Project presets** - Language-specific optimized configurations (`rust_project()`, `python_project()`, `polyglot_project()`)
+
 ### Rust API
 
 ```rust
 use loregrep::{LoreGrep, ToolSchema};
 use serde_json::json;
 
-// Configure with builder pattern
-let mut loregrep = LoreGrep::builder()
-    .with_rust_analyzer()           // ✅ Rust analyzer registered
-    .with_python_analyzer()         // ✅ Python analyzer registered
-    .max_file_size(1024 * 1024)     // 1MB max file size
-    .max_depth(10)                  // Maximum 10 directory levels
-    .file_patterns(vec!["*.rs", "*.py"])  // Include only these files
-    .exclude_patterns(vec!["target/", "node_modules/"])  // Skip these dirs
-    .respect_gitignore(true)        // Honor .gitignore
-    .build()?;
+// Easiest way: zero-configuration auto-discovery
+let mut loregrep = LoreGrep::auto_discover(".")?;
+
+// Alternative: configure with builder pattern for fine control
+// let mut loregrep = LoreGrep::builder()
+//     .with_rust_analyzer()           // ✅ Rust analyzer registered
+//     .with_python_analyzer()         // ✅ Python analyzer registered
+//     .max_file_size(1024 * 1024)     // 1MB max file size
+//     .max_depth(10)                  // Maximum 10 directory levels
+//     .file_patterns(vec!["*.rs", "*.py"])  // Include only these files
+//     .exclude_patterns(vec!["target/", "node_modules/"])  // Skip these dirs
+//     .respect_gitignore(true)        // Honor .gitignore
+//     .build()?;
 
 // Scan repository (use "." for current directory)
 let scan_result = loregrep.scan(".").await?;
@@ -297,16 +319,19 @@ import loregrep
 import json
 
 async def main():
-    # Configure with builder pattern
-    loregrep_instance = (loregrep.LoreGrep.builder()
-                        .with_rust_analyzer()        # ✅ Rust analyzer registered
-                        .with_python_analyzer()      # ✅ Python analyzer registered
-                        .max_file_size(1024 * 1024)
-                        .max_depth(10)
-                        .file_patterns(["*.py", "*.rs", "*.js"])
-                        .exclude_patterns(["__pycache__/", "node_modules/"])
-                        .respect_gitignore(True)
-                        .build())
+    # Easiest way: zero-configuration auto-discovery
+    loregrep_instance = loregrep.LoreGrep.auto_discover(".")
+    
+    # Alternative: configure with builder pattern for fine control
+    # loregrep_instance = (loregrep.LoreGrep.builder()
+    #                     .with_rust_analyzer()        # ✅ Rust analyzer registered
+    #                     .with_python_analyzer()      # ✅ Python analyzer registered
+    #                     .max_file_size(1024 * 1024)
+    #                     .max_depth(10)
+    #                     .file_patterns(["*.py", "*.rs", "*.js"])
+    #                     .exclude_patterns(["__pycache__/", "node_modules/"])
+    #                     .respect_gitignore(True)
+    #                     .build())
 
     # Scan repository (use "." for current directory)
     scan_result = await loregrep_instance.scan(".")
