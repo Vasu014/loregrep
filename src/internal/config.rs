@@ -19,6 +19,7 @@ pub struct FileScanningConfig {
     pub max_file_size: u64,
     pub follow_symlinks: bool,
     pub max_depth: Option<u32>,
+    pub respect_gitignore: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +89,7 @@ impl Default for CliConfig {
                 max_file_size: 1024 * 1024, // 1MB
                 follow_symlinks: false,
                 max_depth: Some(20),
+                respect_gitignore: true,
             },
             analysis: AnalysisConfig {
                 languages: vec!["rust".to_string()], // Start with Rust only

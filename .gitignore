@@ -25,6 +25,7 @@ env/
 ENV/
 .venv/
 .env/
+mcpenv/
 .python-version
 __pycache__/
 *.py[cod]

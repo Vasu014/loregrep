@@ -279,7 +279,13 @@ impl LocalAnalysisTools {
         // Get the actual repository tree structure from repo_map
         // This will build the full hierarchical structure if it doesn't exist
         let (repository_tree_opt, file_count, metadata) = {
-            let repo_map = self.repo_map.lock().unwrap();
+            let mut repo_map = self.repo_map.lock().unwrap();
+            
+            // Ensure repository tree is built if needed
+            if let Err(e) = repo_map.build_repository_tree_if_needed() {
+                eprintln!("Warning: Failed to build repository tree: {}", e);
+            }
+            
             (
                 repo_map.get_repository_tree(),
                 repo_map.file_count(),
@@ -863,6 +869,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_repository_tree_builds_with_scanned_files() {
+        // Test that the repository tree tool properly builds the tree when files are present
+        let repo_map = create_test_repo_map();
+        let rust_analyzer = create_test_analyzer();
+        let tools = LocalAnalysisTools::new(repo_map.clone(), rust_analyzer);
+        
+        // Add some test files to the repo map
+        {
+            let mut map = repo_map.lock().unwrap();
+            
+            // Create a test file with functions and structs
+            let mut tree_node = crate::types::TreeNode::new("/test/example.rs".to_string(), "rust".to_string());
+            tree_node.functions.push(crate::types::FunctionSignature::new("test_function".to_string(), "/test/example.rs".to_string()));
+            tree_node.structs.push(crate::types::StructSignature::new("TestStruct".to_string(), "/test/example.rs".to_string()));
+            
+            map.add_file(tree_node).unwrap();
+            
+            // Add another test file in a different directory
+            let mut tree_node2 = crate::types::TreeNode::new("/test/subdir/another.rs".to_string(), "rust".to_string());
+            tree_node2.functions.push(crate::types::FunctionSignature::new("another_function".to_string(), "/test/subdir/another.rs".to_string()));
+            
+            map.add_file(tree_node2).unwrap();
+            
+            // Verify files were added
+            assert_eq!(map.file_count(), 2);
+        }
+        
+        // Test the get_repository_tree tool
+        let input = json!({
+            "include_file_details": true
+        });
+        
+        let result = tools.execute_tool("get_repository_tree", input).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.data["status"], "success");
+        
+        // Verify that repository_tree is not the empty repository placeholder
+        let repo_tree = &result.data["repository_tree"];
+        assert_ne!(repo_tree["name"], "empty_repository");
+        
+        // Verify metadata shows the correct number of files
+        let metadata = &result.data["metadata"];
+        assert!(metadata["total_files"].as_u64().unwrap() > 0);
+        
+        // Verify that the note about empty repository is not present
+        assert!(metadata.get("note").is_none());
+        
+        // Verify the repository tree structure is correct
+        assert_eq!(metadata["root_path"], "/test");
+        assert!(metadata["languages"].as_array().unwrap().contains(&json!("rust")));
     }
 
     // === ToolResult Tests ===

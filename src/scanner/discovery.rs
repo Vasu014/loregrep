@@ -55,6 +55,7 @@ pub struct RepositoryScanner {
     filters: FileFilters,
     language_detector: LanguageDetector,
     config: ScanConfig,
+    scanning_config: FileScanningConfig,
 }
 
 impl FileFilters {
@@ -171,6 +172,7 @@ impl RepositoryScanner {
             filters,
             language_detector,
             config,
+            scanning_config: scanning_config.clone(),
         })
     }
 
@@ -293,13 +295,13 @@ impl RepositoryScanner {
         let mut builder = WalkBuilder::new(root_path);
         
         builder
-            .follow_links(self.config.follow_symlinks)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
+            .follow_links(self.scanning_config.follow_symlinks)
+            .git_ignore(self.scanning_config.respect_gitignore)
+            .git_global(self.scanning_config.respect_gitignore)
+            .git_exclude(self.scanning_config.respect_gitignore)
             .hidden(false); // Include hidden files by default
 
-        if let Some(max_depth) = self.config.max_depth {
+        if let Some(max_depth) = self.scanning_config.max_depth {
             builder.max_depth(Some(max_depth as usize));
         }
 
@@ -366,10 +368,11 @@ mod tests {
     fn create_test_config() -> FileScanningConfig {
         FileScanningConfig {
             include_patterns: vec!["*.rs".to_string(), "*.py".to_string()],
-            exclude_patterns: vec!["target/*".to_string(), "*.test.rs".to_string()],
+            exclude_patterns: vec!["**/target/**".to_string(), "*.test.rs".to_string()],
             max_file_size: 1024 * 1024, // 1MB
             follow_symlinks: false,
             max_depth: Some(10),
+            respect_gitignore: true,
         }
     }
 

@@ -32,6 +32,7 @@ pub struct LoreGrepConfig {
     pub max_file_size: u64,
     pub max_depth: Option<u32>,
     pub follow_symlinks: bool,
+    pub respect_gitignore: bool,
 }
 
 impl Default for LoreGrepConfig {
@@ -50,10 +51,25 @@ impl Default for LoreGrepConfig {
                 "**/.git/**".to_string(),
                 "**/node_modules/**".to_string(),
                 "**/test-repos/**".to_string(),
+                // Python virtual environments
+                "**/venv/**".to_string(),
+                "**/env/**".to_string(),
+                "**/.venv/**".to_string(),
+                "**/.env/**".to_string(),
+                "**/mcpenv/**".to_string(),
+                "**/site-packages/**".to_string(),
+                "**/__pycache__/**".to_string(),
+                "**/*.pyc".to_string(),
+                "**/.pytest_cache/**".to_string(),
+                // Build and cache directories
+                "**/dist/**".to_string(),
+                "**/build/**".to_string(),
+                "**/.cache/**".to_string(),
             ],
             max_file_size: 1024 * 1024, // 1MB
             max_depth: Some(20),
             follow_symlinks: false,
+            respect_gitignore: true,
         }
     }
 }
@@ -688,11 +704,10 @@ impl LoreGrepBuilder {
         self
     }
 
-    /// Enable or disable respecting .gitignore files (alias for follow_symlinks for now)
-    pub fn respect_gitignore(self, respect: bool) -> Self {
-        // For now, map this to follow_symlinks as a placeholder
-        // In a more complete implementation, this would be a separate config field
-        self.follow_symlinks(!respect)
+    /// Enable or disable respecting .gitignore files
+    pub fn respect_gitignore(mut self, respect: bool) -> Self {
+        self.config.respect_gitignore = respect;
+        self
     }
 
     /// Disable maximum depth limit
@@ -721,6 +736,7 @@ impl LoreGrepBuilder {
             follow_symlinks: self.config.follow_symlinks,
             max_file_size: self.config.max_file_size,
             max_depth: self.config.max_depth,
+            respect_gitignore: self.config.respect_gitignore,
         };
         let scanner = RepositoryScanner::new(&default_config, None)
             .map_err(|e| LoreGrepError::InternalError(format!("Scanner creation failed: {}", e)))?;
@@ -959,6 +975,7 @@ mod tests {
             max_file_size: 2 * 1024 * 1024, // 2MB
             max_depth: Some(15),
             follow_symlinks: true,
+            respect_gitignore: true,
         };
         
         assert_eq!(config.max_files, Some(5000));

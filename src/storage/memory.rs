@@ -918,15 +918,17 @@ impl RepoMap {
             common_prefix = self.find_common_prefix(&common_prefix, &file.file_path);
         }
         
-        // Ensure we end at a directory boundary
+        // Ensure we end at a directory boundary and normalize the path
         let common_path = std::path::Path::new(&common_prefix);
-        if common_path.is_file() {
-            common_path.parent()
-                .unwrap_or_else(|| std::path::Path::new("/"))
-                .to_string_lossy()
-                .to_string()
+        
+        // If the common prefix ends with a file, get its parent directory
+        if common_path.is_file() || !common_prefix.ends_with('/') {
+            let parent = common_path.parent()
+                .unwrap_or_else(|| std::path::Path::new("/"));
+            parent.to_string_lossy().to_string()
         } else {
-            common_prefix
+            // Remove trailing slash for consistency
+            common_prefix.trim_end_matches('/').to_string()
         }
     }
 
