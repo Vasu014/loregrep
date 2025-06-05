@@ -93,6 +93,8 @@ pub struct PartialAnalysis {
     pub language: String,
     pub functions: Vec<FunctionSignature>,
     pub structs: Vec<StructSignature>,
+    pub imports: Vec<ImportStatement>,
+    pub exports: Vec<ExportStatement>,
     pub errors: Vec<String>,
     pub fallback_used: bool,
 }
@@ -104,6 +106,8 @@ impl PartialAnalysis {
             language,
             functions: Vec::new(),
             structs: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
             errors: Vec::new(),
             fallback_used: false,
         }

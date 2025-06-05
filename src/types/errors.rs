@@ -32,6 +32,9 @@ pub enum AnalysisError {
     #[error("Language analyzer not found for extension: {extension}")]
     AnalyzerNotFound { extension: String },
 
+    #[error("Registry error: {message}")]
+    RegistryError { message: String },
+
     #[error("IO error: {0}")]
     Io(String),
 

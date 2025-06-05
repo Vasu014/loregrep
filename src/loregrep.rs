@@ -4,7 +4,12 @@ use serde_json::Value;
 use crate::core::{LoreGrepError, Result, ToolSchema, ToolResult, ScanResult};
 use crate::storage::memory::RepoMap;
 use crate::scanner::discovery::RepositoryScanner;
-use crate::analyzers::{rust::RustAnalyzer, traits::LanguageAnalyzer};
+use crate::analyzers::{
+    rust::RustAnalyzer, 
+    python::PythonAnalyzer,
+    traits::LanguageAnalyzer,
+    registry::{LanguageAnalyzerRegistry, DefaultLanguageRegistry}
+};
 use crate::internal::{ai_tools::LocalAnalysisTools, config::FileScanningConfig};
 
 /// The main struct for interacting with LoreGrep
@@ -14,6 +19,7 @@ pub struct LoreGrep {
     scanner: RepositoryScanner,
     tools: LocalAnalysisTools,
     config: LoreGrepConfig,
+    language_registry: Arc<DefaultLanguageRegistry>,
 }
 
 /// Configuration for LoreGrep
@@ -33,7 +39,12 @@ impl Default for LoreGrepConfig {
         Self {
             max_files: Some(10000),
             cache_ttl_seconds: 300, // 5 minutes
-            include_patterns: vec!["**/*.rs".to_string()],
+            include_patterns: vec![
+                "**/*.rs".to_string(),
+                "**/*.py".to_string(),
+                "**/*.pyx".to_string(),
+                "**/*.pyi".to_string(),
+            ],
             exclude_patterns: vec![
                 "**/target/**".to_string(),
                 "**/.git/**".to_string(),
@@ -57,11 +68,25 @@ impl LoreGrep {
     /// This should be called by the host application, not exposed as a tool
     pub async fn scan(&mut self, path: &str) -> Result<ScanResult> {
         let start_time = std::time::Instant::now();
+        
+        println!("🔍 Starting repository scan for: {}", path);
+        let supported_langs = self.language_registry.list_supported_languages();
+        if !supported_langs.is_empty() {
+            println!("🌐 Registered analyzers: {}", supported_langs.join(", "));
+        }
 
         // Discover files
         let scan_result = self.scanner.scan(path)
             .map_err(|e| LoreGrepError::InternalError(format!("File scanning failed: {}", e)))?;
         let discovered_files = scan_result.files;
+        
+        if discovered_files.is_empty() {
+            println!("⚠️  No files found in the specified path");
+            println!("💡 Check that the path exists and contains supported file types");
+            return Ok(ScanResult::new(0, 0, 0, start_time.elapsed().as_millis() as u64, Vec::new()));
+        }
+        
+        println!("📁 Found {} files to analyze", discovered_files.len());
 
         let mut files_scanned = 0;
         let mut functions_found = 0;
@@ -83,11 +108,48 @@ impl LoreGrep {
                 Err(_) => continue, // Skip files we can't read
             };
 
-            // Analyze file with Rust analyzer via tools
-            // Create a temporary analyzer for scanning (tools has the real one)
-            let temp_analyzer = RustAnalyzer::new()
-                .map_err(|e| LoreGrepError::InternalError(format!("Analyzer creation failed: {}", e)))?;
-            match temp_analyzer.analyze_file(&content, &file_info.path.to_string_lossy()).await {
+            // Analyze file with appropriate analyzer based on language
+            let analysis_result = if self.language_registry.list_supported_languages().contains(&file_info.language) {
+                // Create analyzer instance based on language (temporary approach)
+                match file_info.language.as_str() {
+                    "rust" => {
+                        let temp_analyzer = RustAnalyzer::new()
+                            .map_err(|e| LoreGrepError::InternalError(format!("Rust analyzer creation failed: {}", e)))?;
+                        temp_analyzer.analyze_file(&content, &file_info.path.to_string_lossy()).await
+                    },
+                    "python" => {
+                        let temp_analyzer = PythonAnalyzer::new()
+                            .map_err(|e| LoreGrepError::InternalError(format!("Python analyzer creation failed: {}", e)))?;
+                        temp_analyzer.analyze_file(&content, &file_info.path.to_string_lossy()).await
+                    },
+                    _ => {
+                        eprintln!("⚠️  Analyzer for '{}' not yet implemented", file_info.language);
+                        continue;
+                    }
+                }
+            } else {
+                // Provide helpful error message for unsupported languages
+                let supported_langs = self.language_registry.list_supported_languages();
+                if supported_langs.is_empty() {
+                    eprintln!("⚠️  No language analyzers registered! Use LoreGrep::builder().with_rust_analyzer() or .with_python_analyzer()");
+                } else {
+                    eprintln!("⚠️  No analyzer available for '{}' files. Supported: {}", 
+                             file_info.language, 
+                             supported_langs.join(", "));
+                    // Suggest appropriate analyzer method
+                    let suggestion = match file_info.language.as_str() {
+                        "rust" => "with_rust_analyzer()",
+                        "python" => "with_python_analyzer()", 
+                        "typescript" | "javascript" => "with_typescript_analyzer() (coming soon)",
+                        "go" => "with_go_analyzer() (coming soon)",
+                        _ => "a custom analyzer for this language"
+                    };
+                    eprintln!("💡 Add support with: LoreGrep::builder().{}", suggestion);
+                }
+                continue;
+            };
+            
+            match analysis_result {
                 Ok(analysis) => {
                     functions_found += analysis.tree_node.functions.len();
                     structs_found += analysis.tree_node.structs.len();
@@ -116,6 +178,9 @@ impl LoreGrep {
         } // Mutex guard is dropped here
 
         let duration = start_time.elapsed();
+        
+        // Print scan summary with enhanced feedback
+        self.print_scan_summary(files_scanned, functions_found, structs_found, &languages, duration);
         
         Ok(ScanResult::new(
             files_scanned,
@@ -168,6 +233,28 @@ impl LoreGrep {
         repo_map.get_metadata().total_files > 0
     }
 
+    /// Print a comprehensive scan summary with language breakdown
+    fn print_scan_summary(&self, files_scanned: usize, functions_found: usize, structs_found: usize, languages: &std::collections::HashSet<String>, duration: std::time::Duration) {
+        if files_scanned == 0 {
+            println!("\n📊 Scan Summary:");
+            println!("   ⚠️  No files found matching your criteria");
+            println!("   💡 Check your include/exclude patterns or language analyzers");
+            println!("   📁 Supported languages: {:?}", self.language_registry.list_supported_languages());
+            return;
+        }
+        
+        println!("\n📊 Scan Summary:");
+        println!("   📁 Files analyzed: {}", files_scanned);
+        println!("   🔧 Functions found: {}", functions_found);
+        println!("   🏗️  Structs found: {}", structs_found);
+        println!("   🌐 Languages detected: {:?}", languages.iter().cloned().collect::<Vec<_>>());
+        println!("   ⏱️  Scan duration: {:.2}s", duration.as_secs_f64());
+        
+        if functions_found > 0 || structs_found > 0 {
+            println!("   ✅ Repository successfully indexed and ready for queries!");
+        }
+    }
+
     /// Get repository statistics
     pub fn get_stats(&self) -> Result<ScanResult> {
         let repo_map = self.repo_map.lock()
@@ -189,7 +276,7 @@ impl LoreGrep {
 #[derive(Clone)]
 pub struct LoreGrepBuilder {
     config: LoreGrepConfig,
-    rust_analyzer_enabled: bool,
+    registry: DefaultLanguageRegistry,
 }
 
 impl LoreGrepBuilder {
@@ -197,19 +284,51 @@ impl LoreGrepBuilder {
     pub fn new() -> Self {
         Self {
             config: LoreGrepConfig::default(),
-            rust_analyzer_enabled: true,
+            registry: DefaultLanguageRegistry::new(),
         }
     }
 
     /// Add Rust language analyzer (enabled by default)
     pub fn with_rust_analyzer(mut self) -> Self {
-        self.rust_analyzer_enabled = true;
+        match RustAnalyzer::new() {
+            Ok(analyzer) => {
+                if let Err(e) = self.registry.register(Box::new(analyzer)) {
+                    eprintln!("❌ Failed to register Rust analyzer: {}", e);
+                    if e.to_string().contains("already registered") {
+                        eprintln!("💡 Rust analyzer is already registered - no action needed");
+                    }
+                } else {
+                    println!("✅ Rust analyzer registered successfully");
+                    println!("📄 Supports: .rs files");
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Rust analyzer unavailable: {}", e);
+                eprintln!("⚠️  Rust files (.rs) will be skipped during scanning");
+            }
+        }
         self
     }
 
-    /// Add Python language analyzer (future)
-    pub fn with_python_analyzer(self) -> Self {
-        // TODO: Implement when Python analyzer is available
+    /// Add Python language analyzer
+    pub fn with_python_analyzer(mut self) -> Self {
+        match PythonAnalyzer::new() {
+            Ok(analyzer) => {
+                if let Err(e) = self.registry.register(Box::new(analyzer)) {
+                    eprintln!("❌ Failed to register Python analyzer: {}", e);
+                    if e.to_string().contains("already registered") {
+                        eprintln!("💡 Python analyzer is already registered - no action needed");
+                    }
+                } else {
+                    println!("✅ Python analyzer registered successfully");
+                    println!("📄 Supports: .py, .pyx, .pyi files");
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Python analyzer unavailable: {}", e);
+                eprintln!("⚠️  Python files (.py, .pyx, .pyi) will be skipped during scanning");
+            }
+        }
         self
     }
 
@@ -285,8 +404,19 @@ impl LoreGrepBuilder {
         self
     }
 
-    /// Build the LoreGrep instance
+    /// Build the LoreGrep instance with validation
     pub fn build(self) -> Result<LoreGrep> {
+        // Validate that at least one analyzer is registered
+        let supported_languages = self.registry.list_supported_languages();
+        if supported_languages.is_empty() {
+            eprintln!("⚠️  Warning: No language analyzers registered!");
+            eprintln!("💡 Consider adding: .with_rust_analyzer() or .with_python_analyzer()");
+            eprintln!("📁 Files will be discovered but not analyzed");
+        } else {
+            println!("🎆 LoreGrep configured with {} language(s): {}", 
+                     supported_languages.len(), 
+                     supported_languages.join(", "));
+        }
         let repo_map = Arc::new(Mutex::new(RepoMap::new()));
         let default_config = FileScanningConfig {
             include_patterns: self.config.include_patterns.clone(),
@@ -306,12 +436,16 @@ impl LoreGrepBuilder {
             analyzer,
         );
 
-        Ok(LoreGrep {
+        let loregrep = LoreGrep {
             repo_map,
             scanner,
             tools,
             config: self.config,
-        })
+            language_registry: Arc::new(self.registry),
+        };
+        
+        println!("✅ LoreGrep instance created successfully!");
+        Ok(loregrep)
     }
 }
 
@@ -335,7 +469,8 @@ mod tests {
         let builder = LoreGrepBuilder::new();
         assert_eq!(builder.config.cache_ttl_seconds, 300);
         assert_eq!(builder.config.max_files, Some(10000));
-        assert!(builder.rust_analyzer_enabled);
+        // Registry should be initialized (can check by listing supported languages)
+        assert!(builder.registry.list_supported_languages().is_empty()); // Empty initially
     }
 
     #[test]

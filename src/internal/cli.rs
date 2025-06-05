@@ -244,52 +244,82 @@ impl CliApp {
         self.ui.print_header("File Analysis");
 
         if !args.file.exists() {
-            self.ui.print_error(&format!("File not found: {}", args.file.display()));
+            self.ui.print_error(&format!("Path not found: {}", args.file.display()));
             return Ok(());
-        }
-
-        if self.verbose {
-            self.ui.print_info(&format!("Analyzing file: {}", args.file.display()));
-            self.ui.print_info(&format!("Output format: {}", args.format));
         }
 
         let start_time = Instant::now();
-        
-        // Use public API to analyze file
-        let tool_result = self.loregrep.execute_tool("analyze_file", serde_json::json!({
-            "file_path": args.file.to_string_lossy(),
-            "include_source": true
-        })).await
-        .map_err(|e| anyhow::anyhow!("File analysis failed: {}", e))?;
-        
-        let analysis_duration = start_time.elapsed();
 
-        if !tool_result.success {
-            self.ui.print_error(&format!("Analysis failed: {:?}", tool_result.error));
-            return Ok(());
-        }
+        if args.file.is_dir() {
+            // Directory analysis - analyze all files in the directory
+            if self.verbose {
+                self.ui.print_info(&format!("Analyzing directory: {}", args.file.display()));
+                self.ui.print_info(&format!("Output format: {}", args.format));
+            }
 
-        // Display results based on format
-        match args.format.as_str() {
-            "json" => {
-                let json = serde_json::to_string_pretty(&tool_result.data)
-                    .context("Failed to serialize analysis to JSON")?;
-                println!("{}", json);
-            },
-            "text" => {
-                self.display_tool_analysis_text(&tool_result.data, &args);
-            },
-            "tree" => {
-                self.display_tool_analysis_tree(&tool_result.data);
-            },
-            _ => {
-                self.ui.print_error(&format!("Unknown output format: {}", args.format));
+            // Use public API to analyze directory
+            let tool_result = self.loregrep.execute_tool("analyze_directory", serde_json::json!({
+                "directory_path": args.file.to_string_lossy(),
+                "include_source": true
+            })).await
+            .map_err(|e| anyhow::anyhow!("Directory analysis failed: {}", e))?;
+            
+            let analysis_duration = start_time.elapsed();
+
+            if !tool_result.success {
+                self.ui.print_error(&format!("Analysis failed: {:?}", tool_result.error));
                 return Ok(());
             }
-        }
 
-        if self.verbose {
-            self.ui.print_info(&format!("\nAnalysis completed in {:?}", analysis_duration));
+            // Display directory results
+            self.display_directory_analysis(&tool_result.data, &args);
+
+            if self.verbose {
+                self.ui.print_info(&format!("\nDirectory analysis completed in {:?}", analysis_duration));
+            }
+        } else {
+            // Single file analysis (existing logic)
+            if self.verbose {
+                self.ui.print_info(&format!("Analyzing file: {}", args.file.display()));
+                self.ui.print_info(&format!("Output format: {}", args.format));
+            }
+
+            // Use public API to analyze file
+            let tool_result = self.loregrep.execute_tool("analyze_file", serde_json::json!({
+                "file_path": args.file.to_string_lossy(),
+                "include_source": true
+            })).await
+            .map_err(|e| anyhow::anyhow!("File analysis failed: {}", e))?;
+            
+            let analysis_duration = start_time.elapsed();
+
+            if !tool_result.success {
+                self.ui.print_error(&format!("Analysis failed: {:?}", tool_result.error));
+                return Ok(());
+            }
+
+            // Display results based on format
+            match args.format.as_str() {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&tool_result.data)
+                        .context("Failed to serialize analysis to JSON")?;
+                    println!("{}", json);
+                },
+                "text" => {
+                    self.display_tool_analysis_text(&tool_result.data, &args);
+                },
+                "tree" => {
+                    self.display_tool_analysis_tree(&tool_result.data);
+                },
+                _ => {
+                    self.ui.print_error(&format!("Unknown output format: {}", args.format));
+                    return Ok(());
+                }
+            }
+
+            if self.verbose {
+                self.ui.print_info(&format!("\nAnalysis completed in {:?}", analysis_duration));
+            }
         }
 
         Ok(())
@@ -711,6 +741,120 @@ impl CliApp {
                         println!("  └── struct {}", name);
                     }
                 }
+            }
+        }
+    }
+    
+    fn display_directory_analysis(&self, data: &serde_json::Value, args: &AnalyzeArgs) {
+        match args.format.as_str() {
+            "json" => {
+                let json = serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string());
+                println!("{}", json);
+            },
+            "text" => {
+                if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
+                    let mut total_functions = 0;
+                    let mut total_structs = 0;
+                    
+                    for file_data in files {
+                        if let Some(file_path) = file_data.get("file_path").and_then(|v| v.as_str()) {
+                            self.ui.print_header(&format!("File: {}", file_path));
+                            
+                            if let Some(language) = file_data.get("language").and_then(|v| v.as_str()) {
+                                self.ui.print_info(&format!("Language: {}", language));
+                            }
+                            
+                            // Display functions
+                            if args.functions || (!args.structs && !args.imports) {
+                                if let Some(functions) = file_data.get("functions").and_then(|v| v.as_array()) {
+                                    if !functions.is_empty() {
+                                        println!("Functions:");
+                                        for func in functions {
+                                            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                                let params = func.get("parameters")
+                                                    .and_then(|v| v.as_array())
+                                                    .map(|arr| arr.len())
+                                                    .unwrap_or(0);
+                                                let return_type = func.get("return_type")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("");
+                                                
+                                                println!("  fn {}({} params) -> {}", name, params, 
+                                                    if return_type.is_empty() { "()" } else { return_type });
+                                                total_functions += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Display structs
+                            if args.structs || (!args.functions && !args.imports) {
+                                if let Some(structs) = file_data.get("structs").and_then(|v| v.as_array()) {
+                                    if !structs.is_empty() {
+                                        println!("Structs:");
+                                        for struct_item in structs {
+                                            if let Some(name) = struct_item.get("name").and_then(|v| v.as_str()) {
+                                                let fields = struct_item.get("fields")
+                                                    .and_then(|v| v.as_array())
+                                                    .map(|arr| arr.len())
+                                                    .unwrap_or(0);
+                                                println!("  struct {} {{ {} fields }}", name, fields);
+                                                total_structs += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            println!(); // Blank line between files
+                        }
+                    }
+                    
+                    // Summary
+                    self.ui.print_success(&format!("Summary: {} functions, {} structs across {} files", 
+                        total_functions, total_structs, files.len()));
+                }
+            },
+            "tree" => {
+                if let Some(directory_path) = data.get("directory_path").and_then(|v| v.as_str()) {
+                    println!("📁 {}", directory_path);
+                    
+                    if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
+                        for (i, file_data) in files.iter().enumerate() {
+                            let is_last = i == files.len() - 1;
+                            let prefix = if is_last { "└──" } else { "├──" };
+                            let sub_prefix = if is_last { "    " } else { "│   " };
+                            
+                            if let Some(file_path) = file_data.get("file_path").and_then(|v| v.as_str()) {
+                                let file_name = std::path::Path::new(file_path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(file_path);
+                                println!("{} 📄 {}", prefix, file_name);
+                                
+                                if let Some(functions) = file_data.get("functions").and_then(|v| v.as_array()) {
+                                    for func in functions {
+                                        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                            println!("{}├── fn {}", sub_prefix, name);
+                                        }
+                                    }
+                                }
+                                
+                                if let Some(structs) = file_data.get("structs").and_then(|v| v.as_array()) {
+                                    for struct_item in structs {
+                                        if let Some(name) = struct_item.get("name").and_then(|v| v.as_str()) {
+                                            println!("{}└── struct {}", sub_prefix, name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            _ => {
+                self.ui.print_error(&format!("Unknown output format: {}", args.format));
             }
         }
     }

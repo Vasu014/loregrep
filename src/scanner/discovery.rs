@@ -269,11 +269,6 @@ impl RepositoryScanner {
 
         if let Some(pb) = progress {
             pb.finish_and_clear();
-            println!(
-                "Scan complete! Found {} files ({} filtered out)",
-                discovered_files.len(),
-                total_filtered.load(Ordering::Relaxed)
-            );
         }
 
         let scan_duration = start_time.elapsed();

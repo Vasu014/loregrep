@@ -18,6 +18,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
+    /// Working directory for all operations
+    #[arg(short, long, global = true, default_value = ".")]
+    pub directory: PathBuf,
+
     /// Enable verbose output
     #[arg(short, long, global = true)]
     pub verbose: bool,
@@ -60,10 +64,37 @@ async fn main() -> Result<()> {
 
     // Execute command
     match cli.command {
-        Commands::Scan(args) => app.scan(args).await,
-        Commands::Search(args) => app.search(args).await,
-        Commands::Analyze(args) => app.analyze(args).await,
+        Commands::Scan(mut args) => {
+            // Override path with global directory if not explicitly set
+            if args.path == PathBuf::from(".") {
+                args.path = cli.directory;
+            }
+            app.scan(args).await
+        },
+        Commands::Search(mut args) => {
+            // Override path with global directory if not explicitly set
+            if args.path == PathBuf::from(".") {
+                args.path = cli.directory;
+            }
+            app.search(args).await
+        },
+        Commands::Analyze(mut args) => {
+            // If analyzing current directory, use global directory
+            if args.file == PathBuf::from(".") {
+                args.file = cli.directory;
+            } else if args.file.is_relative() {
+                // If relative path, make it relative to global directory
+                args.file = cli.directory.join(args.file);
+            }
+            app.analyze(args).await
+        },
         Commands::Config => app.show_config().await,
-        Commands::Query(args) => app.query(args).await,
+        Commands::Query(mut args) => {
+            // Override path with global directory if not explicitly set
+            if args.path == PathBuf::from(".") {
+                args.path = cli.directory;
+            }
+            app.query(args).await
+        },
     }
 } 
