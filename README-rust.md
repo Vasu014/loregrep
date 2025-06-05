@@ -297,38 +297,6 @@ format = "json"  # or "table", "tree"
 max_results = 50
 ```
 
-## Performance Characteristics
-
-### Benchmarks
-
-On a typical Rust project (100 files, 50k LOC):
-
-- **Scanning**: ~200ms
-- **Indexing**: ~50ms  
-- **Function search**: ~2ms
-- **Memory usage**: ~10MB
-
-### Optimization Tips
-
-```rust
-// For large repositories
-let loregrep = LoreGrep::builder()
-    .max_file_size(1024 * 1024)     // Limit file size
-    .exclude_patterns(vec![
-        "target/".to_string(),       // Skip build artifacts
-        "vendor/".to_string(),       // Skip vendored code
-        "*.lock".to_string()         // Skip lock files
-    ])
-    .build()?;
-
-// For memory-constrained environments
-let loregrep = LoreGrep::builder()
-    .max_depth(5)                   // Limit recursion depth
-    .file_patterns(vec![
-        "*.rs".to_string()          // Only scan Rust files
-    ])
-    .build()?;
-```
 
 ### Async and Concurrency
 
@@ -600,7 +568,7 @@ See the [`examples/`](examples/) directory for complete examples:
 
 - [`basic_usage.rs`](examples/basic_usage.rs) - Basic scanning and searching
 - [`cli_integration.rs`](examples/cli_integration.rs) - CLI tool usage
-- [`performance_demo.rs`](examples/performance_demo.rs) - Performance benchmarking
+- [`performance_demo.rs`](examples/performance_demo.rs) - Advanced usage demonstration
 - [`coding_assistant.rs`](examples/coding_assistant.rs) - Full coding assistant implementation
 
 ## License

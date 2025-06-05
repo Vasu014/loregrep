@@ -1,6 +1,6 @@
 # Loregrep Python Examples
 
-This directory contains examples demonstrating how to use the Loregrep Python bindings.
+This directory contains examples demonstrating how to use the Loregrep Python bindings. Each example focuses on a specific aspect of the API to showcase different capabilities.
 
 ## Installation
 
@@ -16,73 +16,105 @@ maturin develop --features python
 
 ## Examples
 
-### `basic_usage.py`
-Comprehensive example showing the complete workflow:
-- Creating a LoreGrep instance with builder pattern
-- Scanning repositories for code analysis
-- Executing AI analysis tools
-- Working with scan results
+All examples follow a numbered naming convention for easy navigation:
 
+### Core Setup and Configuration
+
+**`01_auto_discovery.py`** - Zero Configuration Setup  
+Demonstrates automatic project type detection and analyzer configuration.
 ```bash
-python python/examples/basic_usage.py
+python python/examples/01_auto_discovery.py
 ```
 
-### `test_bindings.py` 
-Validation script for testing the Python bindings implementation:
-- Tests API consistency
-- Validates error handling
-- Confirms async operations work correctly
-
+**`02_enhanced_builder.py`** - Enhanced Builder Pattern  
+Shows advanced builder configuration with convenience methods and real-time feedback.
 ```bash
-python python/examples/test_bindings.py
+python python/examples/02_enhanced_builder.py
 ```
 
-## Key Features Demonstrated
-
-### Builder Pattern Configuration
-```python
-loregrep_instance = (loregrep.LoreGrep.builder()
-                   .max_file_size(1024 * 1024)  # 1MB max
-                   .max_depth(10)                # Directory depth
-                   .file_patterns(["*.py", "*.rs", "*.js", "*.ts"])
-                   .exclude_patterns(["target/", "node_modules/"])
-                   .respect_gitignore(True)
-                   .build())
+**`03_project_presets.py`** - Language-Specific Presets  
+Demonstrates project-specific preset methods for Rust, Python, and polyglot projects.
+```bash
+python python/examples/03_project_presets.py
 ```
 
-### Repository Scanning
-```python
-# Scan a directory and get statistics
-scan_result = await loregrep_instance.scan("/path/to/repo")
-print(f"Files scanned: {scan_result.files_scanned}")
-print(f"Functions found: {scan_result.functions_found}")
-print(f"Structs found: {scan_result.structs_found}")
+### Analysis Tools and Features
+
+**`04_tool_showcase.py`** - Complete Tool Demonstration  
+Comprehensive showcase of all 6 AI analysis tools with detailed examples.
+```bash
+python python/examples/04_tool_showcase.py
 ```
 
-### AI Tool Execution
-```python
-# Search for functions by pattern
-func_result = await loregrep_instance.execute_tool("search_functions", {
-    "pattern": "config",
-    "limit": 10
-})
-
-# Analyze specific files
-analyze_result = await loregrep_instance.execute_tool("analyze_file", {
-    "file_path": "src/main.rs",
-    "include_source": False
-})
-
-# Get repository structure
-tree_result = await loregrep_instance.execute_tool("get_repository_tree", {
-    "include_file_details": True,
-    "max_depth": 2
-})
+**`05_basic_usage.py`** - Simple Getting Started  
+Basic usage example showing the minimal code needed to get started.
+```bash
+python python/examples/05_basic_usage.py
 ```
 
-## Available Tools
+**`06_simple_scan.py`** - Basic Repository Scanning  
+Shows the minimal code needed to scan a repository and get results.
+```bash
+python python/examples/06_simple_scan.py
+```
 
-The Python bindings provide access to all 6 AI analysis tools:
+**`07_builder_config.py`** - Advanced Builder Configuration  
+Detailed builder pattern usage with various configuration options.
+```bash
+python python/examples/07_builder_config.py
+```
+
+### Specific Tool Examples
+
+**`08_function_search.py`** - Function Search  
+Finding functions by pattern using the search_functions tool.
+```bash
+python python/examples/08_function_search.py
+```
+
+**`09_struct_search.py`** - Structure/Class Search  
+Finding classes and structures using the search_structs tool.
+```bash
+python python/examples/09_struct_search.py
+```
+
+**`10_file_analysis.py`** - File Analysis  
+Detailed analysis of individual files using the analyze_file tool.
+```bash
+python python/examples/10_file_analysis.py
+```
+
+**`11_repository_tree.py`** - Repository Structure  
+Getting project structure overview using the get_repository_tree tool.
+```bash
+python python/examples/11_repository_tree.py
+```
+
+**`12_dependency_analysis.py`** - Dependency Analysis  
+Understanding import/export relationships using get_dependencies and find_callers tools.
+```bash
+python python/examples/12_dependency_analysis.py
+```
+
+### Testing and Validation
+
+**`13_test_bindings.py`** - Comprehensive Testing  
+Validation script for testing the Python bindings with detailed test coverage.
+```bash
+python python/examples/13_test_bindings.py
+```
+
+## Quick Start
+
+For first-time users, run the examples in this order:
+1. `01_auto_discovery.py` - Learn the simplest setup method
+2. `06_simple_scan.py` - Understand basic scanning
+3. `08_function_search.py` - Try searching for functions
+4. `04_tool_showcase.py` - See all available tools
+
+## Available AI Analysis Tools
+
+The Python bindings provide access to 6 standardized AI analysis tools:
 
 1. **search_functions** - Find functions by name pattern
 2. **search_structs** - Find structures/classes by name pattern  

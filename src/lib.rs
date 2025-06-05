@@ -152,12 +152,11 @@
 //! - **Language Analyzers**: Tree-sitter based parsing (Rust complete, others on roadmap)
 //! - **Tool System**: 6 standardized tools for AI integration
 //!
-//! ### Performance Characteristics
+//! ### Design Characteristics
 //!
-//! - **Scanning**: Typically <2 seconds for medium repositories (1000+ files)
-//! - **Queries**: Usually <100ms for most lookup operations
-//! - **Memory**: Approximately ~50MB for typical Rust projects
+//! - **Architecture**: Fast in-memory indexing with tree-sitter parsing
 //! - **Concurrency**: Thread-safe with `Arc<Mutex<>>` design
+//! - **Scalability**: Memory usage scales linearly with codebase size
 //!
 //! ## Language Support
 //!

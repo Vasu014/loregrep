@@ -625,40 +625,6 @@ Get repository structure and overview.
 
 **Use Case:** Repository overview, architecture understanding, documentation generation.
 
-## Performance
-
-### Benchmarks vs Alternatives
-
-| Repository Size | Loregrep | ripgrep | ast-grep | Advantage |
-|----------------|----------|---------|----------|-----------|
-| Small (100 files) | 0.8s | 0.2s | 1.2s | 4x faster than ast-grep |
-| Medium (1,000 files) | 3.2s | 1.1s | 8.5s | 2.6x faster than ast-grep |
-| Large (10,000 files) | 28s | 8s | 95s | 3.4x faster than ast-grep |
-
-*Benchmarks run on MacBook Pro M1, 16GB RAM. Times include parsing + indexing.*
-
-**Note:** ripgrep is faster for simple text search, but loregrep provides structured analysis that ripgrep cannot do.
-
-### Memory Usage
-
-| Repository Size | Peak Memory | Steady State | Index Size |
-|----------------|-------------|--------------|------------|
-| Small (100 files) | 45MB | 12MB | 0.8MB |
-| Medium (1,000 files) | 180MB | 65MB | 8MB |
-| Large (10,000 files) | 850MB | 320MB | 85MB |
-
-### Performance Tips
-
-```rust
-// For large repositories
-let loregrep = LoreGrep::builder()
-    .max_file_size(512 * 1024)    // Skip very large files
-    .exclude_patterns(vec![       // Skip generated/vendor code
-        "target/", "node_modules/", "vendor/", "*.generated.*"
-    ])
-    .max_depth(8)                 // Limit directory depth
-    .build()?;
-```
 
 ## Architecture
 

@@ -424,12 +424,6 @@ def extract_function_name(question: str) -> str:
     pass
 ```
 
-## Performance
-
-- **Scanning**: ~1-2 seconds for medium repositories (1000+ files)
-- **Queries**: ~50-100ms for most operations
-- **Memory**: ~50MB for typical projects
-- **Concurrency**: Thread-safe with multiple instances
 
 ## Requirements
 

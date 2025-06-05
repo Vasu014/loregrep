@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Basic usage example for the loregrep Python package.
+Enhanced API usage example for the loregrep Python package.
 
-This example demonstrates how to use the builder pattern API of loregrep
-for repository indexing and code analysis. It covers:
+This example demonstrates the enhanced Python API of loregrep with real-time feedback
+and convenient setup options for repository indexing and code analysis. It covers:
 
 1. Importing and checking the loregrep package
 2. Getting available AI tools for code analysis
-3. Creating a LoreGrep instance with custom configuration
+3. Three enhanced setup options:
+   - Auto-discovery (zero configuration)
+   - Enhanced builder with convenience methods
+   - Project-specific presets
 4. Scanning a sample repository with multiple file types
 5. Executing various analysis tools (search_functions, search_structs, etc.)
 
@@ -43,22 +46,49 @@ async def main():
     for i, tool in enumerate(tools, 1):
         print(f"   {i}. {tool.name}: {tool.description}")
     
-    # Create a LoreGrep instance using the builder pattern
-    print("\n2. Creating LoreGrep instance with builder pattern...")
+    # Create a LoreGrep instance using the enhanced API
+    print("\n2. Creating LoreGrep instance with enhanced API...")
+    
+    # Demo 1: Zero-configuration auto-discovery
+    print("   Option 1: Auto-discovery (zero configuration)")
     try:
-        # Configure LoreGrep with custom settings using the builder pattern
-        loregrep_instance = (loregrep.LoreGrep.builder()
-                           .max_file_size(1024 * 1024)  # 1MB max file size
-                           .max_depth(10)                # Maximum directory depth
-                           .file_patterns(["*.py", "*.rs", "*.js", "*.ts"])  # Include these file types
-                           .exclude_patterns(["target/", "node_modules/", "__pycache__/"])  # Skip these directories
-                           .respect_gitignore(True)      # Honor .gitignore files
-                           .build())
-        print("✅ LoreGrep instance created successfully")
-        print(f"   📋 Instance: {loregrep_instance}")
+        auto_loregrep = loregrep.LoreGrep.auto_discover(".")
+        print("   ✅ Auto-discovery instance created successfully")
+        print(f"      🔍 Detected project languages and configured analyzers")
     except Exception as e:
-        print(f"❌ Failed to create LoreGrep instance: {e}")
+        print(f"   ⚠️  Auto-discovery failed: {e}")
+        auto_loregrep = None
+    
+    # Demo 2: Enhanced builder with convenience methods
+    print("\n   Option 2: Enhanced builder with convenience methods")
+    try:
+        enhanced_loregrep = (loregrep.LoreGrep.builder()
+                           .with_rust_analyzer()         # ✅ Real-time feedback
+                           .with_python_analyzer()       # ✅ Registration confirmation  
+                           .optimize_for_performance()   # 🚀 Speed-optimized preset
+                           .exclude_test_dirs()          # 🚫 Skip test directories
+                           .build())                     # 🎆 Configuration summary
+        print("   ✅ Enhanced builder instance created successfully")
+    except Exception as e:
+        print(f"   ⚠️  Enhanced builder failed: {e}")
+        enhanced_loregrep = None
+    
+    # Demo 3: Project-specific presets
+    print("\n   Option 3: Project-specific presets")
+    try:
+        preset_loregrep = loregrep.LoreGrep.polyglot_project(".")  # Multi-language preset
+        print("   ✅ Polyglot project preset created successfully")
+    except Exception as e:
+        print(f"   ⚠️  Project preset failed: {e}")
+        preset_loregrep = None
+    
+    # Use the first successful instance for the rest of the demo
+    loregrep_instance = auto_loregrep or enhanced_loregrep or preset_loregrep
+    if not loregrep_instance:
+        print("❌ Failed to create any LoreGrep instance")
         return
+        
+    print(f"\n   📋 Using instance: {loregrep_instance}")
     
     # Create some sample files for demonstration
     print("\n3. Creating sample repository...")

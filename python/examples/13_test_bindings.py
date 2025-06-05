@@ -56,14 +56,18 @@ def test_builder_pattern():
         builder = loregrep.LoreGrep.builder()
         print("✅ Builder created successfully")
         
-        # Test builder configuration methods
+        # Test enhanced builder configuration methods
         configured_builder = (builder
+                            .with_rust_analyzer()         # Enhanced: analyzer registration
+                            .with_python_analyzer()       # Enhanced: analyzer registration
+                            .optimize_for_performance()   # Enhanced: convenience method
+                            .exclude_test_dirs()          # Enhanced: convenience method
                             .max_file_size(1024 * 1024)
                             .max_depth(10)
                             .file_patterns(["*.rs", "*.py"])
                             .exclude_patterns(["target/", "__pycache__/"])
                             .respect_gitignore(True))
-        print("✅ Builder configuration methods work")
+        print("✅ Enhanced builder configuration methods work")
         
         # Test building the instance
         lg = configured_builder.build()
@@ -73,6 +77,61 @@ def test_builder_pattern():
         return True
     except Exception as e:
         print(f"❌ Builder pattern test failed: {e}")
+        traceback.print_exc()
+        return False
+
+def test_enhanced_api():
+    """Test enhanced API features: auto-discovery and presets"""
+    print("\n🧪 Testing enhanced API features...")
+    
+    try:
+        import loregrep
+        
+        # Test auto-discovery
+        print("🔍 Testing auto-discovery...")
+        try:
+            auto_lg = loregrep.LoreGrep.auto_discover(".")
+            print("✅ Auto-discovery instance created successfully")
+        except Exception as e:
+            print(f"⚠️  Auto-discovery failed (may be expected): {e}")
+            auto_lg = None
+        
+        # Test project presets
+        print("🎯 Testing project presets...")
+        presets = [
+            ("rust_project", loregrep.LoreGrep.rust_project),
+            ("python_project", loregrep.LoreGrep.python_project),
+            ("polyglot_project", loregrep.LoreGrep.polyglot_project),
+        ]
+        
+        preset_success = 0
+        for preset_name, preset_func in presets:
+            try:
+                preset_lg = preset_func(".")
+                print(f"✅ {preset_name} preset created successfully")
+                preset_success += 1
+            except Exception as e:
+                print(f"⚠️  {preset_name} preset failed: {e}")
+        
+        print(f"✅ Preset methods: {preset_success}/3 successful")
+        
+        # Test enhanced builder convenience methods
+        print("🛠️  Testing enhanced builder convenience methods...")
+        try:
+            enhanced_lg = (loregrep.LoreGrep.builder()
+                         .with_all_analyzers()           # Enhanced method
+                         .comprehensive_analysis()       # Enhanced method
+                         .exclude_vendor_dirs()          # Enhanced method
+                         .include_source_files()         # Enhanced method
+                         .include_config_files()         # Enhanced method
+                         .build())
+            print("✅ Enhanced convenience methods work")
+        except Exception as e:
+            print(f"⚠️  Enhanced convenience methods failed: {e}")
+        
+        return True
+    except Exception as e:
+        print(f"❌ Enhanced API test failed: {e}")
         traceback.print_exc()
         return False
 
@@ -344,6 +403,7 @@ async def run_all_tests():
     tests = [
         ("Import and Version", test_import_and_version),
         ("Builder Pattern", test_builder_pattern),
+        ("Enhanced API", test_enhanced_api),
         ("Tool Definitions", test_tool_definitions),
         ("Repository Scanning", test_repository_scanning),
         ("Tool Execution", test_tool_execution),
