@@ -188,7 +188,7 @@ Every function, struct, import, export, and function call includes its originati
 ```
 *AI knows the function exists but not where it's located.*
 
-**After (v0.4.1+):**
+**After (v0.4.2+):**
 ```json
 {
   "name": "parse_config", 
