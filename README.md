@@ -2,8 +2,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/loregrep.svg)](https://crates.io/crates/loregrep)
 [![PyPI](https://img.shields.io/pypi/v/loregrep.svg)](https://pypi.org/project/loregrep/)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/yourusername/loregrep#license)
-[![Build Status](https://img.shields.io/github/workflow/status/yourusername/loregrep/CI)](https://github.com/yourusername/loregrep/actions)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/Vasu014/loregrep#license)
+[![Build Status](https://img.shields.io/github/workflow/status/Vasu014/loregrep/CI)](https://github.com/Vasu014/loregrep/actions)
 
 **Fast Repository Indexing Library for Coding Assistants**
 
@@ -58,7 +58,7 @@ pip install loregrep
 First, clone the loregrep repository to try the examples:
 
 ```bash
-git clone https://github.com/yourusername/loregrep.git
+git clone https://github.com/Vasu014/loregrep.git
 cd loregrep
 ```
 
@@ -594,7 +594,7 @@ python ai_integration.py
 ### Building from Source
 
 ```bash
-git clone https://github.com/yourusername/loregrep.git
+git clone https://github.com/Vasu014/loregrep.git
 cd loregrep
 
 # Build Rust library
@@ -682,7 +682,7 @@ Help expand beyond Rust to support more programming languages:
 
 1. **Fork and Clone**
    ```bash
-   git clone https://github.com/your-username/loregrep.git
+   git clone https://github.com/Vasu014/loregrep.git
    cd loregrep
    ```
 
