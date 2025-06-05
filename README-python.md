@@ -4,7 +4,7 @@
 
 Loregrep is a high-performance repository indexing library that uses tree-sitter parsing to analyze codebases. It provides 6 standardized tools that supply structured code data to AI systems like Claude, GPT, and other coding assistants.
 
-## ✨ **What's New in v0.4.0: Enhanced User Experience**
+## ✨ **What's New in v0.4.1: Enhanced User Experience**
 
 **Transform from complex setup to delightful developer experience:**
 

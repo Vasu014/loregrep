@@ -8,7 +8,7 @@
 
 A fast, memory-efficient Rust library that parses codebases using tree-sitter and provides structured access to functions, structs, dependencies, and call graphs. Built for AI coding assistants and code analysis tools.
 
-## ✨ **What's New in v0.4.0: Enhanced User Experience**
+## ✨ **What's New in v0.4.1: Enhanced User Experience**
 
 **Transform from complex setup to delightful developer experience:**
 
@@ -42,7 +42,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-loregrep = "0.4.0"
+loregrep = "0.4.1"
 tokio = { version = "1.35", features = ["full"] }
 serde_json = "1.0"
 ```
