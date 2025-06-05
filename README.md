@@ -9,6 +9,8 @@
 
 Loregrep is a Rust library with Python bindings that parses codebases into fast, searchable in-memory indexes. It's designed to provide coding assistants and AI tools with structured access to code functions, structures, dependencies, and call graphs.
 
+**Currently supports Rust and Python with TypeScript/JavaScript coming soon.**
+
 ## Table of Contents
 
 - [Installation](#installation)
@@ -239,7 +241,7 @@ tree = await loregrep.execute_tool("get_repository_tree", {
 | Language   | Status | Functions | Structs/Classes | Imports | Calls |
 |------------|--------|-----------|-----------------|---------|-------|
 | **Rust**   | ✅ Full | ✅ | ✅ | ✅ | ✅ |
-| **Python** | 📋 Planned | 📋 | 📋 | 📋 | 📋 |
+| **Python** | ✅ Full | ✅ | ✅ | ✅ | ✅ |
 | **TypeScript** | 📋 Planned | 📋 | 📋 | 📋 | 📋 |
 | **JavaScript** | 📋 Planned | 📋 | 📋 | 📋 | 📋 |
 | **Go** | 📋 Future | 📋 | 📋 | 📋 | 📋 |
@@ -256,6 +258,8 @@ use serde_json::json;
 
 // Configure with builder pattern
 let mut loregrep = LoreGrep::builder()
+    .with_rust_analyzer()           // ✅ Rust analyzer registered
+    .with_python_analyzer()         // ✅ Python analyzer registered
     .max_file_size(1024 * 1024)     // 1MB max file size
     .max_depth(10)                  // Maximum 10 directory levels
     .file_patterns(vec!["*.rs", "*.py"])  // Include only these files
@@ -295,6 +299,8 @@ import json
 async def main():
     # Configure with builder pattern
     loregrep_instance = (loregrep.LoreGrep.builder()
+                        .with_rust_analyzer()        # ✅ Rust analyzer registered
+                        .with_python_analyzer()      # ✅ Python analyzer registered
                         .max_file_size(1024 * 1024)
                         .max_depth(10)
                         .file_patterns(["*.py", "*.rs", "*.js"])
@@ -897,26 +903,26 @@ Help expand beyond Rust to support more programming languages:
 
 ## Roadmap
 
-### v0.4.0 - Multi-Language Support (Q1 2024)
-- **Python Analyzer**: Full Python support with classes, functions, imports
+### Language Support
 - **TypeScript Analyzer**: Complete TS/JS support including modern features
-- **Performance**: 2x improvement in scanning speed for large repositories
+- **JavaScript Analyzer**: Full JavaScript support with ES6+ features
+- **Go Language Support**: Package analysis and interface tracking
 
-### v0.5.0 - Advanced Analysis (Q2 2024)
+### Advanced Analysis Features
 - **Call Graph Analysis**: Function call extraction and visualization
 - **Dependency Tracking**: Advanced import/export analysis
 - **Incremental Updates**: Smart re-indexing when files change
 
-### v1.0.0 - Production Ready (Q3 2024)
-- **API Stability**: Stable public API with semantic versioning
+### Performance & Scale
+- **Performance Improvements**: 2x improvement in scanning speed for large repositories
 - **Memory Optimization**: Improved handling of very large repositories
-- **MCP Server Integration**: Standard Model Context Protocol interface
-- **Editor Integrations**: VS Code and IntelliJ plugins
-
-### Future
-- **Go Language Support**: Package analysis and interface tracking
 - **Database Persistence**: Optional disk-based storage for massive codebases
 - **Distributed Analysis**: Support for monorepos and multi-service codebases
+
+### Integration & Tooling
+- **MCP Server Integration**: Standard Model Context Protocol interface
+- **Editor Integrations**: VS Code and IntelliJ plugins
+- **API Stability**: Stable public API with semantic versioning
 
 *Want to help with any roadmap item? Check out our [Contributing Guide](#contributing)!*
 

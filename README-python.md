@@ -288,7 +288,7 @@ print(f"Errors: {result.errors}")  # List of any scan errors
 | Language   | Status     | Functions | Classes | Imports | 
 |------------|------------|-----------|---------|---------|
 | Rust       | ✅ Full    | ✅        | ✅      | ✅      |
-| Python     | 🚧 Planned | -         | -       | -       |
+| Python     | ✅ Full    | ✅        | ✅      | ✅      |
 | TypeScript | 🚧 Planned | -         | -       | -       |
 | JavaScript | 🚧 Planned | -         | -       | -       |
 

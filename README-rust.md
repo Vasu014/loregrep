@@ -499,7 +499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Language   | Functions | Structs/Enums | Imports | Calls | Status |
 |------------|-----------|---------------|---------|-------|--------|
 | **Rust**   | ✅        | ✅            | ✅      | ✅    | Full   |
-| Python     | 🚧        | 🚧            | 🚧      | 🚧    | Planned |
+| **Python** | ✅        | ✅            | ✅      | ✅    | Full   |
 | TypeScript | 🚧        | 🚧            | 🚧      | 🚧    | Planned |
 | JavaScript | 🚧        | 🚧            | 🚧      | 🚧    | Planned |
 

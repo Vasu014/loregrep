@@ -164,12 +164,12 @@
 //! | Language   | Status     | Functions | Structs | Imports | Calls |
 //! |------------|------------|-----------|---------|---------|-------|
 //! | Rust       | ✅ Full    | ✅        | ✅      | ✅      | ✅    |
-//! | Python     | 📋 Roadmap | -         | -       | -       | -     |
+//! | Python     | ✅ Full    | ✅        | ✅      | ✅      | ✅    |
 //! | TypeScript | 📋 Roadmap | -         | -       | -       | -     |
 //! | JavaScript | 📋 Roadmap | -         | -       | -       | -     |
 //! | Go         | 📋 Roadmap | -         | -       | -       | -     |
 //!
-//! *Note: Languages marked "📋 Roadmap" are future planned additions. Coming soon...*
+//! *Note: Languages marked "📋 Roadmap" are future planned additions.*
 //!
 //! ## Integration Examples
 //!
@@ -308,7 +308,6 @@
 //! ## Future Roadmap
 //!
 //! ### Language Support
-//! - **Python Analyzer**: Full Python support with functions, classes, imports, and method calls
 //! - **TypeScript/JavaScript Analyzers**: Support for modern JS/TS features including interfaces, types, and ES6+ syntax
 //! - **Go Analyzer**: Package declarations, interfaces, and Go-specific function signatures
 //!
