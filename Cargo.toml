@@ -1,6 +1,6 @@
 [package]
 name = "loregrep"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
 description = "Repository indexing library for AI coding assistants. Tree-sitter parsing, fast in-memory indexing, and tool APIs for LLM integration."
