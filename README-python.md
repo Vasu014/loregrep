@@ -4,6 +4,32 @@
 
 Loregrep is a high-performance repository indexing library that uses tree-sitter parsing to analyze codebases. It provides 6 standardized tools that supply structured code data to AI systems like Claude, GPT, and other coding assistants.
 
+## ✨ **What's New in v0.3.4: Enhanced User Experience**
+
+**Transform from complex setup to delightful developer experience:**
+
+- 🎯 **Real-time feedback**: See analyzer registration and validation immediately  
+- 📊 **Comprehensive summaries**: Detailed scan results with performance metrics
+- 🔧 **Actionable errors**: Clear guidance when something goes wrong
+- 🌟 **Professional polish**: Emoji indicators and user-friendly messages
+- 📁 **Complete file path tracking**: Every code element includes its originating file
+
+### Before vs After
+```python
+# Before: Silent, unclear feedback
+lg = loregrep.LoreGrep.builder().build()
+
+# After: Rich, helpful feedback
+lg = (loregrep.LoreGrep.builder()
+      .with_rust_analyzer()     # ✅ Rust analyzer registered successfully
+      .with_python_analyzer()   # ✅ Python analyzer registered successfully  
+      .build())                 # 🎆 LoreGrep configured with 2 languages
+
+# Enhanced scan with comprehensive feedback
+result = await lg.scan("./my-project")
+# 🔍 Starting scan... 📁 Found X files... 📊 Summary with metrics
+```
+
 ## 🎯 **Enhanced with File Path Storage for Better AI Integration**
 
 **Every code element now includes its originating file path** - functions, structs, imports, exports, and function calls all include complete file location information for superior cross-file reference tracking.
@@ -47,15 +73,29 @@ import asyncio
 import loregrep
 
 async def analyze_repository():
-    # Create and configure analyzer
-    lg = (loregrep.LoreGrep.builder()
-          .max_file_size(1024 * 1024)  # 1MB limit
-          .file_patterns(["*.py", "*.rs", "*.js", "*.ts"])
-          .exclude_patterns(["node_modules/", "__pycache__/", "target/"])
-          .build())
+    # Option 1: Zero-configuration auto-discovery (Recommended)
+    lg = loregrep.LoreGrep.auto_discover(".")
+    # 🔍 Detected project languages: rust, python
+    # ✅ Rust analyzer registered successfully
+    # ✅ Python analyzer registered successfully
     
-    # Scan your repository
+    # Option 2: Enhanced builder with convenience methods
+    lg = (loregrep.LoreGrep.builder()
+          .with_rust_analyzer()         # ✅ Real-time feedback
+          .with_python_analyzer()       # ✅ Registration confirmation  
+          .optimize_for_performance()   # 🚀 Speed-optimized preset
+          .exclude_test_dirs()          # 🚫 Skip test directories
+          .max_file_size(1024 * 1024)  # 1MB limit
+          .build())                     # 🎆 Configuration summary
+    
+    # Option 3: Project-specific presets
+    lg = loregrep.LoreGrep.rust_project(".")      # Rust-optimized
+    # Or: loregrep.LoreGrep.python_project(".")   # Python-optimized
+    # Or: loregrep.LoreGrep.polyglot_project(".") # Multi-language
+    
+    # Scan your repository with enhanced feedback
     result = await lg.scan("/path/to/your/project")
+    # 🔍 Starting repository scan... 📁 Found X files... 📊 Scan Summary
     print(f"📁 Scanned {result.files_scanned} files")
     print(f"🔧 Found {result.functions_found} functions")
     print(f"📦 Found {result.structs_found} structures")
@@ -185,24 +225,34 @@ result = await lg.execute_tool("get_repository_tree", {
 
 ## Configuration Options
 
-### Builder Pattern
+### Enhanced Builder Pattern with Convenience Methods
 
 ```python
-loregrep_instance = (loregrep.LoreGrep.builder()
-    # File size and depth limits
-    .max_file_size(2 * 1024 * 1024)     # 2MB max file size
+# Performance-optimized configuration
+fast_loregrep = (loregrep.LoreGrep.builder()
+    .with_rust_analyzer()           # ✅ Analyzer registration feedback
+    .optimize_for_performance()     # 🚀 512KB limit, depth 8, skip binaries
+    .exclude_test_dirs()            # 🚫 Skip test directories  
+    .exclude_vendor_dirs()          # 🚫 Skip vendor/dependencies
+    .build())                       # 🎆 Configuration summary
+
+# Comprehensive analysis configuration  
+thorough_loregrep = (loregrep.LoreGrep.builder()
+    .with_all_analyzers()           # ✅ All available language analyzers
+    .comprehensive_analysis()       # 🔍 5MB limit, depth 20, more file types
+    .include_config_files()         # ✅ Include TOML, JSON, YAML configs
+    .build())
+
+# Traditional manual configuration (still supported)
+manual_loregrep = (loregrep.LoreGrep.builder()
+    .max_file_size(2 * 1024 * 1024)     # 2MB file size limit
     .max_depth(15)                       # Max directory depth
-    
-    # File filtering
     .file_patterns(["*.py", "*.js", "*.ts", "*.rs"])
     .exclude_patterns([
         "node_modules/", "__pycache__/", "target/",
         ".git/", "venv/", ".env/"
     ])
-    
-    # Git integration
     .respect_gitignore(True)             # Honor .gitignore files
-    
     .build())
 ```
 

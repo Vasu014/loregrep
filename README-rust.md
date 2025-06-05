@@ -8,21 +8,31 @@
 
 A fast, memory-efficient Rust library that parses codebases using tree-sitter and provides structured access to functions, structs, dependencies, and call graphs. Built for AI coding assistants and code analysis tools.
 
-## 🎯 **Enhanced with Complete File Path Tracking**
+## ✨ **What's New in v0.3.4: Enhanced User Experience**
 
-**Every code element now includes its originating file path** for superior cross-file reference tracking:
+**Transform from complex setup to delightful developer experience:**
 
-- ✅ **Functions**: `FunctionSignature` includes `file_path: String`
-- ✅ **Structs/Enums**: `StructSignature` includes `file_path: String` 
-- ✅ **Imports**: `ImportStatement` includes `file_path: String`
-- ✅ **Exports**: `ExportStatement` includes `file_path: String`
-- ✅ **Function Calls**: `FunctionCall` includes `file_path: String`
+- 🎯 **Real-time feedback**: See analyzer registration and validation immediately  
+- 📊 **Comprehensive summaries**: Detailed scan results with performance metrics
+- 🔧 **Actionable errors**: Clear guidance when something goes wrong
+- 🌟 **Professional polish**: Emoji indicators and user-friendly messages
+- 📁 **Complete file path tracking**: Every code element includes its originating file
 
-This enables AI coding assistants to:
-- Track function definitions vs. call sites across files
-- Perform accurate impact analysis for refactoring
-- Understand module boundaries and dependencies
-- Generate context-aware code suggestions
+### Before vs After
+```rust
+// Before: Silent, unclear feedback
+let loregrep = LoreGrep::builder().build()?;
+
+// After: Rich, helpful feedback
+let mut loregrep = LoreGrep::builder()
+    .with_rust_analyzer()     // ✅ Rust analyzer registered successfully
+    .with_python_analyzer()   // ✅ Python analyzer registered successfully  
+    .build()?;                // 🎆 LoreGrep configured with 2 languages
+
+// Enhanced scan with comprehensive feedback
+let result = loregrep.scan("./my-project").await?;
+// 🔍 Starting scan... 📁 Found X files... 📊 Summary with metrics
+```
 
 ## Quick Start
 
@@ -32,7 +42,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-loregrep = "0.3.3"
+loregrep = "0.3.4"
 tokio = { version = "1.35", features = ["full"] }
 serde_json = "1.0"
 ```
@@ -45,21 +55,31 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create analyzer with builder pattern
+    // Enhanced builder with real-time feedback
     let mut loregrep = LoreGrep::builder()
-        .max_file_size(2 * 1024 * 1024)  // 2MB limit
+        .with_rust_analyzer()            // ✅ Rust analyzer registered successfully
+        .with_python_analyzer()          // ✅ Python analyzer registered successfully
+        .max_file_size(2 * 1024 * 1024) // 2MB limit
         .max_depth(10)
         .file_patterns(vec!["*.rs".to_string(), "*.py".to_string()])
         .exclude_patterns(vec!["target/".to_string(), ".git/".to_string()])
         .respect_gitignore(true)
-        .build()?;
+        .build()?;                       // 🎆 LoreGrep configured with 2 languages
     
-    // Scan repository
+    // Enhanced scan with progress indicators and summary
     let result = loregrep.scan("./my-project").await?;
-    println!("📁 Scanned {} files, found {} functions", 
-             result.files_scanned, result.functions_found);
+    // 🔍 Starting repository scan for: ./my-project
+    // 🌐 Registered analyzers: rust, python  
+    // 📁 Found 47 files to analyze
+    // 📊 Scan Summary:
+    //    📁 Files analyzed: 47
+    //    🔧 Functions found: 156
+    //    🏗️  Structs found: 23
+    //    🌐 Languages detected: ["rust", "python"]
+    //    ⏱️  Scan duration: 1.23s
+    //    ✅ Repository successfully indexed and ready for queries!
     
-    // Search for functions
+    // Search for functions (same as before - backward compatible!)
     let functions = loregrep.execute_tool("search_functions", json!({
         "pattern": "async",
         "limit": 10
@@ -72,11 +92,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API Reference
 
-### Builder Pattern
+### Enhanced Builder Pattern with Real-time Feedback
 
-```rust use loregrep::LoreGrep;
+```rust
+use loregrep::LoreGrep;
 
-let loregrep = LoreGrep::builder()
+// Enhanced builder with language analyzer registration
+let mut loregrep = LoreGrep::builder()
+    .with_rust_analyzer()                // ✅ Rust analyzer registered successfully
+    .with_python_analyzer()              // ✅ Python analyzer registered successfully  
     .max_file_size(5 * 1024 * 1024)     // 5MB max file size
     .max_depth(15)                       // Directory traversal depth
     .file_patterns(vec![
@@ -90,7 +114,10 @@ let loregrep = LoreGrep::builder()
         "*.tmp".to_string()
     ])
     .respect_gitignore(true)             // Honor .gitignore files
-    .build()?;
+    .build()?;                           // 🎆 LoreGrep configured with 2 languages
+    
+// Builder now validates configuration and provides feedback:
+// ✅ LoreGrep instance created successfully!
 ```
 
 ### Scanning Results
@@ -190,18 +217,36 @@ let tree = loregrep.execute_tool("get_repository_tree", json!({
 })).await?;
 ```
 
-### Error Handling
+### Enhanced Error Handling with Actionable Guidance
 
 ```rust
 use loregrep::{LoreGrep, LoreGrepError};
 
+// Enhanced error messages provide specific guidance
 match loregrep.scan("/invalid/path").await {
-    Ok(result) => println!("Scan completed: {:?}", result),
+    Ok(result) => {
+        // Scan now provides comprehensive feedback automatically:
+        // 🔍 Starting repository scan for: /invalid/path
+        // ⚠️  No files found in the specified path
+        // 💡 Check that the path exists and contains supported file types
+        println!("Scan completed: {} files processed", result.files_scanned);
+    },
     Err(LoreGrepError::IoError(e)) => eprintln!("IO error: {}", e),
-    Err(LoreGrepError::ParseError(e)) => eprintln!("Parse error: {}", e),
+    Err(LoreGrepError::ParseError(e)) => eprintln!("Parse error: {}", e), 
     Err(LoreGrepError::ConfigError(e)) => eprintln!("Config error: {}", e),
     Err(e) => eprintln!("Other error: {}", e),
 }
+
+// Enhanced error handling for unsupported languages:
+// ⚠️  No analyzer available for 'javascript' files. Supported: rust, python
+// 💡 Add support with: LoreGrep::builder().with_javascript_analyzer() (coming soon)
+
+// Builder validation warnings:
+let loregrep = LoreGrep::builder()
+    .build()?;
+// ⚠️  Warning: No language analyzers registered!
+// 💡 Consider adding: .with_rust_analyzer() or .with_python_analyzer() 
+// 📁 Files will be discovered but not analyzed
 ```
 
 ## CLI Usage
@@ -408,7 +453,12 @@ async fn search_handler(
 
 #[tokio::main]
 async fn main() {
-    let loregrep = Arc::new(LoreGrep::builder().build().unwrap());
+    let loregrep = Arc::new(
+        LoreGrep::builder()
+            .with_rust_analyzer()    // ✅ Enhanced with feedback
+            .build()
+            .unwrap()
+    );
     
     let app = Router::new()
         .route("/search", get({

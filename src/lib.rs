@@ -35,25 +35,51 @@
 //!
 //! ## Quick Start
 //!
-//! ### Basic Repository Scanning
+//! ### Zero-Configuration Auto-Discovery (Recommended)
 //!
 //! ```rust
 //! use loregrep::LoreGrep;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create and configure the indexing engine
-//!     let mut loregrep = LoreGrep::builder()
-//!         .max_file_size(1024 * 1024)  // 1MB limit
-//!         .max_depth(10)               // Directory depth limit
-//!         .build()?;
+//!     // One-line setup with automatic project detection
+//!     let mut loregrep = LoreGrep::auto_discover(".")?;
+//!     // 🔍 Detected project languages: rust, python
+//!     // ✅ Rust analyzer registered successfully
+//!     // ✅ Python analyzer registered successfully  
+//!     // 📁 Configuring file patterns for detected languages
+//!     // 🎆 LoreGrep configured with 2 language(s): rust, python
 //!
-//!     // Scan a repository to build indexes
-//!     let scan_result = loregrep.scan("/path/to/your/repo").await?;
+//!     // Scan with comprehensive feedback
+//!     let scan_result = loregrep.scan(".").await?;
+//!     // 🔍 Starting repository scan... 📁 Found X files... 📊 Summary
 //!     
 //!     println!("Indexed {} files with {} functions", 
 //!              scan_result.files_scanned, 
 //!              scan_result.functions_found);
+//!     
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### Manual Configuration with Enhanced Builder
+//!
+//! ```rust
+//! use loregrep::LoreGrep;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Full control with enhanced builder pattern
+//!     let mut loregrep = LoreGrep::builder()
+//!         .with_rust_analyzer()           // ✅ Real-time feedback
+//!         .with_python_analyzer()         // ✅ Registration confirmation
+//!         .optimize_for_performance()     // 🚀 Speed-optimized preset
+//!         .exclude_test_dirs()            // 🚫 Skip test directories
+//!         .max_file_size(1024 * 1024)     // 1MB limit
+//!         .max_depth(10)                  // Directory depth limit
+//!         .build()?;                      // 🎆 Configuration summary
+//!
+//!     let scan_result = loregrep.scan("/path/to/your/repo").await?;
 //!     
 //!     Ok(())
 //! }
@@ -69,16 +95,25 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut loregrep = LoreGrep::builder().build()?;
-//!     loregrep.scan("/path/to/repo").await?;
+//!     // Option 1: Zero-configuration setup
+//!     let mut loregrep = LoreGrep::auto_discover(".")?;
+//!     // Auto-detects languages and configures appropriate analyzers
+//!     
+//!     // Option 2: Manual setup with presets
+//!     let mut loregrep = LoreGrep::rust_project(".")?;  // Rust-optimized
+//!     // Or: LoreGrep::python_project(".")?  // Python-optimized
+//!     // Or: LoreGrep::polyglot_project(".")?  // Multi-language
+//!     
+//!     // Scan with enhanced feedback
+//!     loregrep.scan(".").await?;
 //!
-//!     // Tool 1: Search for functions
+//!     // Tool 1: Search for functions (with file path information)
 //!     let result = loregrep.execute_tool("search_functions", json!({
 //!         "pattern": "parse",
 //!         "limit": 20
 //!     })).await?;
 //!
-//!     // Tool 2: Find function callers  
+//!     // Tool 2: Find function callers with cross-file analysis
 //!     let callers = loregrep.execute_tool("find_callers", json!({
 //!         "function_name": "parse_config"
 //!     })).await?;
@@ -188,8 +223,28 @@
 //!
 //! ## Configuration Options
 //!
+//! ### Enhanced Builder with Convenience Methods
+//!
 //! ```rust
-//! let loregrep = LoreGrep::builder()
+//! use loregrep::LoreGrep;
+//!
+//! // Performance-optimized configuration
+//! let fast_loregrep = LoreGrep::builder()
+//!     .with_rust_analyzer()           // ✅ Analyzer registration feedback
+//!     .optimize_for_performance()     // 🚀 512KB limit, depth 8, skip binaries
+//!     .exclude_test_dirs()            // 🚫 Skip test directories  
+//!     .exclude_vendor_dirs()          // 🚫 Skip vendor/dependencies
+//!     .build()?;                      // 🎆 Configuration summary
+//!
+//! // Comprehensive analysis configuration  
+//! let thorough_loregrep = LoreGrep::builder()
+//!     .with_all_analyzers()           // ✅ All available language analyzers
+//!     .comprehensive_analysis()       // 🔍 5MB limit, depth 20, more file types
+//!     .include_config_files()         // ✅ Include TOML, JSON, YAML configs
+//!     .build()?;
+//!
+//! // Traditional manual configuration (still supported)
+//! let manual_loregrep = LoreGrep::builder()
 //!     .max_file_size(2 * 1024 * 1024)     // 2MB file size limit
 //!     .max_depth(15)                       // Max directory depth
 //!     .file_patterns(vec!["*.rs", "*.py"]) // File extensions to scan
@@ -302,7 +357,12 @@ use pyo3::prelude::*;
 
 /// Main LoreGrep API - the primary interface for code analysis
 ///
-/// Use [`LoreGrep::builder()`] to create and configure a new instance.
+/// **Quick Start Options:**
+/// - [`LoreGrep::auto_discover()`] - Zero-configuration setup with automatic project detection
+/// - [`LoreGrep::builder()`] - Full control with enhanced builder pattern
+/// - [`LoreGrep::rust_project()`] - Rust-optimized preset
+/// - [`LoreGrep::python_project()`] - Python-optimized preset  
+/// - [`LoreGrep::polyglot_project()`] - Multi-language preset
 pub use crate::loregrep::{LoreGrep, LoreGrepBuilder};
 
 /// Core types for tool definitions and results
@@ -363,12 +423,48 @@ pub mod python_bindings {
 
     #[pymethods]
     impl PyLoreGrep {
-        /// Create a new LoreGrep builder
+        /// Create a new LoreGrep builder for manual configuration
         #[staticmethod]
         fn builder() -> PyLoreGrepBuilder {
             PyLoreGrepBuilder {
                 inner: LoreGrep::builder(),
             }
+        }
+
+        /// Zero-configuration setup with automatic project detection
+        #[staticmethod]
+        fn auto_discover(path: &str) -> PyResult<PyLoreGrep> {
+            let loregrep = LoreGrep::auto_discover(path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Auto-discovery failed: {}", e)))?;
+            
+            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+        }
+
+        /// Rust-optimized preset configuration
+        #[staticmethod]
+        fn rust_project(path: &str) -> PyResult<PyLoreGrep> {
+            let loregrep = LoreGrep::rust_project(path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Rust project setup failed: {}", e)))?;
+            
+            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+        }
+
+        /// Python-optimized preset configuration
+        #[staticmethod]
+        fn python_project(path: &str) -> PyResult<PyLoreGrep> {
+            let loregrep = LoreGrep::python_project(path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Python project setup failed: {}", e)))?;
+            
+            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+        }
+
+        /// Multi-language preset configuration
+        #[staticmethod]
+        fn polyglot_project(path: &str) -> PyResult<PyLoreGrep> {
+            let loregrep = LoreGrep::polyglot_project(path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Polyglot project setup failed: {}", e)))?;
+            
+            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
         }
 
         /// Scan a repository and build the index
@@ -512,6 +608,66 @@ pub mod python_bindings {
         /// Enable or disable gitignore respect
         fn respect_gitignore(mut slf: PyRefMut<Self>, respect: bool) -> PyRefMut<Self> {
             slf.inner = slf.inner.clone().respect_gitignore(respect);
+            slf
+        }
+
+        /// Add Rust language analyzer with feedback
+        fn with_rust_analyzer(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().with_rust_analyzer();
+            slf
+        }
+
+        /// Add Python language analyzer with feedback
+        fn with_python_analyzer(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().with_python_analyzer();
+            slf
+        }
+
+        /// Enable all available analyzers
+        fn with_all_analyzers(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().with_all_analyzers();
+            slf
+        }
+
+        /// Optimize for performance (speed-focused configuration)
+        fn optimize_for_performance(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().optimize_for_performance();
+            slf
+        }
+
+        /// Comprehensive analysis (thorough configuration)
+        fn comprehensive_analysis(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().comprehensive_analysis();
+            slf
+        }
+
+        /// Exclude common build directories
+        fn exclude_common_build_dirs(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().exclude_common_build_dirs();
+            slf
+        }
+
+        /// Exclude test directories
+        fn exclude_test_dirs(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().exclude_test_dirs();
+            slf
+        }
+
+        /// Exclude vendor/dependency directories
+        fn exclude_vendor_dirs(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().exclude_vendor_dirs();
+            slf
+        }
+
+        /// Include common source files
+        fn include_source_files(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().include_source_files();
+            slf
+        }
+
+        /// Include configuration files
+        fn include_config_files(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().include_config_files();
             slf
         }
 

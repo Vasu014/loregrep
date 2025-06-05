@@ -63,6 +63,161 @@ impl LoreGrep {
     pub fn builder() -> LoreGrepBuilder {
         LoreGrepBuilder::new()
     }
+    
+    /// Automatically detect project type and configure appropriate analyzers
+    pub fn auto_discover<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        let detected_languages = Self::detect_project_languages(&path);
+        
+        if detected_languages.is_empty() {
+            println!("⚠️  No known project types detected in {}", path.as_ref().display());
+            println!("💡 Using default configuration (Rust + Python)");
+        } else {
+            println!("🔍 Detected project languages: {}", detected_languages.join(", "));
+        }
+        
+        let mut builder = Self::builder();
+        
+        // Register analyzers based on detection
+        for language in &detected_languages {
+            builder = match language.as_str() {
+                "rust" => builder.with_rust_analyzer(),
+                "python" => builder.with_python_analyzer(),
+                // Future language support:
+                // "typescript" => builder.with_typescript_analyzer(),
+                // "javascript" => builder.with_javascript_analyzer(),
+                _ => builder,
+            };
+        }
+        
+        // If nothing detected, use sensible defaults
+        if detected_languages.is_empty() {
+            builder = builder.with_rust_analyzer().with_python_analyzer();
+        }
+        
+        // Configure file patterns based on detected languages
+        builder = builder.configure_patterns_for_languages(&detected_languages);
+        
+        builder.build()
+    }
+    
+    /// Preset for Rust projects (Cargo projects)
+    pub fn rust_project<P: AsRef<std::path::Path>>(_path: P) -> Result<Self> {
+        Self::builder()
+            .with_rust_analyzer()
+            .include_patterns(vec!["**/*.rs".to_string(), "**/*.toml".to_string()])
+            .exclude_patterns(vec!["**/target/**".to_string()])
+            .build()
+    }
+    
+    /// Preset for Python projects  
+    pub fn python_project<P: AsRef<std::path::Path>>(_path: P) -> Result<Self> {
+        Self::builder()
+            .with_python_analyzer()
+            .include_patterns(vec![
+                "**/*.py".to_string(), 
+                "**/*.pyx".to_string(), 
+                "**/*.pyi".to_string()
+            ])
+            .exclude_patterns(vec![
+                "**/__pycache__/**".to_string(),
+                "**/venv/**".to_string(),
+                "**/.venv/**".to_string(),
+                "**/env/**".to_string(),
+                "**/.env/**".to_string(),
+            ])
+            .build()
+    }
+    
+    /// Preset for polyglot projects (multiple languages)
+    pub fn polyglot_project<P: AsRef<std::path::Path>>(_path: P) -> Result<Self> {
+        Self::builder()
+            .with_rust_analyzer()
+            .with_python_analyzer()
+            // Future: .with_typescript_analyzer() when available
+            .build()
+    }
+    
+    /// Detect project languages based on file indicators  
+    fn detect_project_languages<P: AsRef<std::path::Path>>(path: P) -> Vec<String> {
+        let mut languages = Vec::new();
+        let path = path.as_ref();
+        
+        // Rust project indicators
+        if path.join("Cargo.toml").exists() || path.join("Cargo.lock").exists() {
+            languages.push("rust".to_string());
+        }
+        
+        // Python project indicators  
+        if path.join("pyproject.toml").exists() || 
+           path.join("requirements.txt").exists() ||
+           path.join("setup.py").exists() ||
+           path.join("poetry.lock").exists() ||
+           Self::has_python_files(path) {
+            languages.push("python".to_string());
+        }
+        
+        // TypeScript/JavaScript project indicators (for future support)
+        if path.join("package.json").exists() ||
+           path.join("tsconfig.json").exists() ||
+           Self::has_ts_js_files(path) {
+            // Note: Analyzers not yet implemented, but detection is ready
+            if path.join("tsconfig.json").exists() {
+                languages.push("typescript".to_string());
+            }
+            languages.push("javascript".to_string());
+        }
+        
+        // Go project indicators (for future support)
+        if path.join("go.mod").exists() || path.join("go.sum").exists() {
+            languages.push("go".to_string());
+        }
+        
+        languages
+    }
+    
+    /// Quick scan for Python files in common locations
+    fn has_python_files<P: AsRef<std::path::Path>>(path: P) -> bool {
+        let common_dirs = ["src", "lib", "app", ".", "scripts", "tests"];
+        common_dirs.iter().any(|dir| {
+            let dir_path = path.as_ref().join(dir);
+            if let Ok(mut entries) = std::fs::read_dir(dir_path) {
+                entries.any(|entry| {
+                    if let Ok(entry) = entry {
+                        entry.path().extension()
+                            .and_then(|ext| ext.to_str())
+                            .map_or(false, |ext| ext == "py")
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            }
+        })
+    }
+    
+    /// Quick scan for TypeScript/JavaScript files in common locations
+    fn has_ts_js_files<P: AsRef<std::path::Path>>(path: P) -> bool {
+        let common_dirs = ["src", "lib", "app", ".", "components", "pages"];
+        let js_extensions = ["ts", "tsx", "js", "jsx", "mjs"];
+        
+        common_dirs.iter().any(|dir| {
+            let dir_path = path.as_ref().join(dir);
+            if let Ok(mut entries) = std::fs::read_dir(dir_path) {
+                entries.any(|entry| {
+                    if let Ok(entry) = entry {
+                        entry.path().extension()
+                            .and_then(|ext| ext.to_str())
+                            .map_or(false, |ext| js_extensions.contains(&ext))
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            }
+        })
+    }
 
     /// Scan a repository and build the in-memory index
     /// This should be called by the host application, not exposed as a tool
@@ -286,6 +441,148 @@ impl LoreGrepBuilder {
             config: LoreGrepConfig::default(),
             registry: DefaultLanguageRegistry::new(),
         }
+    }
+    
+    /// Configure file patterns based on detected languages
+    pub fn configure_patterns_for_languages(mut self, languages: &[String]) -> Self {
+        let mut patterns = Vec::new();
+        
+        for language in languages {
+            match language.as_str() {
+                "rust" => patterns.extend(vec!["**/*.rs".to_string()]),
+                "python" => patterns.extend(vec![
+                    "**/*.py".to_string(), 
+                    "**/*.pyx".to_string(), 
+                    "**/*.pyi".to_string()
+                ]),
+                "typescript" => patterns.extend(vec![
+                    "**/*.ts".to_string(), 
+                    "**/*.tsx".to_string()
+                ]),
+                "javascript" => patterns.extend(vec![
+                    "**/*.js".to_string(), 
+                    "**/*.jsx".to_string(),
+                    "**/*.mjs".to_string()
+                ]),
+                "go" => patterns.extend(vec!["**/*.go".to_string()]),
+                _ => {}
+            }
+        }
+        
+        if !patterns.is_empty() {
+            println!("📁 Configuring file patterns for detected languages: {}", 
+                     patterns.join(", "));
+            self.config.include_patterns = patterns;
+        }
+        
+        self
+    }
+    
+    /// Enable all available analyzers
+    pub fn with_all_analyzers(self) -> Self {
+        self.with_rust_analyzer()
+            .with_python_analyzer()
+            // Future: .with_typescript_analyzer() when available
+    }
+    
+    /// Quick setup for common exclusions
+    pub fn exclude_common_build_dirs(mut self) -> Self {
+        self.config.exclude_patterns.extend(vec![
+            "**/target/**".to_string(),     // Rust
+            "**/build/**".to_string(),      // General
+            "**/dist/**".to_string(),       // JavaScript/TypeScript
+            "**/.build/**".to_string(),     // Xcode
+            "**/node_modules/**".to_string(), // JavaScript/TypeScript
+            "**/__pycache__/**".to_string(), // Python
+            "**/venv/**".to_string(),       // Python virtual env
+            "**/.venv/**".to_string(),      // Python virtual env
+        ]);
+        self
+    }
+    
+    /// Quick setup for common include patterns
+    pub fn include_source_files(mut self) -> Self {
+        self.config.include_patterns.extend(vec![
+            "**/src/**/*.rs".to_string(),   // Rust source
+            "**/lib/**/*.py".to_string(),   // Python libs
+            "**/app/**/*.js".to_string(),   // JavaScript apps
+        ]);
+        self
+    }
+    
+    /// Quick setup for common test directories exclusion
+    pub fn exclude_test_dirs(mut self) -> Self {
+        self.config.exclude_patterns.extend(vec![
+            "**/tests/**".to_string(),      // General test dirs
+            "**/test/**".to_string(),       // General test dirs  
+            "**/*_test.rs".to_string(),     // Rust test files
+            "**/*_test.py".to_string(),     // Python test files
+            "**/test_*.py".to_string(),     // Python test files
+            "**/*.test.js".to_string(),     // JavaScript test files
+            "**/*.test.ts".to_string(),     // TypeScript test files
+            "**/__tests__/**".to_string(),  // Jest test dirs
+        ]);
+        self
+    }
+    
+    /// Quick setup for vendor/dependency directories exclusion
+    pub fn exclude_vendor_dirs(mut self) -> Self {
+        self.config.exclude_patterns.extend(vec![
+            "**/vendor/**".to_string(),     // General vendor dirs
+            "**/vendors/**".to_string(),    // Alternative vendor naming
+            "**/third_party/**".to_string(), // Third party code
+            "**/extern/**".to_string(),     // External dependencies
+            "**/.cargo/**".to_string(),     // Cargo cache
+            "**/Pods/**".to_string(),       // CocoaPods
+        ]);
+        self
+    }
+    
+    /// Include configuration files (useful for understanding project structure)
+    pub fn include_config_files(mut self) -> Self {
+        self.config.include_patterns.extend(vec![
+            "**/Cargo.toml".to_string(),    // Rust config
+            "**/pyproject.toml".to_string(), // Python config
+            "**/package.json".to_string(),  // Node.js config
+            "**/tsconfig.json".to_string(), // TypeScript config
+            "**/*.toml".to_string(),        // General TOML configs
+            "**/*.yaml".to_string(),        // YAML configs
+            "**/*.yml".to_string(),         // YAML configs
+        ]);
+        self
+    }
+    
+    /// Configure for performance - exclude large/binary files and limit depth
+    pub fn optimize_for_performance(mut self) -> Self {
+        self.config.max_file_size = 512 * 1024; // 512KB limit
+        self.config.max_depth = Some(8);        // Reasonable depth limit
+        self.config.exclude_patterns.extend(vec![
+            "**/*.lock".to_string(),        // Lock files (often large)
+            "**/*.log".to_string(),         // Log files
+            "**/*.tmp".to_string(),         // Temporary files
+            "**/*.cache".to_string(),       // Cache files
+            "**/*.bin".to_string(),         // Binary files
+            "**/*.so".to_string(),          // Shared libraries
+            "**/*.dll".to_string(),         // Windows libraries
+            "**/*.exe".to_string(),         // Executables
+        ]);
+        self
+    }
+    
+    /// Configure for comprehensive analysis - include more file types and increase limits
+    pub fn comprehensive_analysis(mut self) -> Self {
+        self.config.max_file_size = 5 * 1024 * 1024; // 5MB limit
+        self.config.max_depth = Some(20);            // Deep traversal
+        self.config.include_patterns.extend(vec![
+            "**/*.md".to_string(),          // Documentation
+            "**/*.txt".to_string(),         // Text files
+            "**/*.json".to_string(),        // JSON configs
+            "**/*.xml".to_string(),         // XML files
+            "**/*.toml".to_string(),        // TOML configs
+            "**/*.yaml".to_string(),        // YAML configs
+            "**/*.yml".to_string(),         // YAML configs
+        ]);
+        self
     }
 
     /// Add Rust language analyzer (enabled by default)
