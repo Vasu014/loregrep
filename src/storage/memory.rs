@@ -1265,7 +1265,7 @@ mod tests {
         
         // Add some test functions
         node.functions.push(
-            FunctionSignature::new(format!("function_{}", name))
+            FunctionSignature::new(format!("function_{}", name), node.file_path.clone())
                 .with_parameters(vec![
                     Parameter::new("param1".to_string(), "i32".to_string()),
                     Parameter::new("param2".to_string(), "String".to_string()),
@@ -1276,17 +1276,17 @@ mod tests {
         );
         
         // Add some test structs
-        node.structs.push(StructSignature::new(format!("Struct{}", name.to_uppercase())));
+        node.structs.push(StructSignature::new(format!("Struct{}", name.to_uppercase()), node.file_path.clone()));
         
         // Add some test imports
         node.imports.push(
-            ImportStatement::new(format!("crate::{}", name))
+            ImportStatement::new(format!("crate::{}", name), node.file_path.clone())
                 .with_external(false)
         );
         
         // Add some test exports
         node.exports.push(
-            ExportStatement::new(format!("pub_{}", name))
+            ExportStatement::new(format!("pub_{}", name), node.file_path.clone())
         );
         
         // Add some test function calls
@@ -1364,7 +1364,7 @@ mod tests {
         
         // Update the same file
         node.content_hash = "updated_hash".to_string();
-        node.functions.push(FunctionSignature::new("new_function".to_string()));
+        node.functions.push(FunctionSignature::new("new_function".to_string(), node.file_path.clone()));
         
         repo_map.add_file(node.clone()).unwrap();
         
@@ -1540,10 +1540,10 @@ mod tests {
         
         // Add files with various function and struct names
         let mut node = create_test_tree_node("example", "rust");
-        node.functions.push(FunctionSignature::new("calculate_hash".to_string()));
-        node.functions.push(FunctionSignature::new("parse_content".to_string()));
-        node.structs.push(StructSignature::new("Parser".to_string()));
-        node.structs.push(StructSignature::new("Calculator".to_string()));
+        node.functions.push(FunctionSignature::new("calculate_hash".to_string(), node.file_path.clone()));
+        node.functions.push(FunctionSignature::new("parse_content".to_string(), node.file_path.clone()));
+        node.structs.push(StructSignature::new("Parser".to_string(), node.file_path.clone()));
+        node.structs.push(StructSignature::new("Calculator".to_string(), node.file_path.clone()));
         repo_map.add_file(node).unwrap();
         
         // Fuzzy search for "calc"
@@ -1624,10 +1624,10 @@ mod tests {
             let mut node = create_test_tree_node(&format!("file{}", i), "rust");
             
             // Add a common function name
-            node.functions.push(FunctionSignature::new("common_function".to_string()));
+            node.functions.push(FunctionSignature::new("common_function".to_string(), node.file_path.clone()));
             
             // Add unique function
-            node.functions.push(FunctionSignature::new(format!("unique_func_{}", i)));
+            node.functions.push(FunctionSignature::new(format!("unique_func_{}", i), node.file_path.clone()));
             
             repo_map.add_file(node).unwrap();
         }

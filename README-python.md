@@ -1,8 +1,33 @@
 # Loregrep Python Package
 
-**Fast code analysis tools for AI coding assistants**
+**Fast code analysis tools for AI coding assistants with complete file path tracking**
 
 Loregrep is a high-performance repository indexing library that uses tree-sitter parsing to analyze codebases. It provides 6 standardized tools that supply structured code data to AI systems like Claude, GPT, and other coding assistants.
+
+## 🎯 **Enhanced with File Path Storage for Better AI Integration**
+
+**Every code element now includes its originating file path** - functions, structs, imports, exports, and function calls all include complete file location information for superior cross-file reference tracking.
+
+```python
+# Example: Functions now include file paths
+functions = await lg.execute_tool("search_functions", {"pattern": "config"})
+# Returns: {
+#   "functions": [
+#     {
+#       "name": "parse_config",
+#       "file_path": "src/config.py",     # ← Always included
+#       "start_line": 45,
+#       "signature": "def parse_config(path: str) -> Config"
+#     }
+#   ]
+# }
+```
+
+**Why This Matters for AI Assistants:**
+- **Cross-file Navigation**: AI can track where functions are defined vs. called
+- **Impact Analysis**: Understand which files are affected by changes
+- **Module Awareness**: AI knows the context and organization of your code
+- **Refactoring Safety**: Track all references across the entire codebase
 
 [![PyPI version](https://badge.fury.io/py/loregrep.svg)](https://badge.fury.io/py/loregrep)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
@@ -68,12 +93,32 @@ for tool in tools:
     print(f"🛠️  {tool.name}: {tool.description}")
 ```
 
-#### 1. **search_functions** - Find functions by pattern
+#### 1. **search_functions** - Find functions by pattern (with file paths)
 ```python
 result = await lg.execute_tool("search_functions", {
     "pattern": "config",
     "limit": 20
 })
+
+# Example response with file path information:
+# {
+#   "functions": [
+#     {
+#       "name": "parse_config",
+#       "file_path": "src/config.py",
+#       "start_line": 45,
+#       "signature": "def parse_config(path: str) -> Config",
+#       "is_async": False
+#     },
+#     {
+#       "name": "load_config",
+#       "file_path": "src/utils/loader.py",  # Different file!
+#       "start_line": 12,
+#       "signature": "async def load_config() -> Config",
+#       "is_async": True
+#     }
+#   ]
+# }
 ```
 
 #### 2. **search_structs** - Find classes/structures by pattern  
@@ -99,11 +144,35 @@ result = await lg.execute_tool("get_dependencies", {
 })
 ```
 
-#### 5. **find_callers** - Locate function call sites
+#### 5. **find_callers** - Locate function call sites (cross-file tracking)
 ```python
 result = await lg.execute_tool("find_callers", {
     "function_name": "authenticate_user"
 })
+
+# Example response showing calls across multiple files:
+# {
+#   "callers": [
+#     {
+#       "function_name": "authenticate_user",
+#       "file_path": "src/api/auth.py",        # Called from API module
+#       "line_number": 23,
+#       "caller_function": "login_endpoint"
+#     },
+#     {
+#       "function_name": "authenticate_user", 
+#       "file_path": "src/middleware/auth.py",  # Also called from middleware
+#       "line_number": 45,
+#       "caller_function": "auth_middleware"
+#     },
+#     {
+#       "function_name": "authenticate_user",
+#       "file_path": "tests/test_auth.py",     # And from tests
+#       "line_number": 67,
+#       "caller_function": "test_valid_user"
+#     }
+#   ]
+# }
 ```
 
 #### 6. **get_repository_tree** - Repository structure overview
@@ -229,9 +298,12 @@ result = await lg.execute_tool(tool_name, tool_args)
 ai_response = send_to_ai(result.content)
 ```
 
-### Example: Code Analysis Bot
+### Example: Enhanced Code Analysis Bot with File Path Awareness
 
 ```python
+import json
+from typing import List, Dict
+
 async def code_analysis_bot(user_question: str, repo_path: str):
     lg = loregrep.LoreGrep.builder().build()
     await lg.scan(repo_path)
@@ -241,13 +313,65 @@ async def code_analysis_bot(user_question: str, repo_path: str):
             "pattern": extract_pattern(user_question),
             "limit": 10
         })
+        
+        # AI can now understand file organization
+        response_data = json.loads(result.content)
+        functions_by_file = {}
+        for func in response_data.get("functions", []):
+            file_path = func["file_path"]
+            if file_path not in functions_by_file:
+                functions_by_file[file_path] = []
+            functions_by_file[file_path].append(func["name"])
+        
+        return f"Found functions across {len(functions_by_file)} files: {functions_by_file}"
+    
+    elif "impact" in user_question.lower():
+        # Find potential impact of changing a function
+        function_name = extract_function_name(user_question)
+        
+        # Find where it's defined
+        definitions = await lg.execute_tool("search_functions", {
+            "pattern": function_name,
+            "limit": 1
+        })
+        
+        # Find where it's called
+        callers = await lg.execute_tool("find_callers", {
+            "function_name": function_name
+        })
+        
+        # Analyze impact across files
+        def_data = json.loads(definitions.content)
+        call_data = json.loads(callers.content)
+        
+        affected_files = set()
+        if def_data.get("functions"):
+            affected_files.add(def_data["functions"][0]["file_path"])
+        
+        for caller in call_data.get("callers", []):
+            affected_files.add(caller["file_path"])
+        
+        return f"Changing '{function_name}' would affect {len(affected_files)} files: {list(affected_files)}"
+    
     elif "structure" in user_question.lower():
         result = await lg.execute_tool("get_repository_tree", {
             "include_file_details": True,
             "max_depth": 2
         })
+        return f"Repository structure: {result.content}"
     
-    return f"Found: {result.content}"
+    return "I can help analyze functions, impact, or structure. Please be more specific!"
+
+# Helper functions
+def extract_pattern(question: str) -> str:
+    # Extract search pattern from user question
+    # Implementation depends on your NLP approach
+    pass
+
+def extract_function_name(question: str) -> str:
+    # Extract function name from user question
+    # Implementation depends on your NLP approach
+    pass
 ```
 
 ## Performance

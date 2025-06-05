@@ -181,27 +181,27 @@ impl LanguageAnalyzer for RustAnalyzer {
             .ok_or_else(|| AnalysisError::ParseError { message: "Failed to parse file".to_string() })?;
         
         // Extract all components
-        match self.extract_functions(&tree, content) {
+        match self.extract_functions(&tree, content, file_path) {
             Ok(functions) => tree_node.functions = functions,
             Err(e) => tree_node.add_error(format!("Function extraction failed: {}", e)),
         }
         
-        match self.extract_structs(&tree, content) {
+        match self.extract_structs(&tree, content, file_path) {
             Ok(structs) => tree_node.structs = structs,
             Err(e) => tree_node.add_error(format!("Struct extraction failed: {}", e)),
         }
         
-        match self.extract_imports(&tree, content) {
+        match self.extract_imports(&tree, content, file_path) {
             Ok(imports) => tree_node.imports = imports,
             Err(e) => tree_node.add_error(format!("Import extraction failed: {}", e)),
         }
         
-        match self.extract_exports(&tree, content) {
+        match self.extract_exports(&tree, content, file_path) {
             Ok(exports) => tree_node.exports = exports,
             Err(e) => tree_node.add_error(format!("Export extraction failed: {}", e)),
         }
         
-        match self.extract_function_calls(&tree, content) {
+        match self.extract_function_calls(&tree, content, file_path) {
             Ok(function_calls) => tree_node.function_calls = function_calls,
             Err(e) => tree_node.add_error(format!("Function call extraction failed: {}", e)),
         }
@@ -210,7 +210,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         Ok(FileAnalysis::new(tree_node, duration))
     }
     
-    fn extract_functions(&self, tree: &Tree, source: &str) -> Result<Vec<FunctionSignature>> {
+    fn extract_functions(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<FunctionSignature>> {
         // Use the simple query that we know works
         let query_str = r#"(function_item name: (identifier) @name) @function"#;
         
@@ -223,7 +223,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         let mut functions = Vec::new();
         
         for query_match in matches {
-            let mut function_sig = FunctionSignature::new(String::new());
+            let mut function_sig = FunctionSignature::new(String::new(), file_path.to_string());
             let mut function_node: Option<Node> = None;
             
             for capture in query_match.captures {
@@ -332,7 +332,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         Ok(functions)
     }
     
-    fn extract_structs(&self, tree: &Tree, source: &str) -> Result<Vec<StructSignature>> {
+    fn extract_structs(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<StructSignature>> {
         let query_str = r#"
             (struct_item
               (visibility_modifier)? @visibility
@@ -358,7 +358,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         let mut structs = Vec::new();
         
         for query_match in matches {
-            let mut struct_sig = StructSignature::new(String::new());
+            let mut struct_sig = StructSignature::new(String::new(), file_path.to_string());
             
             for capture in query_match.captures {
                 let capture_name = &query.capture_names()[capture.index as usize];
@@ -430,7 +430,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         Ok(structs)
     }
     
-    fn extract_imports(&self, tree: &Tree, source: &str) -> Result<Vec<ImportStatement>> {
+    fn extract_imports(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<ImportStatement>> {
         let query_str = r#"
             (use_declaration
               argument: (_) @import_path
@@ -446,7 +446,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         let mut imports = Vec::new();
         
         for query_match in matches {
-            let mut import_stmt = ImportStatement::new(String::new());
+            let mut import_stmt = ImportStatement::new(String::new(), file_path.to_string());
             
             for capture in query_match.captures {
                 let capture_name = &query.capture_names()[capture.index as usize];
@@ -478,7 +478,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         Ok(imports)
     }
     
-    fn extract_exports(&self, tree: &Tree, source: &str) -> Result<Vec<ExportStatement>> {
+    fn extract_exports(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<ExportStatement>> {
         // In Rust, exports are public items
         let query_str = r#"
             [
@@ -501,7 +501,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         let mut exports = Vec::new();
         
         for query_match in matches {
-            let mut export_stmt = ExportStatement::new(String::new());
+            let mut export_stmt = ExportStatement::new(String::new(), file_path.to_string());
             
             for capture in query_match.captures {
                 let capture_name = &query.capture_names()[capture.index as usize];
@@ -526,7 +526,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         Ok(exports)
     }
     
-    fn extract_function_calls(&self, tree: &Tree, source: &str) -> Result<Vec<FunctionCall>> {
+    fn extract_function_calls(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<FunctionCall>> {
         let query_str = r#"
             (call_expression
               function: (identifier) @function_name
@@ -549,7 +549,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         let mut function_calls = Vec::new();
         
         for query_match in matches {
-            let mut function_call = FunctionCall::new(String::new(), String::new(), 0);
+            let mut function_call = FunctionCall::new(String::new(), file_path.to_string(), 0);
             
             for capture in query_match.captures {
                 let capture_name = &query.capture_names()[capture.index as usize];
@@ -591,7 +591,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         if let Ok(fn_regex) = Regex::new(r"(?m)^\s*(pub\s+)?(const\s+)?(async\s+)?fn\s+(\w+)") {
             for caps in fn_regex.captures_iter(content) {
                 if let Some(name_match) = caps.get(4) {
-                    let mut func = FunctionSignature::new(name_match.as_str().to_string());
+                    let mut func = FunctionSignature::new(name_match.as_str().to_string(), file_path.to_string());
                     func.is_public = caps.get(1).is_some();
                     func.is_const = caps.get(2).is_some();
                     func.is_async = caps.get(3).is_some();
@@ -606,7 +606,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         if let Ok(struct_regex) = Regex::new(r"(?m)^\s*(pub\s+)?struct\s+(\w+)") {
             for caps in struct_regex.captures_iter(content) {
                 if let Some(name_match) = caps.get(2) {
-                    let mut struct_sig = StructSignature::new(name_match.as_str().to_string());
+                    let mut struct_sig = StructSignature::new(name_match.as_str().to_string(), file_path.to_string());
                     struct_sig.is_public = caps.get(1).is_some();
                     analysis.structs.push(struct_sig);
                 }
@@ -1074,5 +1074,196 @@ pub const MAX_USERS: usize = 1000;
         
         let generate_id_function = tree_node.functions.iter().find(|f| f.name == "generate_id").unwrap();
         assert!(generate_id_function.is_extern);
+    }
+
+    #[tokio::test]
+    async fn test_file_path_stored_in_functions() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        
+        let code = r#"
+fn hello_world() {
+    println!("Hello, world!");
+}
+
+pub async fn async_func() -> Result<(), Error> {
+    Ok(())
+}
+        "#;
+        
+        let file_path = "src/main.rs";
+        let analysis = analyzer.analyze_file(code, file_path).await.expect("Analysis failed");
+        let tree_node = &analysis.tree_node;
+        
+        // Verify all functions have the correct file path
+        for function in &tree_node.functions {
+            assert_eq!(function.file_path, file_path);
+        }
+        
+        // Verify specific functions
+        if let Some(hello_func) = tree_node.functions.iter().find(|f| f.name == "hello_world") {
+            assert_eq!(hello_func.file_path, file_path);
+        }
+        
+        if let Some(async_func) = tree_node.functions.iter().find(|f| f.name == "async_func") {
+            assert_eq!(async_func.file_path, file_path);
+            assert!(async_func.is_async);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_path_stored_in_structs() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        
+        let code = r#"
+pub struct User {
+    id: u64,
+    name: String,
+}
+
+struct PrivateData {
+    secret: String,
+}
+        "#;
+        
+        let file_path = "src/models.rs";
+        let analysis = analyzer.analyze_file(code, file_path).await.expect("Analysis failed");
+        let tree_node = &analysis.tree_node;
+        
+        // Verify all structs have the correct file path
+        for struct_def in &tree_node.structs {
+            assert_eq!(struct_def.file_path, file_path);
+        }
+        
+        // Verify specific structs
+        if let Some(user_struct) = tree_node.structs.iter().find(|s| s.name == "User") {
+            assert_eq!(user_struct.file_path, file_path);
+            assert!(user_struct.is_public);
+        }
+        
+        if let Some(private_struct) = tree_node.structs.iter().find(|s| s.name == "PrivateData") {
+            assert_eq!(private_struct.file_path, file_path);
+            assert!(!private_struct.is_public);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_path_stored_in_imports() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        
+        let code = r#"
+use std::collections::HashMap;
+use crate::types::User;
+use super::config::Settings;
+        "#;
+        
+        let file_path = "src/handlers.rs";
+        let analysis = analyzer.analyze_file(code, file_path).await.expect("Analysis failed");
+        let tree_node = &analysis.tree_node;
+        
+        // Verify all imports have the correct file path
+        for import in &tree_node.imports {
+            assert_eq!(import.file_path, file_path);
+        }
+        
+        // Verify specific imports
+        if let Some(hashmap_import) = tree_node.imports.iter().find(|i| i.module_path.contains("HashMap")) {
+            assert_eq!(hashmap_import.file_path, file_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_path_stored_in_exports() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        
+        let code = r#"
+pub fn public_function() {}
+pub struct PublicStruct {}
+pub const PUBLIC_CONST: u32 = 42;
+        "#;
+        
+        let file_path = "src/lib.rs";
+        let analysis = analyzer.analyze_file(code, file_path).await.expect("Analysis failed");
+        let tree_node = &analysis.tree_node;
+        
+        // Verify all exports have the correct file path
+        for export in &tree_node.exports {
+            assert_eq!(export.file_path, file_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_path_stored_in_function_calls() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        
+        let code = r#"
+fn main() {
+    println!("Hello");
+    some_function();
+    calculate(42);
+}
+        "#;
+        
+        let file_path = "src/main.rs";
+        let analysis = analyzer.analyze_file(code, file_path).await.expect("Analysis failed");
+        let tree_node = &analysis.tree_node;
+        
+        // Verify all function calls have the correct file path
+        for call in &tree_node.function_calls {
+            assert_eq!(call.file_path, file_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_path_consistency_across_components() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        
+        let code = r#"
+use std::collections::HashMap;
+
+pub struct DataProcessor {
+    data: HashMap<String, String>,
+}
+
+impl DataProcessor {
+    pub fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+        }
+    }
+    
+    pub fn process(&self, input: &str) -> String {
+        format_data(input)
+    }
+}
+
+pub fn format_data(input: &str) -> String {
+    input.to_uppercase()
+}
+        "#;
+        
+        let file_path = "src/processor.rs";
+        let analysis = analyzer.analyze_file(code, file_path).await.expect("Analysis failed");
+        let tree_node = &analysis.tree_node;
+        
+        // Verify all components have the same file path
+        for function in &tree_node.functions {
+            assert_eq!(function.file_path, file_path, "Function {} has incorrect file path", function.name);
+        }
+        
+        for struct_def in &tree_node.structs {
+            assert_eq!(struct_def.file_path, file_path, "Struct {} has incorrect file path", struct_def.name);
+        }
+        
+        for import in &tree_node.imports {
+            assert_eq!(import.file_path, file_path, "Import {} has incorrect file path", import.module_path);
+        }
+        
+        for export in &tree_node.exports {
+            assert_eq!(export.file_path, file_path, "Export {} has incorrect file path", export.exported_item);
+        }
+        
+        for call in &tree_node.function_calls {
+            assert_eq!(call.file_path, file_path, "Function call {} has incorrect file path", call.function_name);
+        }
     }
 }

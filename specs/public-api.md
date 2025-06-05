@@ -11,6 +11,22 @@ LoreGrep provides an in-memory code repository analysis library designed for int
 3. **Language Agnostic**: Extensible architecture supporting multiple programming languages
 4. **Memory Efficient**: Fast in-memory indexing optimized for code analysis
 5. **Type Safe**: Strong typing with comprehensive error handling
+6. **File Path Tracking**: Every code element includes complete file path information for cross-file reference tracking
+
+### 🎯 File Path Storage Enhancement (v0.3.3+)
+
+**All data structures now include file path information:**
+- `FunctionSignature` includes `file_path: String`
+- `StructSignature` includes `file_path: String`
+- `ImportStatement` includes `file_path: String`
+- `ExportStatement` includes `file_path: String`
+- `FunctionCall` includes `file_path: String`
+
+This enables AI coding assistants to:
+- Track function definitions vs. call sites across files
+- Perform accurate impact analysis for refactoring
+- Understand module boundaries and dependencies
+- Generate context-aware code suggestions
 
 ## Public API Structure
 
@@ -228,6 +244,207 @@ Get complete repository information including hierarchical directory structure, 
 }
 ```
 
+## Tool Output Examples with File Path Information
+
+All tools now return results that include complete file path information for better cross-file reference tracking.
+
+### search_functions Example Output
+
+```json
+{
+  "status": "success",
+  "pattern": "config",
+  "results": [
+    {
+      "name": "parse_config",
+      "file_path": "src/config.rs",
+      "start_line": 45,
+      "end_line": 52,
+      "signature": "pub fn parse_config(path: &str) -> Result<Config>",
+      "is_public": true,
+      "is_async": false,
+      "parameters": [
+        {"name": "path", "param_type": "&str", "is_mutable": false}
+      ],
+      "return_type": "Result<Config>"
+    },
+    {
+      "name": "load_config",
+      "file_path": "src/utils/loader.rs",
+      "start_line": 12,
+      "end_line": 18,
+      "signature": "fn load_config() -> Config",
+      "is_public": false,
+      "is_async": false,
+      "parameters": [],
+      "return_type": "Config"
+    }
+  ],
+  "count": 2
+}
+```
+
+### search_structs Example Output
+
+```json
+{
+  "status": "success", 
+  "pattern": "Config",
+  "results": [
+    {
+      "name": "Config",
+      "file_path": "src/config.rs",
+      "start_line": 12,
+      "end_line": 16,
+      "is_public": true,
+      "is_tuple_struct": false,
+      "fields": [
+        {"name": "port", "field_type": "u16", "is_public": true},
+        {"name": "host", "field_type": "String", "is_public": true},
+        {"name": "debug", "field_type": "bool", "is_public": false}
+      ],
+      "generics": []
+    },
+    {
+      "name": "DatabaseConfig",
+      "file_path": "src/db/mod.rs",
+      "start_line": 8,
+      "end_line": 12,
+      "is_public": true,
+      "is_tuple_struct": false,
+      "fields": [
+        {"name": "url", "field_type": "String", "is_public": false},
+        {"name": "max_connections", "field_type": "usize", "is_public": false}
+      ],
+      "generics": []
+    }
+  ],
+  "count": 2
+}
+```
+
+### find_callers Example Output
+
+```json
+{
+  "status": "success",
+  "function_name": "parse_config",
+  "callers": [
+    {
+      "function_name": "parse_config",
+      "file_path": "src/main.rs",
+      "line_number": 23,
+      "column": 17,
+      "is_method_call": false,
+      "receiver_type": null
+    },
+    {
+      "function_name": "parse_config",
+      "file_path": "src/utils/loader.rs",
+      "line_number": 45,
+      "column": 12,
+      "is_method_call": false,
+      "receiver_type": null
+    },
+    {
+      "function_name": "parse_config",
+      "file_path": "tests/config_tests.rs",
+      "line_number": 67,
+      "column": 8,
+      "is_method_call": false,
+      "receiver_type": null
+    }
+  ],
+  "count": 3
+}
+```
+
+### analyze_file Example Output
+
+```json
+{
+  "status": "success",
+  "file_path": "src/config.rs",
+  "language": "rust",
+  "functions": [
+    {
+      "name": "parse_config",
+      "file_path": "src/config.rs",
+      "start_line": 45,
+      "end_line": 52,
+      "signature": "pub fn parse_config(path: &str) -> Result<Config>",
+      "is_public": true,
+      "is_async": false
+    }
+  ],
+  "structs": [
+    {
+      "name": "Config",
+      "file_path": "src/config.rs",
+      "start_line": 12,
+      "end_line": 16,
+      "is_public": true,
+      "fields": [{"name": "port", "field_type": "u16", "is_public": true}]
+    }
+  ],
+  "imports": [
+    {
+      "module_path": "std::fs",
+      "file_path": "src/config.rs",
+      "line_number": 1,
+      "imported_items": ["read_to_string"],
+      "is_external": true,
+      "is_glob": false
+    }
+  ],
+  "exports": [
+    {
+      "exported_item": "Config",
+      "file_path": "src/config.rs", 
+      "line_number": 16,
+      "is_public": true,
+      "alias": null
+    }
+  ]
+}
+```
+
+### get_dependencies Example Output
+
+```json
+{
+  "status": "success",
+  "file_path": "src/main.rs",
+  "imports": [
+    {
+      "module_path": "./config",
+      "file_path": "src/main.rs",
+      "line_number": 2,
+      "imported_items": ["Config"],
+      "is_external": false,
+      "is_glob": false
+    },
+    {
+      "module_path": "std::env",
+      "file_path": "src/main.rs",
+      "line_number": 1,
+      "imported_items": ["args"],
+      "is_external": true,
+      "is_glob": false
+    }
+  ],
+  "exports": [
+    {
+      "exported_item": "main",
+      "file_path": "src/main.rs",
+      "line_number": 8,
+      "is_public": true,
+      "alias": null
+    }
+  ]
+}
+```
+
 ### Core Types
 
 ```rust
@@ -314,9 +531,12 @@ let result = loregrep.execute_tool("search_functions", json!({
 })).await?;
 ```
 
-### Integration with Coding Assistant
+### Integration with Coding Assistant (Leveraging File Path Information)
 
 ```rust
+use std::collections::{HashMap, HashSet};
+use serde_json::{json, Value};
+
 pub struct CodingAssistant {
     loregrep: LoreGrep,
     llm_client: LlmClient,
@@ -335,15 +555,110 @@ impl CodingAssistant {
     }
     
     pub async fn handle_llm_tool_call(&self, call: ToolCall) -> Result<Value> {
-        // Execute tool and return result
+        // Execute tool and return result with enhanced file path context
         let result = self.loregrep.execute_tool(&call.name, call.params).await?;
         Ok(serde_json::to_value(result)?)
+    }
+    
+    /// Analyze cross-file impact using file path information
+    pub async fn analyze_refactoring_impact(&self, function_name: &str) -> Result<Value> {
+        // Find where function is defined
+        let definitions = self.loregrep.execute_tool("search_functions", json!({
+            "pattern": function_name,
+            "limit": 1
+        })).await?;
+        
+        // Find where it's called
+        let callers = self.loregrep.execute_tool("find_callers", json!({
+            "function_name": function_name
+        })).await?;
+        
+        // Parse results to extract file paths
+        let def_data: Value = serde_json::from_str(&definitions.data.to_string())?;
+        let caller_data: Value = serde_json::from_str(&callers.data.to_string())?;
+        
+        let mut affected_files = HashSet::new();
+        
+        // Add definition file
+        if let Some(functions) = def_data["results"].as_array() {
+            for func in functions {
+                if let Some(file_path) = func["file_path"].as_str() {
+                    affected_files.insert(file_path.to_string());
+                }
+            }
+        }
+        
+        // Add caller files
+        if let Some(callers) = caller_data["callers"].as_array() {
+            for caller in callers {
+                if let Some(file_path) = caller["file_path"].as_str() {
+                    affected_files.insert(file_path.to_string());
+                }
+            }
+        }
+        
+        Ok(json!({
+            "function_name": function_name,
+            "affected_files": affected_files.into_iter().collect::<Vec<_>>(),
+            "impact_analysis": {
+                "files_to_review": affected_files.len(),
+                "requires_testing": true,
+                "recommendation": "Review all affected files before making changes"
+            }
+        }))
+    }
+    
+    /// Group functions by module using file path information
+    pub async fn analyze_module_organization(&self, pattern: &str) -> Result<Value> {
+        let functions = self.loregrep.execute_tool("search_functions", json!({
+            "pattern": pattern,
+            "limit": 100
+        })).await?;
+        
+        let func_data: Value = serde_json::from_str(&functions.data.to_string())?;
+        let mut modules: HashMap<String, Vec<String>> = HashMap::new();
+        
+        if let Some(functions) = func_data["results"].as_array() {
+            for func in functions {
+                if let (Some(name), Some(file_path)) = (
+                    func["name"].as_str(),
+                    func["file_path"].as_str()
+                ) {
+                    // Extract module path from file path (e.g., "src/auth/mod.rs" -> "auth")
+                    let module = extract_module_name(file_path);
+                    modules.entry(module).or_default().push(name.to_string());
+                }
+            }
+        }
+        
+        Ok(json!({
+            "pattern": pattern,
+            "modules": modules,
+            "analysis": {
+                "module_count": modules.len(),
+                "suggestion": "Consider organizing related functions in the same module"
+            }
+        }))
     }
     
     pub async fn refresh_index(&mut self, path: &str) -> Result<()> {
         // Rescan when files change
         self.loregrep.scan(path).await?;
         Ok(())
+    }
+}
+
+// Helper function to extract module name from file path
+fn extract_module_name(file_path: &str) -> String {
+    if let Some(captures) = regex::Regex::new(r"src/([^/]+)/")
+        .unwrap()
+        .captures(file_path) 
+    {
+        captures[1].to_string()
+    } else if file_path.starts_with("src/") {
+        "root".to_string()
+    } else {
+        "unknown".to_string()
     }
 }
 ```

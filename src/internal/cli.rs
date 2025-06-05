@@ -341,10 +341,14 @@ impl CliApp {
     pub async fn query(&mut self, args: QueryArgs) -> Result<()> {
         self.ui.print_header("AI Query Mode");
         
-        // Check if we have an API key for AI functionality
-        if std::env::var("ANTHROPIC_API_KEY").is_err() {
-            self.ui.print_warning("ANTHROPIC_API_KEY environment variable not set.");
+        // Check if we have an API key for AI functionality (config or environment)
+        let has_api_key = self.config.anthropic_api_key().is_some() || 
+                         std::env::var("ANTHROPIC_API_KEY").is_ok();
+        
+        if !has_api_key {
+            self.ui.print_warning("No Anthropic API key found.");
             self.ui.print_info("AI query functionality requires an Anthropic API key.");
+            self.ui.print_info("Set ANTHROPIC_API_KEY environment variable or add api_key to loregrep.toml");
             self.ui.print_info("Available commands: scan, search, analyze, config");
             return Ok(());
         }
@@ -993,7 +997,7 @@ struct PrivateStruct {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
-        let func = FunctionSignature::new("test_func".to_string())
+        let func = FunctionSignature::new("test_func".to_string(), "/test/file.rs".to_string())
             .with_visibility(true)
             .with_location(10, 20);
         
@@ -1008,7 +1012,7 @@ struct PrivateStruct {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
-        let struct_def = StructSignature::new("TestStruct".to_string())
+        let struct_def = StructSignature::new("TestStruct".to_string(), "/test/file.rs".to_string())
             .with_visibility(true)
             .with_location(5, 15);
         
@@ -1023,7 +1027,7 @@ struct PrivateStruct {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
-        let import = ImportStatement::new("std::collections::HashMap".to_string())
+        let import = ImportStatement::new("std::collections::HashMap".to_string(), "/test/file.rs".to_string())
             .with_line_number(1);
         
         let results = app.convert_import_results(vec![&import]);
@@ -1037,7 +1041,7 @@ struct PrivateStruct {
         let config = create_test_config();
         let app = CliApp::new(config, false, true).await.unwrap();
         
-        let export = ExportStatement::new("MyFunction".to_string())
+        let export = ExportStatement::new("MyFunction".to_string(), "/test/file.rs".to_string())
             .with_line_number(10);
         
         let results = app.convert_export_results(vec![&export]);

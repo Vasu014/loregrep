@@ -467,7 +467,7 @@ mod tests {
         
         // Add test functions
         node.functions.push(
-            FunctionSignature::new(format!("function_{}", name))
+            FunctionSignature::new(format!("function_{}", name), node.file_path.clone())
                 .with_parameters(vec![
                     Parameter::new("param1".to_string(), "i32".to_string()),
                 ])
@@ -476,17 +476,17 @@ mod tests {
         );
         
         // Add test structs
-        node.structs.push(StructSignature::new(format!("Struct{}", name)));
+        node.structs.push(StructSignature::new(format!("Struct{}", name), node.file_path.clone()));
         
         // Add test imports
         node.imports.push(
-            ImportStatement::new(format!("crate::{}", name))
+            ImportStatement::new(format!("crate::{}", name), node.file_path.clone())
                 .with_external(false)
         );
         
         // Add test exports
         node.exports.push(
-            ExportStatement::new(format!("pub_{}", name))
+            ExportStatement::new(format!("pub_{}", name), node.file_path.clone())
         );
         
         // Add test function calls

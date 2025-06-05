@@ -32,6 +32,7 @@ impl Parameter {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FunctionSignature {
     pub name: String,
+    pub file_path: String,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<String>,
     pub is_public: bool,
@@ -45,9 +46,10 @@ pub struct FunctionSignature {
 }
 
 impl FunctionSignature {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, file_path: String) -> Self {
         Self {
             name,
+            file_path,
             parameters: Vec::new(),
             return_type: None,
             is_public: false,

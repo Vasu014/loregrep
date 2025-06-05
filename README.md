@@ -140,8 +140,57 @@ print(f"📁 Found {scan_result.functions_found} functions in {scan_result.files
 
 - **Parses** code files using tree-sitter for accurate syntax analysis
 - **Indexes** functions, structs, imports, exports, and relationships in memory  
+- **Stores** complete file path information for every code element for cross-file reference tracking
 - **Provides** 6 standardized tools that coding assistants can call to query the codebase
 - **Enables** AI systems to understand code structure without re-parsing
+
+### 🎯 **File Path Storage for Better AI Integration**
+
+Every function, struct, import, export, and function call includes its originating file path:
+
+```json
+{
+  "name": "parse_config",
+  "file_path": "src/config.rs",          // ← Always included
+  "start_line": 45,
+  "signature": "pub fn parse_config(...)"
+}
+```
+
+**Why This Matters for AI Coding Assistants:**
+- **Cross-file Navigation**: AI can track where functions are defined vs. where they're called
+- **Impact Analysis**: Understand which files are affected by changes
+- **Context Awareness**: AI knows the full location context when suggesting code changes
+- **Refactoring Safety**: Track all references across the entire codebase
+
+### Before vs After: File Path Storage Enhancement
+
+**Before (v0.3.2 and earlier):**
+```json
+{
+  "name": "parse_config",
+  "signature": "pub fn parse_config(path: &str) -> Result<Config>",
+  "line_number": 45
+}
+```
+*AI knows the function exists but not where it's located.*
+
+**After (v0.3.3+):**
+```json
+{
+  "name": "parse_config", 
+  "file_path": "src/config.rs",          // ← Now included!
+  "signature": "pub fn parse_config(path: &str) -> Result<Config>",
+  "start_line": 45,
+  "end_line": 52
+}
+```
+*AI knows exactly where the function is defined and can track cross-file relationships.*
+
+**Real-World Impact:**
+- **Question**: "How is the Config struct used across the codebase?"
+- **Before**: AI could find Config but couldn't tell you it's defined in `src/config.rs` and used in `src/main.rs`, `src/api.rs`, etc.
+- **After**: AI can now provide a complete cross-file usage analysis with specific file locations.
 
 ## What It's NOT
 
@@ -305,10 +354,22 @@ Find functions by name or pattern across the codebase.
             "line_number": 45,
             "signature": "pub fn parse_config(path: &str) -> Result<Config>",
             "visibility": "public",
-            "complexity": 3
+            "complexity": 3,
+            "start_line": 45,
+            "end_line": 52
+        },
+        {
+            "name": "load_config",
+            "file_path": "src/main.rs", 
+            "line_number": 23,
+            "signature": "fn load_config(file: &Path) -> Config",
+            "visibility": "private",
+            "complexity": 2,
+            "start_line": 23,
+            "end_line": 28
         }
     ],
-    "total_found": 1
+    "total_found": 2
 }
 ```
 
@@ -334,8 +395,26 @@ Find structures, classes, and types by name or pattern.
             "name": "Config",
             "file_path": "src/config.rs",
             "line_number": 12,
-            "fields": ["name: String", "port: u16", "debug: bool"],
-            "visibility": "public"
+            "fields": [
+                {"name": "name", "field_type": "String", "is_public": true},
+                {"name": "port", "field_type": "u16", "is_public": true},
+                {"name": "debug", "field_type": "bool", "is_public": true}
+            ],
+            "visibility": "public",
+            "start_line": 12,
+            "end_line": 16
+        },
+        {
+            "name": "DatabaseConfig",
+            "file_path": "src/db/mod.rs",
+            "line_number": 8,
+            "fields": [
+                {"name": "url", "field_type": "String", "is_public": false},
+                {"name": "max_connections", "field_type": "usize", "is_public": false}
+            ],
+            "visibility": "public",
+            "start_line": 8,
+            "end_line": 12
         }
     ]
 }
@@ -360,10 +439,44 @@ Get comprehensive analysis of a specific file.
 {
     "file_path": "src/config.rs",
     "language": "rust",
-    "functions": [...],
-    "structs": [...],
-    "imports": [...],
-    "exports": [...],
+    "functions": [
+        {
+            "name": "parse_config",
+            "file_path": "src/config.rs",
+            "start_line": 45,
+            "end_line": 52,
+            "signature": "pub fn parse_config(path: &str) -> Result<Config>",
+            "is_public": true,
+            "is_async": false
+        }
+    ],
+    "structs": [
+        {
+            "name": "Config", 
+            "file_path": "src/config.rs",
+            "start_line": 12,
+            "end_line": 16,
+            "is_public": true,
+            "fields": [{"name": "port", "field_type": "u16", "is_public": true}]
+        }
+    ],
+    "imports": [
+        {
+            "module_path": "std::fs",
+            "file_path": "src/config.rs",
+            "line_number": 1,
+            "imported_items": ["read_to_string"],
+            "is_external": true
+        }
+    ],
+    "exports": [
+        {
+            "exported_item": "Config",
+            "file_path": "src/config.rs",
+            "line_number": 16,
+            "is_public": true
+        }
+    ],
     "complexity_score": 15,
     "source_code": "// Full source if requested"
 }
@@ -387,11 +500,31 @@ Find imports, exports, and dependencies for a file.
 ```json
 {
     "imports": [
-        {"name": "Config", "from": "./config", "usage_count": 3},
-        {"name": "std::fs", "from": "std", "usage_count": 1}
+        {
+            "module_path": "./config",
+            "file_path": "src/main.rs",
+            "line_number": 2,
+            "imported_items": ["Config"],
+            "is_external": false,
+            "usage_count": 3
+        },
+        {
+            "module_path": "std::fs",
+            "file_path": "src/main.rs", 
+            "line_number": 1,
+            "imported_items": ["read_to_string"],
+            "is_external": true,
+            "usage_count": 1
+        }
     ],
     "exports": [
-        {"name": "main", "type": "function"}
+        {
+            "exported_item": "main",
+            "file_path": "src/main.rs",
+            "line_number": 8,
+            "is_public": true,
+            "type": "function"
+        }
     ]
 }
 ```
@@ -415,10 +548,22 @@ Find where specific functions are called.
 {
     "callers": [
         {
-            "caller_function": "main",
-            "file_path": "src/main.rs", 
+            "function_name": "parse_config",
+            "file_path": "src/main.rs",
             "line_number": 23,
-            "context": "let config = parse_config(&args.config_path)?;"
+            "column": 17,
+            "caller_function": "main",
+            "context": "let config = parse_config(&args.config_path)?;",
+            "is_method_call": false
+        },
+        {
+            "function_name": "parse_config",
+            "file_path": "src/utils/loader.rs",
+            "line_number": 45,
+            "column": 12,
+            "caller_function": "load_default_config",
+            "context": "return parse_config(DEFAULT_CONFIG_PATH);",
+            "is_method_call": false
         }
     ]
 }
@@ -443,14 +588,31 @@ Get repository structure and overview.
 {
     "structure": {
         "src/": {
-            "main.rs": {"functions": 1, "lines": 45},
-            "config.rs": {"functions": 3, "lines": 120}
+            "main.rs": {
+                "functions": 1,
+                "lines": 45,
+                "file_path": "src/main.rs",
+                "function_details": [
+                    {"name": "main", "file_path": "src/main.rs", "start_line": 8, "is_public": false}
+                ]
+            },
+            "config.rs": {
+                "functions": 3,
+                "lines": 120,
+                "file_path": "src/config.rs",
+                "function_details": [
+                    {"name": "parse_config", "file_path": "src/config.rs", "start_line": 45, "is_public": true},
+                    {"name": "validate_config", "file_path": "src/config.rs", "start_line": 65, "is_public": false},
+                    {"name": "default_config", "file_path": "src/config.rs", "start_line": 85, "is_public": true}
+                ]
+            }
         }
     },
     "stats": {
         "total_files": 15,
         "total_functions": 67,
-        "languages": ["rust"]
+        "languages": ["rust"],
+        "cross_file_references": 23
     }
 }
 ```

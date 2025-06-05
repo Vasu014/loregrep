@@ -20,19 +20,19 @@ pub trait LanguageAnalyzer: Send + Sync {
     async fn analyze_file(&self, content: &str, file_path: &str) -> Result<FileAnalysis>;
     
     /// Extract function signatures from a parsed tree
-    fn extract_functions(&self, tree: &Tree, source: &str) -> Result<Vec<FunctionSignature>>;
+    fn extract_functions(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<FunctionSignature>>;
     
     /// Extract struct/class definitions from a parsed tree
-    fn extract_structs(&self, tree: &Tree, source: &str) -> Result<Vec<StructSignature>>;
+    fn extract_structs(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<StructSignature>>;
     
     /// Extract import statements from a parsed tree
-    fn extract_imports(&self, tree: &Tree, source: &str) -> Result<Vec<ImportStatement>>;
+    fn extract_imports(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<ImportStatement>>;
     
     /// Extract export statements from a parsed tree
-    fn extract_exports(&self, tree: &Tree, source: &str) -> Result<Vec<ExportStatement>>;
+    fn extract_exports(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<ExportStatement>>;
     
     /// Extract function calls from a parsed tree
-    fn extract_function_calls(&self, tree: &Tree, source: &str) -> Result<Vec<FunctionCall>>;
+    fn extract_function_calls(&self, tree: &Tree, source: &str, file_path: &str) -> Result<Vec<FunctionCall>>;
     
     /// Extract as much as possible when normal parsing fails
     fn extract_with_fallback(&self, content: &str, file_path: &str) -> PartialAnalysis;

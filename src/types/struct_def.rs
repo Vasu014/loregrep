@@ -30,6 +30,7 @@ impl StructField {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StructSignature {
     pub name: String,
+    pub file_path: String,
     pub fields: Vec<StructField>,
     pub is_public: bool,
     pub is_tuple_struct: bool,
@@ -39,9 +40,10 @@ pub struct StructSignature {
 }
 
 impl StructSignature {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, file_path: String) -> Self {
         Self {
             name,
+            file_path,
             fields: Vec::new(),
             is_public: false,
             is_tuple_struct: false,
@@ -109,6 +111,7 @@ impl StructSignature {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImportStatement {
     pub module_path: String,
+    pub file_path: String,
     pub imported_items: Vec<String>,
     pub alias: Option<String>,
     pub is_glob: bool,
@@ -117,9 +120,10 @@ pub struct ImportStatement {
 }
 
 impl ImportStatement {
-    pub fn new(module_path: String) -> Self {
+    pub fn new(module_path: String, file_path: String) -> Self {
         Self {
             module_path,
+            file_path,
             imported_items: Vec::new(),
             alias: None,
             is_glob: false,
@@ -157,15 +161,17 @@ impl ImportStatement {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExportStatement {
     pub exported_item: String,
+    pub file_path: String,
     pub alias: Option<String>,
     pub is_public: bool,
     pub line_number: u32,
 }
 
 impl ExportStatement {
-    pub fn new(exported_item: String) -> Self {
+    pub fn new(exported_item: String, file_path: String) -> Self {
         Self {
             exported_item,
+            file_path,
             alias: None,
             is_public: true,
             line_number: 0,

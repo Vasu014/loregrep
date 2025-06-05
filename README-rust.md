@@ -8,6 +8,22 @@
 
 A fast, memory-efficient Rust library that parses codebases using tree-sitter and provides structured access to functions, structs, dependencies, and call graphs. Built for AI coding assistants and code analysis tools.
 
+## 🎯 **Enhanced with Complete File Path Tracking**
+
+**Every code element now includes its originating file path** for superior cross-file reference tracking:
+
+- ✅ **Functions**: `FunctionSignature` includes `file_path: String`
+- ✅ **Structs/Enums**: `StructSignature` includes `file_path: String` 
+- ✅ **Imports**: `ImportStatement` includes `file_path: String`
+- ✅ **Exports**: `ExportStatement` includes `file_path: String`
+- ✅ **Function Calls**: `FunctionCall` includes `file_path: String`
+
+This enables AI coding assistants to:
+- Track function definitions vs. call sites across files
+- Perform accurate impact analysis for refactoring
+- Understand module boundaries and dependencies
+- Generate context-aware code suggestions
+
 ## Quick Start
 
 ### Installation
@@ -96,18 +112,36 @@ for error in &result.errors {
 }
 ```
 
-### Tool Execution
+### Tool Execution with File Path Tracking
 
-Loregrep provides 6 standardized tools for code analysis:
+Loregrep provides 6 standardized tools for code analysis. **Every result includes complete file path information** for better cross-file reference tracking:
 
 ```rust
 use serde_json::json;
 
-// 1. Search functions by pattern
+// 1. Search functions by pattern - now with file paths!
 let functions = loregrep.execute_tool("search_functions", json!({
     "pattern": "config",
     "limit": 20
 })).await?;
+
+// Example response shows file paths for each function:
+// {
+//   "functions": [
+//     {
+//       "name": "parse_config",
+//       "file_path": "src/config.rs",  ← Always included
+//       "start_line": 45,
+//       "signature": "pub fn parse_config(path: &str) -> Result<Config>"
+//     },
+//     {
+//       "name": "load_config", 
+//       "file_path": "src/utils/loader.rs",  ← Different file
+//       "start_line": 12,
+//       "signature": "fn load_config() -> Config"
+//     }
+//   ]
+// }
 
 // 2. Search structs/enums by pattern
 let structs = loregrep.execute_tool("search_structs", json!({
@@ -115,23 +149,41 @@ let structs = loregrep.execute_tool("search_structs", json!({
     "limit": 10
 })).await?;
 
-// 3. Analyze specific file
+// 3. Analyze specific file - shows all elements with their file paths
 let analysis = loregrep.execute_tool("analyze_file", json!({
     "file_path": "src/main.rs",
     "include_source": false
 })).await?;
 
-// 4. Get file dependencies
+// 4. Get file dependencies - imports/exports include file paths
 let deps = loregrep.execute_tool("get_dependencies", json!({
     "file_path": "src/lib.rs"
 })).await?;
 
-// 5. Find function callers
+// 5. Find function callers - shows where functions are called from
 let callers = loregrep.execute_tool("find_callers", json!({
     "function_name": "parse_config"
 })).await?;
 
-// 6. Get repository tree
+// Example response with cross-file calls:
+// {
+//   "callers": [
+//     {
+//       "function_name": "parse_config",
+//       "file_path": "src/main.rs",       ← Called from main.rs
+//       "line_number": 23,
+//       "caller_function": "main"
+//     },
+//     {
+//       "function_name": "parse_config", 
+//       "file_path": "src/utils/loader.rs", ← Also called from loader.rs
+//       "line_number": 45,
+//       "caller_function": "load_default_config"
+//     }
+//   ]
+// }
+
+// 6. Get repository tree with file path details
 let tree = loregrep.execute_tool("get_repository_tree", json!({
     "include_file_details": true,
     "max_depth": 3
@@ -264,10 +316,11 @@ for handle in handles {
 
 ## Integration Patterns
 
-### With AI Libraries
+### With AI Libraries - Leveraging File Path Information
 
 ```rust
 use loregrep::LoreGrep;
+use serde_json::json;
 
 pub struct CodeAssistant {
     loregrep: LoreGrep,
@@ -276,15 +329,56 @@ pub struct CodeAssistant {
 
 impl CodeAssistant {
     pub async fn analyze_codebase(&self, query: &str) -> Result<String, Box<dyn std::error::Error>> {
-        // Get structured code data
+        // Get structured code data with file paths
         let functions = self.loregrep.execute_tool("search_functions", json!({
             "pattern": query,
             "limit": 10
         })).await?;
         
-        // Send to AI for analysis
-        let response = self.ai_client.analyze(&functions.content).await?;
+        // AI now knows exactly where each function is located
+        // Example: functions.content includes:
+        // [
+        //   {
+        //     "name": "authenticate_user",
+        //     "file_path": "src/auth/mod.rs",     ← AI knows this is in auth module
+        //     "start_line": 45
+        //   },
+        //   {
+        //     "name": "auth_middleware", 
+        //     "file_path": "src/middleware/auth.rs", ← AI knows this is middleware
+        //     "start_line": 12
+        //   }
+        // ]
+        
+        // Send to AI for contextual analysis
+        let response = self.ai_client.analyze_with_context(
+            &functions.content,
+            "Focus on file organization and cross-module dependencies"
+        ).await?;
         Ok(response)
+    }
+    
+    /// Find all files that would be affected by changing a function
+    pub async fn impact_analysis(&self, function_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        // Find where the function is defined
+        let definitions = self.loregrep.execute_tool("search_functions", json!({
+            "pattern": function_name,
+            "limit": 1
+        })).await?;
+        
+        // Find where it's called
+        let callers = self.loregrep.execute_tool("find_callers", json!({
+            "function_name": function_name
+        })).await?;
+        
+        // Extract all unique file paths affected
+        let mut affected_files = std::collections::HashSet::new();
+        
+        // Parse JSON and extract file_path fields
+        // (In real implementation, you'd deserialize to structs)
+        // This gives you a complete list of files that would be impacted
+        
+        Ok(affected_files.into_iter().collect())
     }
 }
 ```
@@ -361,27 +455,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Advanced Usage
 
-### Custom Tool Development
+### Custom Tool Development with File Path Awareness
 
 ```rust
 use loregrep::{ToolSchema, ToolResult};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
-// Implement custom analysis tools
+// Custom analysis that leverages file path information
 impl LoreGrep {
-    pub async fn execute_custom_tool(&self, tool_fn: impl Fn(&Self) -> ToolResult) -> ToolResult {
-        tool_fn(self)
+    /// Find functions grouped by their containing modules
+    pub async fn analyze_by_module(&self, pattern: &str) -> Result<ToolResult, Box<dyn std::error::Error>> {
+        let functions = self.execute_tool("search_functions", json!({
+            "pattern": pattern,
+            "limit": 100
+        })).await?;
+        
+        // Group functions by their file paths (modules)
+        let mut modules: HashMap<String, Vec<Value>> = HashMap::new();
+        
+        // Parse the function results and group by file_path
+        // Each function includes: { "name": "...", "file_path": "src/module/file.rs", ... }
+        
+        let result = json!({
+            "analysis_type": "module_grouping",
+            "pattern": pattern,
+            "modules": modules,
+            "summary": {
+                "total_modules": modules.len(),
+                "cross_module_functions": "Functions spread across multiple modules"
+            }
+        });
+        
+        Ok(ToolResult {
+            content: result.to_string(),
+            metadata: None,
+        })
+    }
+    
+    /// Find potential circular dependencies using file path analysis
+    pub async fn check_circular_dependencies(&self) -> Result<ToolResult, Box<dyn std::error::Error>> {
+        // Get all imports with their file paths
+        let mut potential_cycles = Vec::new();
+        
+        // Analyze import statements across all files
+        // Each import includes: { "module_path": "...", "file_path": "...", ... }
+        
+        let result = json!({
+            "analysis_type": "circular_dependency_check",
+            "potential_cycles": potential_cycles,
+            "recommendation": "Review these import patterns for circular dependencies"
+        });
+        
+        Ok(ToolResult {
+            content: result.to_string(),
+            metadata: None,
+        })
     }
 }
 
-// Example: Find all public functions
-let public_functions = loregrep.execute_custom_tool(|lg| {
-    // Custom analysis logic
-    ToolResult {
-        content: "Custom analysis results".to_string(),
-        metadata: None,
-    }
-}).await;
+// Usage examples:
+let module_analysis = loregrep.analyze_by_module("config").await?;
+let dependency_check = loregrep.check_circular_dependencies().await?;
 ```
 
 ### Extending File Support
