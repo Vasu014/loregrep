@@ -224,8 +224,7 @@ impl LocalAnalysisTools {
                     "structs": tree_node.structs,
                     "imports": tree_node.imports,
                     "exports": tree_node.exports,
-                    "function_calls": tree_node.function_calls,
-                    "analysis": file_analysis.tree_node
+                    "function_calls": tree_node.function_calls
                 });
 
                 if analyze_input.include_content.unwrap_or(false) {

@@ -29,7 +29,6 @@ pub struct LanguageDetector {
 pub struct ScanConfig {
     pub follow_symlinks: bool,
     pub max_depth: Option<u32>,
-    pub show_progress: bool,
     pub parallel: bool,
 }
 
@@ -152,7 +151,6 @@ impl Default for ScanConfig {
         Self {
             follow_symlinks: false,
             max_depth: Some(20),
-            show_progress: true,
             parallel: true,
         }
     }
@@ -408,7 +406,7 @@ mod tests {
 
         let config = create_test_config();
         let scan_config = ScanConfig {
-            show_progress: false,
+            follow_symlinks: false,
             ..Default::default()
         };
 

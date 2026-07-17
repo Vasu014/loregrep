@@ -12,7 +12,6 @@ use crate::{
         cli_types::{AnalyzeArgs, ScanArgs, SearchArgs},
         config::CliConfig,
     },
-    types::{ExportStatement, FunctionSignature, ImportStatement, StructSignature},
 };
 
 /// Lightweight search result used for plain, machine-facing output.
@@ -280,14 +279,15 @@ impl CliApp {
                 eprintln!("Output format: {}", args.format);
             }
 
-            // Use public API to analyze directory
+            // There is no dedicated "analyze_directory" tool; the repository
+            // tree tool is the natural fit for a directory overview.
             let tool_result = self
                 .loregrep
                 .execute_tool(
-                    "analyze_directory",
+                    "get_repository_tree",
                     serde_json::json!({
-                        "directory_path": args.file.to_string_lossy(),
-                        "include_source": true
+                        "include_file_details": true,
+                        "max_depth": 0
                     }),
                 )
                 .await
@@ -384,8 +384,10 @@ impl CliApp {
     ) -> Vec<SearchResult> {
         let mut results = Vec::new();
 
-        // Handle the tool result data based on type
-        if let Some(items) = data.as_array() {
+        // The search tools return an object of the shape
+        // `{ "status": .., "pattern": .., "results": [ ..items.. ], "count": N }`,
+        // so read the items out of the `results` array (not the top-level value).
+        if let Some(items) = data.get("results").and_then(|v| v.as_array()) {
             for item in items {
                 if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                     let file_path = item
@@ -394,8 +396,10 @@ impl CliApp {
                         .unwrap_or("unknown")
                         .to_string();
 
+                    // Items are serialized `FunctionSignature`/`StructSignature`,
+                    // which expose `start_line`/`end_line` rather than `line_number`.
                     let line_number = item
-                        .get("line_number")
+                        .get("start_line")
                         .and_then(|v| v.as_u64())
                         .map(|n| n as u32);
 
@@ -524,6 +528,21 @@ impl CliApp {
         }
     }
 
+    /// Collect all `File` nodes from a `get_repository_tree` directory node,
+    /// walking directories recursively. Each returned value is the `FileNode`
+    /// JSON object (with a `skeleton` field).
+    fn collect_tree_files<'a>(node: &'a serde_json::Value, out: &mut Vec<&'a serde_json::Value>) {
+        if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+            for child in children {
+                match child.get("type").and_then(|v| v.as_str()) {
+                    Some("File") => out.push(child),
+                    Some("Directory") => Self::collect_tree_files(child, out),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn display_directory_analysis(&self, data: &serde_json::Value, args: &AnalyzeArgs) {
         match args.format.as_str() {
             "json" => {
@@ -531,137 +550,140 @@ impl CliApp {
                 println!("{}", json);
             }
             "text" => {
-                if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
-                    let mut total_functions = 0;
-                    let mut total_structs = 0;
+                let tree = data
+                    .get("repository_tree")
+                    .unwrap_or(&serde_json::Value::Null);
+                let mut files = Vec::new();
+                Self::collect_tree_files(tree, &mut files);
 
-                    for file_data in files {
-                        if let Some(file_path) = file_data.get("file_path").and_then(|v| v.as_str())
-                        {
-                            println!("File: {}", file_path);
+                let mut total_functions = 0;
+                let mut total_structs = 0;
 
-                            if let Some(language) =
-                                file_data.get("language").and_then(|v| v.as_str())
-                            {
-                                println!("Language: {}", language);
-                            }
+                for file_data in &files {
+                    let skeleton = file_data
+                        .get("skeleton")
+                        .unwrap_or(&serde_json::Value::Null);
 
-                            // Display functions
-                            if args.functions || (!args.structs && !args.imports) {
-                                if let Some(functions) =
-                                    file_data.get("functions").and_then(|v| v.as_array())
-                                {
-                                    if !functions.is_empty() {
-                                        println!("Functions:");
-                                        for func in functions {
-                                            if let Some(name) =
-                                                func.get("name").and_then(|v| v.as_str())
-                                            {
-                                                let params = func
-                                                    .get("parameters")
-                                                    .and_then(|v| v.as_array())
-                                                    .map(|arr| arr.len())
-                                                    .unwrap_or(0);
-                                                let return_type = func
-                                                    .get("return_type")
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("");
+                    let file_path = skeleton
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| file_data.get("path").and_then(|v| v.as_str()))
+                        .unwrap_or("unknown");
+                    println!("File: {}", file_path);
 
-                                                println!(
-                                                    "  fn {}({} params) -> {}",
-                                                    name,
-                                                    params,
-                                                    if return_type.is_empty() {
-                                                        "()"
-                                                    } else {
-                                                        return_type
-                                                    }
-                                                );
-                                                total_functions += 1;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Display structs
-                            if args.structs || (!args.functions && !args.imports) {
-                                if let Some(structs) =
-                                    file_data.get("structs").and_then(|v| v.as_array())
-                                {
-                                    if !structs.is_empty() {
-                                        println!("Structs:");
-                                        for struct_item in structs {
-                                            if let Some(name) =
-                                                struct_item.get("name").and_then(|v| v.as_str())
-                                            {
-                                                let fields = struct_item
-                                                    .get("fields")
-                                                    .and_then(|v| v.as_array())
-                                                    .map(|arr| arr.len())
-                                                    .unwrap_or(0);
-                                                println!(
-                                                    "  struct {} {{ {} fields }}",
-                                                    name, fields
-                                                );
-                                                total_structs += 1;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            println!(); // Blank line between files
+                    if let Some(language) = skeleton.get("language").and_then(|v| v.as_str()) {
+                        if !language.is_empty() {
+                            println!("Language: {}", language);
                         }
                     }
 
-                    // Summary
-                    println!(
-                        "Summary: {} functions, {} structs across {} files",
-                        total_functions,
-                        total_structs,
-                        files.len()
-                    );
+                    // Display functions
+                    if args.functions || (!args.structs && !args.imports) {
+                        if let Some(functions) =
+                            skeleton.get("functions").and_then(|v| v.as_array())
+                        {
+                            if !functions.is_empty() {
+                                println!("Functions:");
+                                for func in functions {
+                                    if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                        let params = func
+                                            .get("parameter_count")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let return_type = func
+                                            .get("return_type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+
+                                        println!(
+                                            "  fn {}({} params) -> {}",
+                                            name,
+                                            params,
+                                            if return_type.is_empty() {
+                                                "()"
+                                            } else {
+                                                return_type
+                                            }
+                                        );
+                                        total_functions += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Display structs
+                    if args.structs || (!args.functions && !args.imports) {
+                        if let Some(structs) = skeleton.get("structs").and_then(|v| v.as_array()) {
+                            if !structs.is_empty() {
+                                println!("Structs:");
+                                for struct_item in structs {
+                                    if let Some(name) =
+                                        struct_item.get("name").and_then(|v| v.as_str())
+                                    {
+                                        let fields = struct_item
+                                            .get("field_count")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        println!("  struct {} {{ {} fields }}", name, fields);
+                                        total_structs += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    println!(); // Blank line between files
                 }
+
+                // Summary
+                println!(
+                    "Summary: {} functions, {} structs across {} files",
+                    total_functions,
+                    total_structs,
+                    files.len()
+                );
             }
             "tree" => {
-                if let Some(directory_path) = data.get("directory_path").and_then(|v| v.as_str()) {
-                    println!("{}", directory_path);
+                let tree = data
+                    .get("repository_tree")
+                    .unwrap_or(&serde_json::Value::Null);
 
-                    if let Some(files) = data.get("files").and_then(|v| v.as_array()) {
-                        for file_data in files {
-                            if let Some(file_path) =
-                                file_data.get("file_path").and_then(|v| v.as_str())
-                            {
-                                let file_name = std::path::Path::new(file_path)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or(file_path);
-                                println!("  {}", file_name);
+                if let Some(root_path) = data
+                    .get("metadata")
+                    .and_then(|m| m.get("root_path"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| tree.get("path").and_then(|v| v.as_str()))
+                {
+                    println!("{}", root_path);
+                }
 
-                                if let Some(functions) =
-                                    file_data.get("functions").and_then(|v| v.as_array())
-                                {
-                                    for func in functions {
-                                        if let Some(name) =
-                                            func.get("name").and_then(|v| v.as_str())
-                                        {
-                                            println!("    fn {}", name);
-                                        }
-                                    }
-                                }
+                let mut files = Vec::new();
+                Self::collect_tree_files(tree, &mut files);
 
-                                if let Some(structs) =
-                                    file_data.get("structs").and_then(|v| v.as_array())
-                                {
-                                    for struct_item in structs {
-                                        if let Some(name) =
-                                            struct_item.get("name").and_then(|v| v.as_str())
-                                        {
-                                            println!("    struct {}", name);
-                                        }
-                                    }
-                                }
+                for file_data in &files {
+                    let skeleton = file_data
+                        .get("skeleton")
+                        .unwrap_or(&serde_json::Value::Null);
+                    let file_name = file_data
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| skeleton.get("path").and_then(|v| v.as_str()))
+                        .unwrap_or("unknown");
+                    println!("  {}", file_name);
+
+                    if let Some(functions) = skeleton.get("functions").and_then(|v| v.as_array()) {
+                        for func in functions {
+                            if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                println!("    fn {}", name);
+                            }
+                        }
+                    }
+
+                    if let Some(structs) = skeleton.get("structs").and_then(|v| v.as_array()) {
+                        for struct_item in structs {
+                            if let Some(name) = struct_item.get("name").and_then(|v| v.as_str()) {
+                                println!("    struct {}", name);
                             }
                         }
                     }
@@ -679,76 +701,6 @@ impl CliApp {
         // Cache operations would be implemented here
         // For now, this is a placeholder
         Ok(())
-    }
-
-    fn convert_function_results(&self, functions: Vec<&FunctionSignature>) -> Vec<SearchResult> {
-        functions
-            .into_iter()
-            .map(|func| {
-                let context = if func.start_line > 0 && func.end_line > 0 {
-                    Some(format!("{}-{}", func.start_line, func.end_line))
-                } else {
-                    None
-                };
-
-                SearchResult::new(
-                    "function".to_string(),
-                    func.format(),
-                    "".to_string(), // file_path would be set by caller
-                    Some(func.start_line),
-                )
-                .with_context(context.unwrap_or_default())
-            })
-            .collect()
-    }
-
-    fn convert_struct_results(&self, structs: Vec<&StructSignature>) -> Vec<SearchResult> {
-        structs
-            .into_iter()
-            .map(|struct_def| {
-                let context = if struct_def.start_line > 0 && struct_def.end_line > 0 {
-                    Some(format!("{}-{}", struct_def.start_line, struct_def.end_line))
-                } else {
-                    None
-                };
-
-                SearchResult::new(
-                    "struct".to_string(),
-                    struct_def.format(),
-                    "".to_string(), // file_path would be set by caller
-                    Some(struct_def.start_line),
-                )
-                .with_context(context.unwrap_or_default())
-            })
-            .collect()
-    }
-
-    fn convert_import_results(&self, imports: Vec<&ImportStatement>) -> Vec<SearchResult> {
-        imports
-            .into_iter()
-            .map(|import| {
-                SearchResult::new(
-                    "import".to_string(),
-                    format!("use {};", import.module_path),
-                    "".to_string(), // file_path would be set by caller
-                    Some(import.line_number),
-                )
-            })
-            .collect()
-    }
-
-    fn convert_export_results(&self, exports: Vec<&ExportStatement>) -> Vec<SearchResult> {
-        exports
-            .into_iter()
-            .map(|export| {
-                SearchResult::new(
-                    "export".to_string(),
-                    format!("pub {}", export.exported_item),
-                    "".to_string(), // file_path would be set by caller
-                    Some(export.line_number),
-                )
-            })
-            .collect()
     }
 }
 
@@ -903,65 +855,126 @@ struct PrivateStruct {
     }
 
     #[test]
-    async fn test_convert_function_results() {
+    async fn test_convert_tool_result_reads_results_array() {
+        // Regression test: search tools return an OBJECT with a `results`
+        // array (not a bare array), and items carry `start_line` (not
+        // `line_number`). This test would fail against the old code that read
+        // `data.as_array()` / `line_number`.
         let config = create_test_config();
-        let app = CliApp::new(config, false, true).await.unwrap();
+        let app = CliApp::new(config, false, false).await.unwrap();
 
-        let func = FunctionSignature::new("test_func".to_string(), "/test/file.rs".to_string())
-            .with_visibility(true)
-            .with_location(10, 20);
+        let tool_data = serde_json::json!({
+            "status": "success",
+            "pattern": "foo",
+            "results": [
+                {
+                    "name": "foo_bar",
+                    "file_path": "/src/foo.rs",
+                    "start_line": 42,
+                    "end_line": 50,
+                    "parameters": [{"name": "x"}, {"name": "y"}],
+                    "return_type": "bool"
+                }
+            ],
+            "count": 1
+        });
 
-        let results = app.convert_function_results(vec![&func]);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].content.contains("test_func"));
-        assert!(results[0].context.as_ref().unwrap().contains("10-20"));
+        let results = app.convert_tool_result_to_search_results(tool_data, "function");
+        assert_eq!(results.len(), 1, "should read items from the results array");
+        assert_eq!(results[0].file_path, "/src/foo.rs");
+        assert_eq!(
+            results[0].line,
+            Some(42),
+            "line should come from start_line"
+        );
+        assert!(results[0].content.contains("foo_bar"));
     }
 
     #[test]
-    async fn test_convert_struct_results() {
+    async fn test_analyze_directory_produces_output() {
+        // Regression test for the `analyze <directory>` path, which used to call
+        // a nonexistent `analyze_directory` tool. It now routes to
+        // `get_repository_tree`; verify the whole path succeeds and that the
+        // returned tree contains the scanned file with its symbols.
+        let temp_dir = TempDir::new().unwrap();
+        let rust_content = r#"
+pub fn dir_function() -> i32 {
+    7
+}
+
+pub struct DirStruct {
+    pub field: String,
+}
+"#;
+        create_test_rust_file(&temp_dir, "sample.rs", rust_content);
+
         let config = create_test_config();
-        let app = CliApp::new(config, false, true).await.unwrap();
+        let mut app = CliApp::new(config, false, false).await.unwrap();
 
-        let struct_def =
-            StructSignature::new("TestStruct".to_string(), "/test/file.rs".to_string())
-                .with_visibility(true)
-                .with_location(5, 15);
+        // Scan first so the repository tree is populated.
+        let scan_args = ScanArgs {
+            path: temp_dir.path().to_path_buf(),
+            include: vec![],
+            exclude: vec![],
+            follow_symlinks: false,
+            cache: false,
+        };
+        app.scan(scan_args).await.unwrap();
 
-        let results = app.convert_struct_results(vec![&struct_def]);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].content.contains("TestStruct"));
-        assert!(results[0].context.as_ref().unwrap().contains("5-15"));
-    }
+        // The analyze-directory branch should complete successfully.
+        let analyze_args = AnalyzeArgs {
+            file: temp_dir.path().to_path_buf(),
+            format: "text".to_string(),
+            functions: true,
+            structs: true,
+            imports: false,
+        };
+        assert!(app.analyze(analyze_args).await.is_ok());
 
-    #[test]
-    async fn test_convert_import_results() {
-        let config = create_test_config();
-        let app = CliApp::new(config, false, true).await.unwrap();
+        // Exercise the underlying tool call and assert non-empty output.
+        let tool_result = app
+            .loregrep
+            .execute_tool(
+                "get_repository_tree",
+                serde_json::json!({
+                    "include_file_details": true,
+                    "max_depth": 0
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(tool_result.success);
 
-        let import = ImportStatement::new(
-            "std::collections::HashMap".to_string(),
-            "/test/file.rs".to_string(),
-        )
-        .with_line_number(1);
+        let tree = tool_result
+            .data
+            .get("repository_tree")
+            .expect("repository_tree present");
+        let mut files = Vec::new();
+        CliApp::collect_tree_files(tree, &mut files);
+        assert!(
+            !files.is_empty(),
+            "directory analysis should surface at least one file"
+        );
 
-        let results = app.convert_import_results(vec![&import]);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].content.contains("std::collections::HashMap"));
-        assert_eq!(results[0].line, Some(1));
-    }
-
-    #[test]
-    async fn test_convert_export_results() {
-        let config = create_test_config();
-        let app = CliApp::new(config, false, true).await.unwrap();
-
-        let export = ExportStatement::new("MyFunction".to_string(), "/test/file.rs".to_string())
-            .with_line_number(10);
-
-        let results = app.convert_export_results(vec![&export]);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].content.contains("MyFunction"));
-        assert_eq!(results[0].line, Some(10));
+        // The scanned file should expose its function and struct.
+        let has_symbols = files.iter().any(|f| {
+            let skeleton = f.get("skeleton");
+            let funcs = skeleton
+                .and_then(|s| s.get("functions"))
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            let structs = skeleton
+                .and_then(|s| s.get("structs"))
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            funcs || structs
+        });
+        assert!(
+            has_symbols,
+            "scanned file should carry functions/structs in its skeleton"
+        );
     }
 
     #[test]
