@@ -5,19 +5,19 @@ use thiserror::Error;
 pub enum LoreGrepError {
     #[error("Repository not scanned")]
     NotScanned,
-    
+
     #[error("Analysis error: {0}")]
     AnalysisError(String),
-    
+
     #[error("Tool execution error: {0}")]
     ToolError(String),
-    
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    
+
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
-    
+
     #[error("Internal error: {0}")]
     InternalError(String),
 }
@@ -40,10 +40,10 @@ mod tests {
     fn test_error_display() {
         let error = LoreGrepError::NotScanned;
         assert_eq!(error.to_string(), "Repository not scanned");
-        
+
         let error = LoreGrepError::AnalysisError("test error".to_string());
         assert_eq!(error.to_string(), "Analysis error: test error");
-        
+
         let error = LoreGrepError::ToolError("invalid tool".to_string());
         assert_eq!(error.to_string(), "Tool execution error: invalid tool");
     }

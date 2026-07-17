@@ -160,4 +160,4 @@ criterion_group!(
     benchmark_typescript_parsing,
     benchmark_large_file_parsing
 );
-criterion_main!(benches); 
+criterion_main!(benches);

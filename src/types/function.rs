@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Parameter {
@@ -115,14 +115,15 @@ impl FunctionSignature {
         let const_keyword = if self.is_const { "const " } else { "" };
         let async_keyword = if self.is_async { "async " } else { "" };
         let extern_keyword = if self.is_extern { "extern " } else { "" };
-        
+
         let generics_str = if self.generics.is_empty() {
             String::new()
         } else {
             format!("<{}>", self.generics.join(", "))
         };
-        
-        let params = self.parameters
+
+        let params = self
+            .parameters
             .iter()
             .map(|p| {
                 let mutability = if p.is_mutable { "mut " } else { "" };
@@ -130,16 +131,23 @@ impl FunctionSignature {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        
-        let return_type = self.return_type
+
+        let return_type = self
+            .return_type
             .as_ref()
             .map(|t| format!(" -> {}", t))
             .unwrap_or_default();
-        
+
         format!(
             "{}{}{}{}fn {}{}({}){}",
-            visibility, extern_keyword, const_keyword, async_keyword, 
-            self.name, generics_str, params, return_type
+            visibility,
+            extern_keyword,
+            const_keyword,
+            async_keyword,
+            self.name,
+            generics_str,
+            params,
+            return_type
         )
     }
 }
@@ -176,4 +184,4 @@ impl FunctionCall {
         self.receiver_type = Some(receiver_type);
         self
     }
-} 
+}

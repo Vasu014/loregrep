@@ -1,5 +1,5 @@
 //! Demo of LoreGrep's enhanced builder methods and convenience APIs
-//! 
+//!
 //! This example shows the new enhanced builder methods introduced in Phase 3:
 //! Enhanced User Experience, providing convenient preset configurations.
 
@@ -14,21 +14,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n1. Performance-Optimized Configuration:");
     let _performance_build = LoreGrep::builder()
         .with_rust_analyzer()
-        .optimize_for_performance()        // New: 512KB file limit, depth 8
-        .exclude_common_build_dirs()       // Enhanced: More exclusions
-        .exclude_vendor_dirs()             // New: Exclude vendor directories
+        .optimize_for_performance() // New: 512KB file limit, depth 8
+        .exclude_common_build_dirs() // Enhanced: More exclusions
+        .exclude_vendor_dirs() // New: Exclude vendor directories
         .build()?;
     println!("✅ Performance-optimized build created");
     println!("   📁 Max file size: 512KB, Max depth: 8");
     println!("   🚫 Excludes: build dirs, vendor dirs, binary files");
 
-    // Demo 2: Comprehensive analysis configuration  
+    // Demo 2: Comprehensive analysis configuration
     println!("\n2. Comprehensive Analysis Configuration:");
     let _comprehensive_build = LoreGrep::builder()
-        .with_all_analyzers()              // Enhanced: All available analyzers
-        .comprehensive_analysis()          // New: 5MB limit, depth 20, more file types
-        .include_config_files()            // New: Include config files
-        .exclude_test_dirs()               // New: Exclude test directories
+        .with_all_analyzers() // Enhanced: All available analyzers
+        .comprehensive_analysis() // New: 5MB limit, depth 20, more file types
+        .include_config_files() // New: Include config files
+        .exclude_test_dirs() // New: Exclude test directories
         .build()?;
     println!("✅ Comprehensive analysis build created");
     println!("   📁 Max file size: 5MB, Max depth: 20");
@@ -52,28 +52,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demo 4: Project-specific presets vs enhanced builder
     println!("\n4. Project Presets vs Enhanced Builder:");
-    
+
     // Using preset (simple, one-line)
     let _rust_preset = LoreGrep::rust_project(".")?;
     println!("✅ Rust preset: LoreGrep::rust_project(\".\")");
-    
+
     // Using enhanced builder (more control)
     let _enhanced_rust = LoreGrep::builder()
         .with_rust_analyzer()
         .include_patterns(vec!["**/*.rs".to_string(), "**/*.toml".to_string()])
         .exclude_common_build_dirs()
-        .exclude_test_dirs()  // Additional: exclude tests
-        .optimize_for_performance()  // Additional: performance optimization
+        .exclude_test_dirs() // Additional: exclude tests
+        .optimize_for_performance() // Additional: performance optimization
         .build()?;
     println!("✅ Enhanced Rust build with additional optimizations");
 
     // Demo 5: Auto-discovery vs manual configuration comparison
     println!("\n5. Auto-Discovery vs Manual Configuration:");
-    
+
     // Auto-discovery (zero configuration)
     let _auto_discovered = LoreGrep::auto_discover(".")?;
     println!("✅ Auto-discovery: LoreGrep::auto_discover(\".\")");
-    
+
     // Manual enhanced configuration
     let _manual_enhanced = LoreGrep::builder()
         .with_all_analyzers()

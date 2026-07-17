@@ -42,4 +42,4 @@ pub enum AnalysisError {
     Other(String),
 }
 
-pub type Result<T> = std::result::Result<T, AnalysisError>; 
+pub type Result<T> = std::result::Result<T, AnalysisError>;

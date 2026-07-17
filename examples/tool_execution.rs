@@ -1,7 +1,7 @@
 // Tool execution example for LLM integration
 // This example demonstrates how to use LoreGrep's tool-based interface for LLM integration
 
-use loregrep::{LoreGrep, ToolSchema, Result as LoreGrepResult};
+use loregrep::{LoreGrep, Result as LoreGrepResult, ToolSchema};
 use serde_json::json;
 
 #[tokio::main]
@@ -21,15 +21,15 @@ async fn main() -> LoreGrepResult<()> {
         .build()?;
 
     println!("📋 Step 1: Get tool definitions for LLM");
-    
+
     // Get all available tools for LLM integration
     let tools = LoreGrep::get_tool_definitions();
     println!("   Available tools: {}", tools.len());
-    
+
     for tool in &tools {
         println!("   • {} - {}", tool.name, tool.description);
     }
-    
+
     // Display a sample tool definition in JSON format (as would be sent to LLM)
     if let Some(search_tool) = tools.iter().find(|t| t.name == "search_functions") {
         println!("\n📄 Sample tool definition (JSON for LLM):");
@@ -37,20 +37,27 @@ async fn main() -> LoreGrepResult<()> {
     }
 
     println!("\n📁 Step 2: Scan repository for analysis");
-    
+
     let scan_result = loregrep.scan(".").await?;
-    println!("   ✅ Scanned {} files, found {} functions", 
-        scan_result.files_scanned, scan_result.functions_found);
+    println!(
+        "   ✅ Scanned {} files, found {} functions",
+        scan_result.files_scanned, scan_result.functions_found
+    );
 
     println!("\n🔧 Step 3: Execute tools (simulating LLM tool calls)");
 
     // Tool 1: Search for functions containing "new"
     println!("\n   🔍 Tool: search_functions");
-    let search_result = loregrep.execute_tool("search_functions", json!({
-        "pattern": "new",
-        "limit": 3
-    })).await?;
-    
+    let search_result = loregrep
+        .execute_tool(
+            "search_functions",
+            json!({
+                "pattern": "new",
+                "limit": 3
+            }),
+        )
+        .await?;
+
     if search_result.success {
         println!("   ✅ Found functions:");
         if let Some(functions) = search_result.data.as_array() {
@@ -66,11 +73,16 @@ async fn main() -> LoreGrepResult<()> {
 
     // Tool 2: Search for structs
     println!("\n   🏗️  Tool: search_structs");
-    let struct_result = loregrep.execute_tool("search_structs", json!({
-        "pattern": "Config",
-        "limit": 3
-    })).await?;
-    
+    let struct_result = loregrep
+        .execute_tool(
+            "search_structs",
+            json!({
+                "pattern": "Config",
+                "limit": 3
+            }),
+        )
+        .await?;
+
     if struct_result.success {
         println!("   ✅ Found structs:");
         if let Some(structs) = struct_result.data.as_array() {
@@ -86,33 +98,54 @@ async fn main() -> LoreGrepResult<()> {
 
     // Tool 3: Analyze a specific file
     println!("\n   📄 Tool: analyze_file");
-    let analyze_result = loregrep.execute_tool("analyze_file", json!({
-        "file_path": "src/main.rs",
-        "include_source": false
-    })).await?;
-    
+    let analyze_result = loregrep
+        .execute_tool(
+            "analyze_file",
+            json!({
+                "file_path": "src/main.rs",
+                "include_source": false
+            }),
+        )
+        .await?;
+
     if analyze_result.success {
         println!("   ✅ File analysis completed:");
         if let Some(language) = analyze_result.data.get("language") {
             println!("      • Language: {}", language);
         }
-        if let Some(functions) = analyze_result.data.get("functions").and_then(|v| v.as_array()) {
+        if let Some(functions) = analyze_result
+            .data
+            .get("functions")
+            .and_then(|v| v.as_array())
+        {
             println!("      • Functions: {}", functions.len());
         }
-        if let Some(structs) = analyze_result.data.get("structs").and_then(|v| v.as_array()) {
+        if let Some(structs) = analyze_result
+            .data
+            .get("structs")
+            .and_then(|v| v.as_array())
+        {
             println!("      • Structs: {}", structs.len());
         }
     } else {
-        println!("   ⚠️  File analysis failed (file may not exist): {:?}", analyze_result.error);
+        println!(
+            "   ⚠️  File analysis failed (file may not exist): {:?}",
+            analyze_result.error
+        );
     }
 
     // Tool 4: Get repository tree structure
     println!("\n   🌳 Tool: get_repository_tree");
-    let tree_result = loregrep.execute_tool("get_repository_tree", json!({
-        "include_file_details": false,
-        "max_depth": 2
-    })).await?;
-    
+    let tree_result = loregrep
+        .execute_tool(
+            "get_repository_tree",
+            json!({
+                "include_file_details": false,
+                "max_depth": 2
+            }),
+        )
+        .await?;
+
     if tree_result.success {
         println!("   ✅ Repository tree generated");
         // The tree data would be used by the LLM to understand project structure
@@ -122,11 +155,16 @@ async fn main() -> LoreGrepResult<()> {
 
     // Tool 5: Find function callers
     println!("\n   📞 Tool: find_callers");
-    let callers_result = loregrep.execute_tool("find_callers", json!({
-        "function_name": "main",
-        "limit": 5
-    })).await?;
-    
+    let callers_result = loregrep
+        .execute_tool(
+            "find_callers",
+            json!({
+                "function_name": "main",
+                "limit": 5
+            }),
+        )
+        .await?;
+
     if callers_result.success {
         println!("   ✅ Caller analysis completed");
     } else {
@@ -135,14 +173,22 @@ async fn main() -> LoreGrepResult<()> {
 
     // Tool 6: Get dependencies
     println!("\n   🔗 Tool: get_dependencies");
-    let deps_result = loregrep.execute_tool("get_dependencies", json!({
-        "file_path": "src/lib.rs"
-    })).await?;
-    
+    let deps_result = loregrep
+        .execute_tool(
+            "get_dependencies",
+            json!({
+                "file_path": "src/lib.rs"
+            }),
+        )
+        .await?;
+
     if deps_result.success {
         println!("   ✅ Dependency analysis completed");
     } else {
-        println!("   ⚠️  Dependency analysis failed (file may not exist): {:?}", deps_result.error);
+        println!(
+            "   ⚠️  Dependency analysis failed (file may not exist): {:?}",
+            deps_result.error
+        );
     }
 
     println!("\n🎯 Integration Summary:");

@@ -3,4 +3,4 @@
 
 fn main() {
     println!("Loregrep MCP Server - Coming soon!");
-} 
+}

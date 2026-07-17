@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StructField {
@@ -88,7 +88,8 @@ impl StructSignature {
         };
 
         if self.is_tuple_struct {
-            let fields = self.fields
+            let fields = self
+                .fields
                 .iter()
                 .map(|f| {
                     let vis = if f.is_public { "pub " } else { "" };
@@ -96,14 +97,21 @@ impl StructSignature {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}struct {}{}({})", visibility, self.name, generics_str, fields)
+            format!(
+                "{}struct {}{}({})",
+                visibility, self.name, generics_str, fields
+            )
         } else {
-            let fields = self.fields
+            let fields = self
+                .fields
                 .iter()
                 .map(|f| f.format())
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}struct {}{} {{ {} }}", visibility, self.name, generics_str, fields)
+            format!(
+                "{}struct {}{} {{ {} }}",
+                visibility, self.name, generics_str, fields
+            )
         }
     }
 }
@@ -192,4 +200,4 @@ impl ExportStatement {
         self.line_number = line_number;
         self
     }
-} 
+}
