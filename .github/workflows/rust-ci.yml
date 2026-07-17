@@ -45,3 +45,24 @@ jobs:
       - name: Clippy (informational)
         continue-on-error: true
         run: cargo clippy --all-targets
+
+  # Runtime-verify the PyO3 bindings. `cargo test` can't link the extension module,
+  # so this is the only gate that actually exercises the Python API. Pinned to a
+  # Python version PyO3 supports (not bleeding-edge 3.14).
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build extension module and run Python tests
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin pytest
+          maturin develop --features python
+          pytest python/tests -v
