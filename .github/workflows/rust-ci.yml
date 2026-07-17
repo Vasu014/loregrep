@@ -63,6 +63,6 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install maturin pytest
+          pip install maturin pytest pytest-asyncio
           maturin develop --features python
           pytest python/tests -v
