@@ -53,7 +53,7 @@ impl CliApp {
 
         // Create LoreGrep instance using public API
         let mut builder = LoreGrep::builder()
-            .with_rust_analyzer()
+            .with_all_analyzers() // Rust, Python, TypeScript/TSX
             .max_files(10000) // Default max files
             .cache_ttl(config.cache.ttl_hours * 3600) // Convert hours to seconds
             .include_patterns(config.file_scanning.include_patterns.clone())

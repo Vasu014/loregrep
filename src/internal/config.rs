@@ -69,6 +69,7 @@ impl Default for CliConfig {
                     "dist/*".to_string(),
                     "build/*".to_string(),
                     ".git/*".to_string(),
+                    "*.d.ts".to_string(),
                     "*.test.js".to_string(),
                     "*.spec.js".to_string(),
                     "*.test.ts".to_string(),
