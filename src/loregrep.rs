@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::analyzers::{
     python::PythonAnalyzer,
-    registry::{DefaultLanguageRegistry, LanguageAnalyzerRegistry},
+    registry::{DefaultLanguageRegistry, LanguageAnalyzerRegistry, RegistryHandle},
     rust::RustAnalyzer,
     traits::LanguageAnalyzer,
 };
@@ -298,65 +298,30 @@ impl LoreGrep {
                 Err(_) => continue, // Skip files we can't read
             };
 
-            // Analyze file with appropriate analyzer based on language
-            let analysis_result = if self
-                .language_registry
-                .list_supported_languages()
-                .contains(&file_info.language)
-            {
-                // Create analyzer instance based on language (temporary approach)
-                match file_info.language.as_str() {
-                    "rust" => {
-                        let temp_analyzer = RustAnalyzer::new().map_err(|e| {
-                            LoreGrepError::InternalError(format!(
-                                "Rust analyzer creation failed: {}",
-                                e
-                            ))
-                        })?;
-                        temp_analyzer
-                            .analyze_file(&content, &file_info.path.to_string_lossy())
-                            .await
+            // Dispatch to the analyzer registered for this file's language.
+            // Analyzers are shared `Arc`s owned by the registry, so this reuses a
+            // single instance per language instead of constructing one per file.
+            let path_str = file_info.path.to_string_lossy().to_string();
+            let analysis_result = match self.language_registry.get_analyzer_for_path(&path_str) {
+                Some(analyzer) => analyzer.analyze_file(&content, &path_str).await,
+                None => {
+                    // No analyzer registered for this file's language. Files with
+                    // unrecognized languages are skipped by discovery already; this
+                    // guards against any that slip through.
+                    let supported_langs = self.language_registry.list_supported_languages();
+                    if supported_langs.is_empty() {
+                        eprintln!(
+                            "No language analyzers registered! Use LoreGrep::builder().with_rust_analyzer() or .with_python_analyzer()"
+                        );
+                    } else {
+                        eprintln!(
+                            "No analyzer available for '{}' files. Supported: {}",
+                            file_info.language,
+                            supported_langs.join(", ")
+                        );
                     }
-                    "python" => {
-                        let temp_analyzer = PythonAnalyzer::new().map_err(|e| {
-                            LoreGrepError::InternalError(format!(
-                                "Python analyzer creation failed: {}",
-                                e
-                            ))
-                        })?;
-                        temp_analyzer
-                            .analyze_file(&content, &file_info.path.to_string_lossy())
-                            .await
-                    }
-                    _ => {
-                        eprintln!("Analyzer for '{}' not yet implemented", file_info.language);
-                        continue;
-                    }
+                    continue;
                 }
-            } else {
-                // Provide helpful error message for unsupported languages
-                let supported_langs = self.language_registry.list_supported_languages();
-                if supported_langs.is_empty() {
-                    eprintln!(
-                        "No language analyzers registered! Use LoreGrep::builder().with_rust_analyzer() or .with_python_analyzer()"
-                    );
-                } else {
-                    eprintln!(
-                        "No analyzer available for '{}' files. Supported: {}",
-                        file_info.language,
-                        supported_langs.join(", ")
-                    );
-                    // Suggest appropriate analyzer method
-                    let suggestion = match file_info.language.as_str() {
-                        "rust" => "with_rust_analyzer()",
-                        "python" => "with_python_analyzer()",
-                        "typescript" | "javascript" => "with_typescript_analyzer() (coming soon)",
-                        "go" => "with_go_analyzer() (coming soon)",
-                        _ => "a custom analyzer for this language",
-                    };
-                    eprintln!("Add support with: LoreGrep::builder().{}", suggestion);
-                }
-                continue;
             };
 
             match analysis_result {
@@ -415,10 +380,13 @@ impl LoreGrep {
     /// Get tool definitions for adding to LLM system prompts
     /// Returns JSON Schema compatible tool definitions
     pub fn get_tool_definitions() -> Vec<ToolSchema> {
-        // Create a temporary instance to get schemas
+        // Create a temporary instance to get schemas. Tool schemas are static and
+        // do not depend on any registered analyzer, so an empty registry handle
+        // suffices.
         let temp_repo_map = Arc::new(Mutex::new(RepoMap::new()));
-        let temp_analyzer = RustAnalyzer::new().unwrap(); // Safe to unwrap for temp instance
-        let temp_tools = LocalAnalysisTools::new(temp_repo_map, temp_analyzer);
+        let temp_registry = DefaultLanguageRegistry::new();
+        let temp_tools =
+            LocalAnalysisTools::new(temp_repo_map, RegistryHandle::new(&temp_registry));
         temp_tools.get_tool_schemas()
     }
 
@@ -793,14 +761,20 @@ impl LoreGrepBuilder {
             max_depth: self.config.max_depth,
             respect_gitignore: self.config.respect_gitignore,
         };
-        let scanner = RepositoryScanner::new(&default_config, None)
-            .map_err(|e| LoreGrepError::InternalError(format!("Scanner creation failed: {}", e)))?;
-        let analyzer = RustAnalyzer::new().map_err(|e| {
-            LoreGrepError::InternalError(format!("Analyzer creation failed: {}", e))
-        })?;
+        // A shared handle into the analyzer registry. Both the scanner (for
+        // language labeling) and the analysis tools (for dispatch) resolve
+        // languages through this single source of truth, so adding a language
+        // only requires registering its analyzer.
+        let registry_handle = RegistryHandle::new(&self.registry);
 
-        // Create tools with reference to repo_map
-        let tools = LocalAnalysisTools::new(repo_map.clone(), analyzer);
+        let scanner =
+            RepositoryScanner::new_with_registry(&default_config, registry_handle.clone(), None)
+                .map_err(|e| {
+                    LoreGrepError::InternalError(format!("Scanner creation failed: {}", e))
+                })?;
+
+        // Create tools with reference to repo_map and the registry handle.
+        let tools = LocalAnalysisTools::new(repo_map.clone(), registry_handle);
 
         let loregrep = LoreGrep {
             repo_map,

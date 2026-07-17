@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{info, warn};
 
+use crate::analyzers::registry::RegistryHandle;
 use crate::internal::config::FileScanningConfig;
 
 #[derive(Clone)]
@@ -54,6 +55,11 @@ pub struct RepositoryScanner {
     language_detector: LanguageDetector,
     config: ScanConfig,
     scanning_config: FileScanningConfig,
+    /// Optional handle into the analyzer registry. When present, language
+    /// labeling is driven by the registered analyzers' extensions (so adding a
+    /// language needs no change here). When absent, the built-in
+    /// `LanguageDetector` fallback is used.
+    registry: Option<RegistryHandle>,
 }
 
 impl FileFilters {
@@ -170,7 +176,33 @@ impl RepositoryScanner {
             language_detector,
             config,
             scanning_config: scanning_config.clone(),
+            registry: None,
         })
+    }
+
+    /// Construct a scanner whose language labeling is driven by the analyzer
+    /// registry. Extensions of registered analyzers determine the language of
+    /// each discovered file, so no per-language edits are needed in this module
+    /// when a new analyzer is added.
+    pub fn new_with_registry(
+        scanning_config: &FileScanningConfig,
+        registry: RegistryHandle,
+        scan_config: Option<ScanConfig>,
+    ) -> Result<Self> {
+        let mut scanner = Self::new(scanning_config, scan_config)?;
+        scanner.registry = Some(registry);
+        Ok(scanner)
+    }
+
+    /// Determine the language label for a path, preferring the registry (when
+    /// present) and falling back to the built-in extension detector.
+    fn resolve_language(&self, path: &Path) -> String {
+        if let Some(registry) = &self.registry {
+            return registry
+                .detect_language(&path.to_string_lossy())
+                .unwrap_or_else(|| "unknown".to_string());
+        }
+        self.language_detector.detect_language(path)
     }
 
     pub fn scan<P: AsRef<Path>>(&self, root_path: P) -> Result<ScanResult> {
@@ -219,8 +251,8 @@ impl RepositoryScanner {
                         continue;
                     }
 
-                    // Detect language
-                    let language = self.language_detector.detect_language(path);
+                    // Detect language (via the registry when available)
+                    let language = self.resolve_language(path);
 
                     // Skip unknown languages for now
                     if language == "unknown" {
@@ -306,7 +338,7 @@ impl RepositoryScanner {
 
                     if let Ok(metadata) = entry.metadata() {
                         if self.filters.should_include(path, metadata.len()) {
-                            let language = self.language_detector.detect_language(path);
+                            let language = self.resolve_language(path);
                             if language != "unknown" {
                                 count += 1;
                                 *languages.entry(language).or_insert(0) += 1;
@@ -331,7 +363,7 @@ impl RepositoryScanner {
 
     /// Get language for a specific file
     pub fn detect_file_language(&self, path: &Path) -> String {
-        self.language_detector.detect_language(path)
+        self.resolve_language(path)
     }
 }
 
