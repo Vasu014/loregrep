@@ -67,17 +67,3 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub imports: bool,
 }
-
-#[derive(Args)]
-pub struct QueryArgs {
-    /// Natural language query
-    pub query: Option<String>,
-
-    /// Directory to analyze
-    #[arg(short, long, default_value = ".")]
-    pub path: PathBuf,
-
-    /// Enter interactive mode
-    #[arg(short, long)]
-    pub interactive: bool,
-} 

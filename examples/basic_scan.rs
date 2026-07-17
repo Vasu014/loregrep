@@ -10,15 +10,15 @@ async fn main() -> LoreGrepResult<()> {
 
     // Create a LoreGrep instance with minimal configuration
     let mut loregrep = LoreGrep::builder()
-        .with_rust_analyzer()                 // Enable Rust language support
-        .max_files(500)                       // Limit to 500 files for quick scanning
+        .with_rust_analyzer() // Enable Rust language support
+        .max_files(500) // Limit to 500 files for quick scanning
         .build()?;
 
     println!("📁 Scanning current directory...");
-    
+
     // Scan the current directory
     let scan_result = loregrep.scan(".").await?;
-    
+
     // Display scan results
     println!("✅ Scan completed successfully!\n");
     println!("📊 Scan Statistics:");
@@ -26,7 +26,7 @@ async fn main() -> LoreGrepResult<()> {
     println!("   • Functions found: {}", scan_result.functions_found);
     println!("   • Structs found: {}", scan_result.structs_found);
     println!("   • Scan duration: {}ms", scan_result.duration_ms);
-    
+
     if !scan_result.languages.is_empty() {
         println!("   • Languages detected: {:?}", scan_result.languages);
     }
@@ -34,7 +34,7 @@ async fn main() -> LoreGrepResult<()> {
     // Check if repository was successfully indexed
     if loregrep.is_scanned() {
         println!("\n🎉 Repository is now indexed and ready for analysis!");
-        
+
         // Get updated statistics
         let stats = loregrep.get_stats()?;
         println!("📋 Current index contains:");

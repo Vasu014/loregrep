@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use tokio;
 
 // Use the CLI wrapper for clean access to CLI functionality
-use loregrep::cli_main::{CliConfig, CliApp, AnalyzeArgs, QueryArgs, ScanArgs, SearchArgs};
+use loregrep::cli_main::{AnalyzeArgs, CliApp, CliConfig, ScanArgs, SearchArgs};
 
 #[derive(Parser)]
 #[command(name = "loregrep")]
 #[command(about = "Lightweight Code Analysis Tool with AI-powered search")]
-#[command(long_about = "Loregrep analyzes codebases using tree-sitter parsing and provides AI-powered natural language search capabilities")]
+#[command(
+    long_about = "Loregrep analyzes codebases using tree-sitter parsing and provides AI-powered natural language search capabilities"
+)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -45,8 +47,6 @@ pub enum Commands {
     Analyze(AnalyzeArgs),
     /// Show current configuration
     Config,
-    /// Interactive natural language query mode
-    Query(QueryArgs),
 }
 
 #[tokio::main]
@@ -70,14 +70,14 @@ async fn main() -> Result<()> {
                 args.path = cli.directory;
             }
             app.scan(args).await
-        },
+        }
         Commands::Search(mut args) => {
             // Override path with global directory if not explicitly set
             if args.path == PathBuf::from(".") {
                 args.path = cli.directory;
             }
             app.search(args).await
-        },
+        }
         Commands::Analyze(mut args) => {
             // If analyzing current directory, use global directory
             if args.file == PathBuf::from(".") {
@@ -87,14 +87,7 @@ async fn main() -> Result<()> {
                 args.file = cli.directory.join(args.file);
             }
             app.analyze(args).await
-        },
+        }
         Commands::Config => app.show_config().await,
-        Commands::Query(mut args) => {
-            // Override path with global directory if not explicitly set
-            if args.path == PathBuf::from(".") {
-                args.path = cli.directory;
-            }
-            app.query(args).await
-        },
     }
-} 
+}

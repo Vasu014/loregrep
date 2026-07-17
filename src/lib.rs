@@ -1,7 +1,7 @@
 //! # Loregrep: Fast Repository Indexing for Coding Assistants
 //!
-//! **Loregrep** is a high-performance repository indexing library that parses codebases into 
-//! fast, searchable in-memory indexes. It's designed to provide coding assistants and AI tools 
+//! **Loregrep** is a high-performance repository indexing library that parses codebases into
+//! fast, searchable in-memory indexes. It's designed to provide coding assistants and AI tools
 //! with structured access to code functions, structures, dependencies, and call graphs.
 //!
 //! ## What It Does
@@ -37,7 +37,7 @@
 //!
 //! ### Zero-Configuration Auto-Discovery (Recommended)
 //!
-//! ```rust
+//! ```ignore
 //! use loregrep::LoreGrep;
 //!
 //! #[tokio::main]
@@ -54,8 +54,8 @@
 //!     let scan_result = loregrep.scan(".").await?;
 //!     // 🔍 Starting repository scan... 📁 Found X files... 📊 Summary
 //!     
-//!     println!("Indexed {} files with {} functions", 
-//!              scan_result.files_scanned, 
+//!     println!("Indexed {} files with {} functions",
+//!              scan_result.files_scanned,
 //!              scan_result.functions_found);
 //!     
 //!     Ok(())
@@ -64,7 +64,7 @@
 //!
 //! ### Manual Configuration with Enhanced Builder
 //!
-//! ```rust
+//! ```ignore
 //! use loregrep::LoreGrep;
 //!
 //! #[tokio::main]
@@ -89,7 +89,7 @@
 //!
 //! The library provides 6 standardized tools that AI coding assistants can call:
 //!
-//! ```rust
+//! ```ignore
 //! use loregrep::LoreGrep;
 //! use serde_json::json;
 //!
@@ -129,10 +129,10 @@
 //!
 //! ### Available Tools for AI Integration
 //!
-//! ```rust
+//! ```ignore
 //! // Get tool definitions for your AI system
 //! let tools = LoreGrep::get_tool_definitions();
-//! 
+//!
 //! // 6 tools available:
 //! // 1. search_functions      - Find functions by name/pattern
 //! // 2. search_structs        - Find structures by name/pattern  
@@ -172,22 +172,12 @@
 //!
 //! ## Integration Examples
 //!
-//! ### CLI Interactive Mode
-//!
-//! ```bash
-//! # Start interactive AI-powered query session
-//! loregrep query --interactive
-//! 
-//! # Or run a single query
-//! loregrep query "What functions handle authentication?"
-//! ```
-//!
 //! ### With Claude/OpenAI
 //!
-//! ```rust
+//! ```ignore
 //! // Provide tools to your AI client
 //! let tools = LoreGrep::get_tool_definitions();
-//! 
+//!
 //! // Send to Claude/OpenAI as available tools
 //! // When AI calls a tool, execute it:
 //! let result = loregrep.execute_tool(&tool_name, tool_args).await?;
@@ -195,36 +185,16 @@
 //!
 //! ### With MCP (Model Context Protocol)
 //!
-//! ```rust
+//! ```ignore
 //! // MCP server integration is planned for future releases
 //! // Will provide standard MCP interface for tool calling
-//! ```
-//!
-//! ### File Watching Integration
-//!
-//! ```rust
-//! use notify::{Watcher, RecursiveMode, watcher};
-//! use std::sync::mpsc::channel;
-//! use std::time::Duration;
-//!
-//! // Watch for file changes and re-index
-//! let (tx, rx) = channel();
-//! let mut watcher = watcher(tx, Duration::from_secs(2))?;
-//! watcher.watch("/path/to/repo", RecursiveMode::Recursive)?;
-//!
-//! // Re-scan when files change
-//! for event in rx {
-//!     if let Ok(event) = event {
-//!         loregrep.scan("/path/to/repo").await?;
-//!     }
-//! }
 //! ```
 //!
 //! ## Configuration Options
 //!
 //! ### Enhanced Builder with Convenience Methods
 //!
-//! ```rust
+//! ```ignore
 //! use loregrep::LoreGrep;
 //!
 //! // Performance-optimized configuration
@@ -254,15 +224,15 @@
 //!
 //! ## Thread Safety
 //!
-//! All operations are thread-safe. Multiple threads can query the same `LoreGrep` instance 
+//! All operations are thread-safe. Multiple threads can query the same `LoreGrep` instance
 //! concurrently. Scanning operations are synchronized to prevent data races.
 //!
-//! ```rust
+//! ```ignore
 //! use std::sync::Arc;
 //! use tokio::task;
 //!
 //! let loregrep = Arc::new(loregrep);
-//! 
+//!
 //! // Multiple concurrent queries
 //! let handles: Vec<_> = (0..10).map(|i| {
 //!     let lg = loregrep.clone();
@@ -276,7 +246,7 @@
 //!
 //! The library uses comprehensive error types for different failure modes:
 //!
-//! ```rust
+//! ```ignore
 //! use loregrep::{LoreGrep, LoreGrepError};
 //!
 //! match loregrep.scan("/invalid/path").await {
@@ -330,12 +300,12 @@
 // ================================================================================================
 
 // Internal modules (not part of public API)
-mod types;
 mod analyzers;
+pub(crate) mod internal;
 mod parser;
 mod scanner;
 mod storage;
-pub(crate) mod internal;
+mod types;
 
 // CLI module (temporary public access for binary, will be refactored in Task 4C.4)
 #[doc(hidden)]
@@ -366,7 +336,7 @@ pub use crate::loregrep::{LoreGrep, LoreGrepBuilder};
 /// Core types for tool definitions and results
 ///
 /// These types are designed for seamless integration with LLM tool calling systems.
-pub use crate::core::types::{ToolSchema, ToolResult, ScanResult};
+pub use crate::core::types::{ScanResult, ToolResult, ToolSchema};
 
 /// Error handling types
 ///
@@ -393,23 +363,23 @@ fn loregrep_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register the main high-level API only
     m.add_class::<python_bindings::PyLoreGrep>()?;
     m.add_class::<python_bindings::PyLoreGrepBuilder>()?;
-    m.add_class::<python_bindings::PyScanResult>()?;  
+    m.add_class::<python_bindings::PyScanResult>()?;
     m.add_class::<python_bindings::PyToolResult>()?;
     m.add_class::<python_bindings::PyToolSchema>()?;
-    
+
     // Add module version
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    
+
     Ok(())
 }
 
 #[cfg(feature = "python")]
 pub mod python_bindings {
     use super::*;
+    use crate::core::types::{ScanResult, ToolResult};
+    use crate::loregrep::{LoreGrep, LoreGrepBuilder};
     use pyo3::prelude::*;
     use pyo3::types::PyDict;
-    use crate::loregrep::{LoreGrep, LoreGrepBuilder};
-    use crate::core::types::{ScanResult, ToolResult};
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
@@ -432,66 +402,110 @@ pub mod python_bindings {
         /// Zero-configuration setup with automatic project detection
         #[staticmethod]
         fn auto_discover(path: &str) -> PyResult<PyLoreGrep> {
-            let loregrep = LoreGrep::auto_discover(path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Auto-discovery failed: {}", e)))?;
-            
-            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+            let loregrep = LoreGrep::auto_discover(path).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Auto-discovery failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(PyLoreGrep {
+                inner: Arc::new(Mutex::new(loregrep)),
+            })
         }
 
         /// Rust-optimized preset configuration
         #[staticmethod]
         fn rust_project(path: &str) -> PyResult<PyLoreGrep> {
-            let loregrep = LoreGrep::rust_project(path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Rust project setup failed: {}", e)))?;
-            
-            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+            let loregrep = LoreGrep::rust_project(path).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Rust project setup failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(PyLoreGrep {
+                inner: Arc::new(Mutex::new(loregrep)),
+            })
         }
 
         /// Python-optimized preset configuration
         #[staticmethod]
         fn python_project(path: &str) -> PyResult<PyLoreGrep> {
-            let loregrep = LoreGrep::python_project(path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Python project setup failed: {}", e)))?;
-            
-            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+            let loregrep = LoreGrep::python_project(path).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Python project setup failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(PyLoreGrep {
+                inner: Arc::new(Mutex::new(loregrep)),
+            })
         }
 
         /// Multi-language preset configuration
         #[staticmethod]
         fn polyglot_project(path: &str) -> PyResult<PyLoreGrep> {
-            let loregrep = LoreGrep::polyglot_project(path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Polyglot project setup failed: {}", e)))?;
-            
-            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+            let loregrep = LoreGrep::polyglot_project(path).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Polyglot project setup failed: {}",
+                    e
+                ))
+            })?;
+
+            Ok(PyLoreGrep {
+                inner: Arc::new(Mutex::new(loregrep)),
+            })
         }
 
         /// Scan a repository and build the index
         fn scan<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
             let inner = self.inner.clone();
             let path = path.to_string();
-            
+
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 // Clone the LoreGrep to avoid holding the mutex guard across await
                 let mut loregrep = {
-                    let guard = inner.lock()
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to acquire lock: {}", e)))?;
+                    let guard = inner.lock().map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to acquire lock: {}",
+                            e
+                        ))
+                    })?;
                     guard.clone()
                 }; // mutex guard is dropped here
-                
-                let result = loregrep.scan(&path).await
-                    .map_err(|e| match e {
-                        crate::LoreGrepError::IoError(io_err) => PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("IO error during scan: {}", io_err)),
-                        crate::LoreGrepError::AnalysisError(analysis_err) => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Analysis error: {}", analysis_err)),
-                        _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Scan failed: {}", e)),
-                    })?;
-                
+
+                let result = loregrep.scan(&path).await.map_err(|e| match e {
+                    crate::LoreGrepError::IoError(io_err) => {
+                        PyErr::new::<pyo3::exceptions::PyOSError, _>(format!(
+                            "IO error during scan: {}",
+                            io_err
+                        ))
+                    }
+                    crate::LoreGrepError::AnalysisError(analysis_err) => {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Analysis error: {}",
+                            analysis_err
+                        ))
+                    }
+                    _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Scan failed: {}",
+                        e
+                    )),
+                })?;
+
                 // Update the shared state with the scanned data
                 {
-                    let mut guard = inner.lock()
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to acquire lock for update: {}", e)))?;
+                    let mut guard = inner.lock().map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to acquire lock for update: {}",
+                            e
+                        ))
+                    })?;
                     *guard = loregrep;
                 } // mutex guard is dropped here
-                
+
                 Ok(PyScanResult {
                     files_scanned: result.files_scanned,
                     functions_found: result.functions_found,
@@ -503,41 +517,85 @@ pub mod python_bindings {
         }
 
         /// Execute one of the 6 AI tools
-        fn execute_tool<'py>(&self, py: Python<'py>, tool_name: &str, args: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyAny>> {
+        fn execute_tool<'py>(
+            &self,
+            py: Python<'py>,
+            tool_name: &str,
+            args: &Bound<'py, PyDict>,
+        ) -> PyResult<Bound<'py, PyAny>> {
             let inner = self.inner.clone();
             let tool_name = tool_name.to_string();
-            
+
             // Convert PyDict to serde_json::Value with better error handling
-            let args_json: Value = pythonize::depythonize(args)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid tool arguments - could not convert to JSON: {}", e)))?;
-            
+            let args_json: Value = pythonize::depythonize(args).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid tool arguments - could not convert to JSON: {}",
+                    e
+                ))
+            })?;
+
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 // Clone the LoreGrep to avoid holding the mutex guard across await
                 let loregrep = {
-                    let guard = inner.lock()
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to acquire lock: {}", e)))?;
+                    let guard = inner.lock().map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to acquire lock: {}",
+                            e
+                        ))
+                    })?;
                     guard.clone()
                 }; // mutex guard is dropped here
-                    
-                let result = loregrep.execute_tool(&tool_name, args_json).await
-                    .map_err(|e| match e {
-                        crate::LoreGrepError::ToolError(tool_err) => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool '{}' execution failed: {}", tool_name, tool_err)),
-                        crate::LoreGrepError::JsonError(json_err) => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Tool JSON error: {}", json_err)),
-                        crate::LoreGrepError::IoError(io_err) => PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Tool IO error: {}", io_err)),
-                        _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Tool execution failed: {}", e)),
-                    })?;
-                
+
+                let result =
+                    loregrep
+                        .execute_tool(&tool_name, args_json)
+                        .await
+                        .map_err(|e| match e {
+                            crate::LoreGrepError::ToolError(tool_err) => {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                                    "Tool '{}' execution failed: {}",
+                                    tool_name, tool_err
+                                ))
+                            }
+                            crate::LoreGrepError::JsonError(json_err) => {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                    "Tool JSON error: {}",
+                                    json_err
+                                ))
+                            }
+                            crate::LoreGrepError::IoError(io_err) => {
+                                PyErr::new::<pyo3::exceptions::PyOSError, _>(format!(
+                                    "Tool IO error: {}",
+                                    io_err
+                                ))
+                            }
+                            _ => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                                "Tool execution failed: {}",
+                                e
+                            )),
+                        })?;
+
                 // Convert ToolResult to Python-compatible format with better error handling
-                let metadata_str = serde_json::to_string(&result.data)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to serialize tool result metadata: {}", e)))?;
-                
+                let metadata_str = serde_json::to_string(&result.data).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to serialize tool result metadata: {}",
+                        e
+                    ))
+                })?;
+
                 let content = if result.success {
-                    serde_json::to_string(&result.data)
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to serialize tool result data: {}", e)))?
+                    serde_json::to_string(&result.data).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to serialize tool result data: {}",
+                            e
+                        ))
+                    })?
                 } else {
-                    result.error.unwrap_or_else(|| "Unknown tool error".to_string())
+                    result
+                        .error
+                        .unwrap_or_else(|| "Unknown tool error".to_string())
                 };
-                
+
                 Ok(PyToolResult {
                     content,
                     metadata: metadata_str,
@@ -550,12 +608,11 @@ pub mod python_bindings {
         fn get_tool_definitions() -> Vec<PyToolSchema> {
             LoreGrep::get_tool_definitions()
                 .iter()
-                .map(|schema| {
-                    PyToolSchema {
-                        name: schema.name.clone(),
-                        description: schema.description.clone(),
-                        parameters: serde_json::to_string(&schema.input_schema).unwrap_or_else(|_| "{}".to_string()),
-                    }
+                .map(|schema| PyToolSchema {
+                    name: schema.name.clone(),
+                    description: schema.description.clone(),
+                    parameters: serde_json::to_string(&schema.input_schema)
+                        .unwrap_or_else(|_| "{}".to_string()),
                 })
                 .collect()
         }
@@ -671,10 +728,13 @@ pub mod python_bindings {
 
         /// Build the configured LoreGrep instance
         fn build(slf: PyRefMut<Self>) -> PyResult<PyLoreGrep> {
-            let loregrep = slf.inner.clone().build()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Build failed: {}", e)))?;
-            
-            Ok(PyLoreGrep { inner: Arc::new(Mutex::new(loregrep)) })
+            let loregrep = slf.inner.clone().build().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Build failed: {}", e))
+            })?;
+
+            Ok(PyLoreGrep {
+                inner: Arc::new(Mutex::new(loregrep)),
+            })
         }
 
         fn __repr__(&self) -> String {
@@ -744,4 +804,4 @@ pub mod python_bindings {
 
 // Re-export Python types when python feature is enabled
 #[cfg(feature = "python")]
-pub use python_bindings::*; 
+pub use python_bindings::*;

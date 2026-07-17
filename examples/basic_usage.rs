@@ -8,8 +8,8 @@ use serde_json::json;
 async fn main() -> LoreGrepResult<()> {
     // Create a new LoreGrep instance with default configuration
     let mut loregrep = LoreGrep::builder()
-        .with_rust_analyzer()                          // Enable Rust analysis
-        .max_files(1000)                              // Limit files to scan
+        .with_rust_analyzer() // Enable Rust analysis
+        .max_files(1000) // Limit files to scan
         .include_patterns(vec!["**/*.rs".to_string()]) // Only Rust files
         .exclude_patterns(vec!["**/target/**".to_string()]) // Skip build artifacts
         .build()?;
@@ -37,17 +37,23 @@ async fn main() -> LoreGrepResult<()> {
 
     // Example 3: Search for functions
     println!("🔎 Searching for functions containing 'new'...");
-    let search_result = loregrep.execute_tool("search_functions", json!({
-        "pattern": "new",
-        "limit": 5
-    })).await?;
+    let search_result = loregrep
+        .execute_tool(
+            "search_functions",
+            json!({
+                "pattern": "new",
+                "limit": 5
+            }),
+        )
+        .await?;
 
     if search_result.success {
         if let Some(functions) = search_result.data.as_array() {
             println!("   Found {} functions:", functions.len());
             for func in functions.iter().take(3) {
                 if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                    let file = func.get("file_path")
+                    let file = func
+                        .get("file_path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     println!("   • {} (in {})", name, file);
@@ -61,20 +67,33 @@ async fn main() -> LoreGrepResult<()> {
 
     // Example 4: Analyze a specific file
     println!("📄 Analyzing main.rs...");
-    let analyze_result = loregrep.execute_tool("analyze_file", json!({
-        "file_path": "src/main.rs",
-        "include_source": false
-    })).await?;
+    let analyze_result = loregrep
+        .execute_tool(
+            "analyze_file",
+            json!({
+                "file_path": "src/main.rs",
+                "include_source": false
+            }),
+        )
+        .await?;
 
     if analyze_result.success {
         println!("   ✅ Analysis successful");
         if let Some(language) = analyze_result.data.get("language") {
             println!("   Language: {}", language);
         }
-        if let Some(functions) = analyze_result.data.get("functions").and_then(|v| v.as_array()) {
+        if let Some(functions) = analyze_result
+            .data
+            .get("functions")
+            .and_then(|v| v.as_array())
+        {
             println!("   Functions: {}", functions.len());
         }
-        if let Some(structs) = analyze_result.data.get("structs").and_then(|v| v.as_array()) {
+        if let Some(structs) = analyze_result
+            .data
+            .get("structs")
+            .and_then(|v| v.as_array())
+        {
             println!("   Structs: {}", structs.len());
         }
     } else {
@@ -84,10 +103,15 @@ async fn main() -> LoreGrepResult<()> {
 
     // Example 5: Get repository structure
     println!("🌳 Getting repository tree...");
-    let tree_result = loregrep.execute_tool("get_repository_tree", json!({
-        "include_file_details": false,
-        "max_depth": 2
-    })).await?;
+    let tree_result = loregrep
+        .execute_tool(
+            "get_repository_tree",
+            json!({
+                "include_file_details": false,
+                "max_depth": 2
+            }),
+        )
+        .await?;
 
     if tree_result.success {
         println!("   ✅ Repository tree generated");

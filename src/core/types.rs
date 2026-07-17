@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Tool definition for LLM system prompts
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ mod tests {
                     }
                 },
                 "required": ["pattern"]
-            })
+            }),
         );
 
         assert_eq!(schema.name, "search_functions");
@@ -104,12 +104,12 @@ mod tests {
         let schema = ToolSchema::new(
             "test_tool".to_string(),
             "Test tool".to_string(),
-            json!({"type": "object"})
+            json!({"type": "object"}),
         );
 
         let serialized = serde_json::to_string(&schema).unwrap();
         let deserialized: ToolSchema = serde_json::from_str(&serialized).unwrap();
-        
+
         assert_eq!(schema.name, deserialized.name);
         assert_eq!(schema.description, deserialized.description);
     }
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn test_tool_result_success() {
         let result = ToolResult::success(json!({"count": 5}));
-        
+
         assert!(result.success);
         assert_eq!(result.data, json!({"count": 5}));
         assert!(result.error.is_none());
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn test_tool_result_error() {
         let result = ToolResult::error("Tool failed".to_string());
-        
+
         assert!(!result.success);
         assert_eq!(result.data, serde_json::Value::Null);
         assert_eq!(result.error, Some("Tool failed".to_string()));
@@ -137,7 +137,7 @@ mod tests {
         let result = ToolResult::success(json!({"test": "data"}));
         let serialized = serde_json::to_string(&result).unwrap();
         let deserialized: ToolResult = serde_json::from_str(&serialized).unwrap();
-        
+
         assert_eq!(result.success, deserialized.success);
         assert_eq!(result.data, deserialized.data);
         assert_eq!(result.error, deserialized.error);
@@ -150,7 +150,7 @@ mod tests {
             250,
             75,
             1500,
-            vec!["rust".to_string(), "python".to_string()]
+            vec!["rust".to_string(), "python".to_string()],
         );
 
         assert_eq!(result.files_scanned, 100);
@@ -164,17 +164,11 @@ mod tests {
 
     #[test]
     fn test_scan_result_serialization() {
-        let result = ScanResult::new(
-            50,
-            100,
-            25,
-            750,
-            vec!["rust".to_string()]
-        );
+        let result = ScanResult::new(50, 100, 25, 750, vec!["rust".to_string()]);
 
         let serialized = serde_json::to_string(&result).unwrap();
         let deserialized: ScanResult = serde_json::from_str(&serialized).unwrap();
-        
+
         assert_eq!(result.files_scanned, deserialized.files_scanned);
         assert_eq!(result.functions_found, deserialized.functions_found);
         assert_eq!(result.structs_found, deserialized.structs_found);

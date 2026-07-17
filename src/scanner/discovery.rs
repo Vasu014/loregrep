@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{Walk, WalkBuilder};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{info, warn};
 
@@ -30,7 +29,6 @@ pub struct LanguageDetector {
 pub struct ScanConfig {
     pub follow_symlinks: bool,
     pub max_depth: Option<u32>,
-    pub show_progress: bool,
     pub parallel: bool,
 }
 
@@ -153,7 +151,6 @@ impl Default for ScanConfig {
         Self {
             follow_symlinks: false,
             max_depth: Some(20),
-            show_progress: true,
             parallel: true,
         }
     }
@@ -182,20 +179,6 @@ impl RepositoryScanner {
 
         info!("Starting repository scan at: {:?}", root_path);
 
-        // Create progress bar
-        let progress = if self.config.show_progress {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} [{elapsed_precise}] {msg} ({pos} files)")
-                    .unwrap(),
-            );
-            pb.set_message("Scanning files...");
-            Some(pb)
-        } else {
-            None
-        };
-
         // Build the walker
         let walker = self.build_walker(root_path)?;
 
@@ -212,17 +195,13 @@ impl RepositoryScanner {
                 Ok(entry) => {
                     total_found.fetch_add(1, Ordering::Relaxed);
 
-                    if let Some(pb) = &progress {
-                        pb.set_position(total_found.load(Ordering::Relaxed) as u64);
-                    }
-
                     // Skip directories
                     if entry.file_type().map_or(false, |ft| ft.is_dir()) {
                         continue;
                     }
 
                     let path = entry.path();
-                    
+
                     // Get file size
                     let metadata = match entry.metadata() {
                         Ok(meta) => meta,
@@ -242,16 +221,14 @@ impl RepositoryScanner {
 
                     // Detect language
                     let language = self.language_detector.detect_language(path);
-                    
+
                     // Skip unknown languages for now
                     if language == "unknown" {
                         continue;
                     }
 
                     // Calculate relative path
-                    let relative_path = path.strip_prefix(root_path)
-                        .unwrap_or(path)
-                        .to_path_buf();
+                    let relative_path = path.strip_prefix(root_path).unwrap_or(path).to_path_buf();
 
                     let discovered_file = DiscoveredFile {
                         path: path.to_path_buf(),
@@ -267,10 +244,6 @@ impl RepositoryScanner {
                     warn!("Error walking directory: {}", e);
                 }
             }
-        }
-
-        if let Some(pb) = progress {
-            pb.finish_and_clear();
         }
 
         let scan_duration = start_time.elapsed();
@@ -293,7 +266,7 @@ impl RepositoryScanner {
 
     fn build_walker(&self, root_path: &Path) -> Result<Walk> {
         let mut builder = WalkBuilder::new(root_path);
-        
+
         builder
             .follow_links(self.scanning_config.follow_symlinks)
             .git_ignore(self.scanning_config.respect_gitignore)
@@ -316,7 +289,10 @@ impl RepositoryScanner {
     }
 
     /// Quick scan that just counts files without detailed analysis
-    pub fn quick_scan<P: AsRef<Path>>(&self, root_path: P) -> Result<(usize, std::collections::HashMap<String, usize>)> {
+    pub fn quick_scan<P: AsRef<Path>>(
+        &self,
+        root_path: P,
+    ) -> Result<(usize, std::collections::HashMap<String, usize>)> {
         let root_path = root_path.as_ref();
         let walker = self.build_walker(root_path)?;
 
@@ -327,7 +303,7 @@ impl RepositoryScanner {
             if let Ok(entry) = result {
                 if entry.file_type().map_or(false, |ft| ft.is_file()) {
                     let path = entry.path();
-                    
+
                     if let Ok(metadata) = entry.metadata() {
                         if self.filters.should_include(path, metadata.len()) {
                             let language = self.language_detector.detect_language(path);
@@ -348,7 +324,7 @@ impl RepositoryScanner {
     pub fn should_analyze(&self, path: &Path) -> Result<bool> {
         let metadata = std::fs::metadata(path)
             .with_context(|| format!("Failed to get metadata for {:?}", path))?;
-        
+
         let file_size = metadata.len();
         Ok(self.filters.should_include(path, file_size))
     }
@@ -403,7 +379,10 @@ mod tests {
         assert_eq!(detector.detect_language(Path::new("app.ts")), "typescript");
         assert_eq!(detector.detect_language(Path::new("app.js")), "javascript");
         assert_eq!(detector.detect_language(Path::new("main.go")), "go");
-        assert_eq!(detector.detect_language(Path::new("unknown.txt")), "unknown");
+        assert_eq!(
+            detector.detect_language(Path::new("unknown.txt")),
+            "unknown"
+        );
     }
 
     #[test]
@@ -427,7 +406,7 @@ mod tests {
 
         let config = create_test_config();
         let scan_config = ScanConfig {
-            show_progress: false,
+            follow_symlinks: false,
             ..Default::default()
         };
 
@@ -442,4 +421,4 @@ mod tests {
 
         Ok(())
     }
-} 
+}

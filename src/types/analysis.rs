@@ -1,5 +1,7 @@
-use serde::{Serialize, Deserialize};
-use crate::types::{FunctionSignature, StructSignature, ImportStatement, ExportStatement, FunctionCall};
+use crate::types::{
+    ExportStatement, FunctionCall, FunctionSignature, ImportStatement, StructSignature,
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeNode {
@@ -35,7 +37,7 @@ impl TreeNode {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
-    
+
     /// Get summary stats for terminal display
     pub fn summary(&self) -> String {
         format!(
@@ -48,12 +50,12 @@ impl TreeNode {
             self.exports.len()
         )
     }
-    
+
     /// Get formatted function list for terminal display
     pub fn format_functions(&self) -> Vec<String> {
         self.functions.iter().map(|f| f.format()).collect()
     }
-    
+
     /// Get formatted struct list for terminal display
     pub fn format_structs(&self) -> Vec<String> {
         self.structs.iter().map(|s| s.format()).collect()
@@ -121,4 +123,4 @@ impl PartialAnalysis {
     pub fn add_error(&mut self, error: String) {
         self.errors.push(error);
     }
-} 
+}

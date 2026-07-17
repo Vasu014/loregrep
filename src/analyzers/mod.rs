@@ -1,9 +1,9 @@
-pub mod traits;
-pub mod rust;
 pub mod python;
 pub mod registry;
+pub mod rust;
+pub mod traits;
 
-pub use traits::LanguageAnalyzer;
-pub use rust::RustAnalyzer;
 pub use python::PythonAnalyzer;
-pub use registry::{LanguageAnalyzerRegistry, DefaultLanguageRegistry, RegistryHandle}; 
+pub use registry::{DefaultLanguageRegistry, LanguageAnalyzerRegistry, RegistryHandle};
+pub use rust::RustAnalyzer;
+pub use traits::LanguageAnalyzer;

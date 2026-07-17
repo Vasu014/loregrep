@@ -1,7 +1,8 @@
 [package]
 name = "loregrep"
 version = "0.4.2"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
 description = "Repository indexing library for AI coding assistants. Tree-sitter parsing, fast in-memory indexing, and tool APIs for LLM integration."
 license = "MIT OR Apache-2.0"
@@ -35,18 +36,18 @@ path = "src/server.rs"
 tokio = { version = "1.35", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
-pyo3 = { version = "0.25", features = ["extension-module"], optional = true }
-pyo3-async-runtimes = { version = "0.25", features = ["tokio-runtime"], optional = true }
-pythonize = { version = "0.25", optional = true }
+pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
+pythonize = { version = "0.29", optional = true }
 
 
 # Tree-sitter core and language grammars
-tree-sitter = "0.20"
-tree-sitter-rust = "0.20"
-tree-sitter-python = "0.20"
-tree-sitter-typescript = "0.20"
-tree-sitter-javascript = "0.20"
-tree-sitter-go = "0.20"
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-go = "0.25"
 streaming-iterator = "0.1"
 
 # Database
@@ -65,22 +66,13 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 hyper = { version = "1.0", features = ["full"] }
 
-# HTTP client for Claude API
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
-
 # CLI and terminal
 clap = { version = "4.4", features = ["derive", "env"] }
-crossterm = "0.27"
-colored = "2.0"
-indicatif = "0.17"
-console = "0.15"
-tabled = "0.15"
 
 # File system and patterns
 walkdir = "2.4"
 globset = "0.4"
 ignore = "0.4"
-notify = "6.1"
 
 # Text processing and search
 regex = "1.10"
@@ -101,7 +93,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Logging
 tracing = "0.1"

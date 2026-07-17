@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::fs;
 use std::path::Path;
 use tree_sitter::{Language, Parser};
@@ -6,7 +6,8 @@ use tree_sitter::{Language, Parser};
 // Mock functions for now - these will be replaced with actual loregrep code
 fn parse_rust_file(content: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = Parser::new();
-    parser.set_language(tree_sitter_rust::language())?;
+    let language: Language = tree_sitter_rust::LANGUAGE.into();
+    parser.set_language(&language)?;
     let tree = parser.parse(content, None).unwrap();
     black_box(tree);
     Ok(())
@@ -14,7 +15,8 @@ fn parse_rust_file(content: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_python_file(content: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = Parser::new();
-    parser.set_language(tree_sitter_python::language())?;
+    let language: Language = tree_sitter_python::LANGUAGE.into();
+    parser.set_language(&language)?;
     let tree = parser.parse(content, None).unwrap();
     black_box(tree);
     Ok(())
@@ -22,7 +24,8 @@ fn parse_python_file(content: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_typescript_file(content: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = Parser::new();
-    parser.set_language(tree_sitter_typescript::language_typescript())?;
+    let language: Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    parser.set_language(&language)?;
     let tree = parser.parse(content, None).unwrap();
     black_box(tree);
     Ok(())
@@ -160,4 +163,4 @@ criterion_group!(
     benchmark_typescript_parsing,
     benchmark_large_file_parsing
 );
-criterion_main!(benches); 
+criterion_main!(benches);
