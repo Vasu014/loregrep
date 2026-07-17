@@ -3,7 +3,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CliConfig {
     pub file_scanning: FileScanningConfig,
     pub analysis: AnalysisConfig,
@@ -12,6 +13,7 @@ pub struct CliConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FileScanningConfig {
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
@@ -22,6 +24,7 @@ pub struct FileScanningConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AnalysisConfig {
     pub languages: Vec<String>,
     pub max_parallel_files: usize,
@@ -31,6 +34,7 @@ pub struct AnalysisConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OutputConfig {
     pub verbose: bool,
     pub max_results: usize,
@@ -39,6 +43,7 @@ pub struct OutputConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CacheConfig {
     pub enabled: bool,
     pub path: PathBuf,
@@ -46,59 +51,71 @@ pub struct CacheConfig {
     pub ttl_hours: u64,
 }
 
-impl Default for CliConfig {
+impl Default for FileScanningConfig {
+    fn default() -> Self {
+        Self {
+            include_patterns: vec![
+                "*.rs".to_string(),
+                "*.py".to_string(),
+                "*.ts".to_string(),
+                "*.tsx".to_string(),
+                "*.js".to_string(),
+                "*.jsx".to_string(),
+                "*.go".to_string(),
+            ],
+            exclude_patterns: vec![
+                "target/*".to_string(),
+                "node_modules/*".to_string(),
+                "dist/*".to_string(),
+                "build/*".to_string(),
+                ".git/*".to_string(),
+                "*.d.ts".to_string(),
+                "*.test.js".to_string(),
+                "*.spec.js".to_string(),
+                "*.test.ts".to_string(),
+                "*.spec.ts".to_string(),
+            ],
+            max_file_size: 1024 * 1024, // 1MB
+            follow_symlinks: false,
+            max_depth: Some(20),
+            respect_gitignore: true,
+        }
+    }
+}
+
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            languages: vec!["rust".to_string()], // Start with Rust only
+            max_parallel_files: num_cpus::get(),
+            timeout_seconds: 30,
+            extract_function_calls: true,
+            extract_dependencies: true,
+        }
+    }
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            verbose: false,
+            max_results: 50,
+            truncate_lines: true,
+            line_numbers: true,
+        }
+    }
+}
+
+impl Default for CacheConfig {
     fn default() -> Self {
         let cache_dir = ProjectDirs::from("com", "loregrep", "loregrep")
             .map(|dirs| dirs.cache_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from(".loregrep_cache"));
-
         Self {
-            file_scanning: FileScanningConfig {
-                include_patterns: vec![
-                    "*.rs".to_string(),
-                    "*.py".to_string(),
-                    "*.ts".to_string(),
-                    "*.tsx".to_string(),
-                    "*.js".to_string(),
-                    "*.jsx".to_string(),
-                    "*.go".to_string(),
-                ],
-                exclude_patterns: vec![
-                    "target/*".to_string(),
-                    "node_modules/*".to_string(),
-                    "dist/*".to_string(),
-                    "build/*".to_string(),
-                    ".git/*".to_string(),
-                    "*.d.ts".to_string(),
-                    "*.test.js".to_string(),
-                    "*.spec.js".to_string(),
-                    "*.test.ts".to_string(),
-                    "*.spec.ts".to_string(),
-                ],
-                max_file_size: 1024 * 1024, // 1MB
-                follow_symlinks: false,
-                max_depth: Some(20),
-                respect_gitignore: true,
-            },
-            analysis: AnalysisConfig {
-                languages: vec!["rust".to_string()], // Start with Rust only
-                max_parallel_files: num_cpus::get(),
-                timeout_seconds: 30,
-                extract_function_calls: true,
-                extract_dependencies: true,
-            },
-            output: OutputConfig {
-                verbose: false,
-                max_results: 50,
-                truncate_lines: true,
-                line_numbers: true,
-            },
-            cache: CacheConfig {
-                enabled: true,
-                path: cache_dir,
-                max_size_mb: 100,
-                ttl_hours: 24,
-            },
+            enabled: true,
+            path: cache_dir,
+            max_size_mb: 100,
+            ttl_hours: 24,
         }
     }
 }
@@ -227,5 +244,47 @@ impl CliConfig {
         let config = Self::default();
         toml::to_string_pretty(&config)
             .unwrap_or_else(|_| "# Error generating sample config".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_config_fills_missing_fields_and_ignores_unknown() {
+        // A stale/partial config: [file_scanning] omits respect_gitignore,
+        // and there are removed sections ([ai]) and fields (output.colors).
+        let toml = r#"
+            [file_scanning]
+            include_patterns = ["*.rs"]
+            exclude_patterns = []
+            max_file_size = 2048
+            follow_symlinks = false
+            max_depth = 10
+
+            [output]
+            colors = true
+            verbose = true
+
+            [ai]
+            api_key = "removed"
+        "#;
+        let cfg: CliConfig = toml::from_str(toml).expect("partial config should parse");
+        // Present field kept:
+        assert_eq!(cfg.file_scanning.max_file_size, 2048);
+        // Missing field filled from Default (true), not a parse error:
+        assert!(cfg.file_scanning.respect_gitignore);
+        // Missing section filled from Default:
+        assert!(cfg.cache.enabled);
+        // Present output field kept; removed `colors` ignored (no error):
+        assert!(cfg.output.verbose);
+    }
+
+    #[test]
+    fn empty_config_is_all_defaults() {
+        let cfg: CliConfig = toml::from_str("").expect("empty config should parse");
+        assert_eq!(cfg.file_scanning.max_file_size, 1024 * 1024);
+        assert!(cfg.file_scanning.respect_gitignore);
     }
 }
