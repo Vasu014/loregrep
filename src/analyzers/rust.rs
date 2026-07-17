@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use blake3;
 use regex::Regex;
 use std::time::Instant;
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, Tree};
 
 #[derive(Clone)]
@@ -17,7 +18,7 @@ pub struct RustAnalyzer {
 impl RustAnalyzer {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            language: tree_sitter_rust::language(),
+            language: tree_sitter_rust::LANGUAGE.into(),
         })
     }
 
@@ -36,23 +37,23 @@ impl RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, *param_node, source.as_bytes());
+        let mut matches = cursor.matches(&query, *param_node, source.as_bytes());
 
         let mut param_name = String::new();
         let mut param_type = String::new();
         let mut is_mutable = false;
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "param_name" => param_name = text.to_string(),
                     "mut_param_name" => {
                         param_name = text.to_string();
@@ -91,23 +92,23 @@ impl RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, *field_node, source.as_bytes());
+        let mut matches = cursor.matches(&query, *field_node, source.as_bytes());
 
         let mut field_name = String::new();
         let mut field_type = String::new();
         let mut is_public = false;
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "field_name" => field_name = text.to_string(),
                     "field_type" => field_type = text.to_string(),
                     "visibility" => is_public = text.contains("pub"),
@@ -121,24 +122,24 @@ impl RustAnalyzer {
 
     /// Extract generics from a node
     fn extract_generics(&self, node: &Node, source: &str) -> Vec<String> {
-        // In tree-sitter-rust, `type_parameters` contains the type identifiers
-        // directly (there is no intermediate `type_parameter` node). Constrained
-        // parameters (e.g. `T: Clone`) are wrapped in `constrained_type_parameter`.
+        // In tree-sitter-rust (>=0.24), `type_parameters` wraps each parameter in a
+        // `type_parameter` node whose `name` field is the `type_identifier`. This
+        // covers both unbounded (`T`) and bounded (`T: Clone`) type parameters;
+        // `const_parameter`/`lifetime_parameter` are intentionally excluded.
         let query_str = r#"
-            (type_parameters (type_identifier) @generic)
             (type_parameters
-              (constrained_type_parameter left: (type_identifier) @generic)
+              (type_parameter name: (type_identifier) @generic)
             )
         "#;
 
-        if let Ok(query) = Query::new(self.language, query_str) {
+        if let Ok(query) = Query::new(&self.language, query_str) {
             let mut cursor = QueryCursor::new();
-            let matches = cursor.matches(&query, *node, source.as_bytes());
+            let mut matches = cursor.matches(&query, *node, source.as_bytes());
 
             let mut generics = Vec::new();
-            for query_match in matches {
+            while let Some(query_match) = matches.next() {
                 for capture in query_match.captures {
-                    let capture_name = &query.capture_names()[capture.index as usize];
+                    let capture_name = query.capture_names()[capture.index as usize];
                     if capture_name == "generic" {
                         let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
                         generics.push(text.to_string());
@@ -182,7 +183,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         // Parse with tree-sitter
         let mut parser = Parser::new();
         parser
-            .set_language(self.language)
+            .set_language(&self.language)
             .map_err(|e| AnalysisError::ParseError {
                 message: format!("Failed to set language: {:?}", e),
             })?;
@@ -239,24 +240,24 @@ impl LanguageAnalyzer for RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut functions = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut function_sig = FunctionSignature::new(String::new(), file_path.to_string());
             let mut function_node: Option<Node> = None;
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "name" => function_sig.name = text.to_string(),
                     "function" => {
                         function_node = Some(capture.node);
@@ -411,23 +412,23 @@ impl LanguageAnalyzer for RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut structs = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut struct_sig = StructSignature::new(String::new(), file_path.to_string());
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "name" | "tuple_name" => struct_sig.name = text.to_string(),
                     "visibility" | "tuple_visibility" => {
                         struct_sig.is_public = text.contains("pub")
@@ -515,23 +516,23 @@ impl LanguageAnalyzer for RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut imports = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut import_stmt = ImportStatement::new(String::new(), file_path.to_string());
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "import_path" => {
                         import_stmt.module_path = text.to_string();
                         // Check if it's external (starts with crate name or std)
@@ -577,23 +578,23 @@ impl LanguageAnalyzer for RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut exports = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut export_stmt = ExportStatement::new(String::new(), file_path.to_string());
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "name" => export_stmt.exported_item = text.to_string(),
                     "vis" => export_stmt.is_public = text.contains("pub"),
                     "export_item" => {
@@ -632,23 +633,23 @@ impl LanguageAnalyzer for RustAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut function_calls = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut function_call = FunctionCall::new(String::new(), file_path.to_string(), 0);
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
-                match capture_name.as_str() {
+                match capture_name {
                     "function_name" => {
                         function_call.function_name = text.to_string();
                     }
@@ -736,7 +737,7 @@ fn hello() {
 
         // Test direct tree-sitter parsing
         let mut parser = Parser::new();
-        parser.set_language(analyzer.language).unwrap();
+        parser.set_language(&analyzer.language).unwrap();
         let tree = parser.parse(code, None).unwrap();
 
         println!("Root node kind: {}", tree.root_node().kind());
@@ -744,13 +745,13 @@ fn hello() {
 
         // Try simpler query
         let simple_query = r#"(function_item name: (identifier) @name)"#;
-        if let Ok(query) = Query::new(analyzer.language, simple_query) {
+        if let Ok(query) = Query::new(&analyzer.language, simple_query) {
             let mut cursor = QueryCursor::new();
-            let matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
+            let mut matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
 
-            for query_match in matches {
+            while let Some(query_match) = matches.next() {
                 for capture in query_match.captures {
-                    let capture_name = &query.capture_names()[capture.index as usize];
+                    let capture_name = query.capture_names()[capture.index as usize];
                     let text = capture.node.utf8_text(code.as_bytes()).unwrap_or("");
                     println!("Capture: {} = {}", capture_name, text);
                 }

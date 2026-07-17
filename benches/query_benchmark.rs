@@ -23,14 +23,14 @@ struct MockStruct {
 }
 
 // Mock search implementations
-fn exact_search(functions: &[MockFunction], pattern: &str) -> Vec<&MockFunction> {
+fn exact_search<'a>(functions: &'a [MockFunction], pattern: &str) -> Vec<&'a MockFunction> {
     functions
         .iter()
         .filter(|f| f.name.contains(pattern))
         .collect()
 }
 
-fn regex_search(functions: &[MockFunction], pattern: &str) -> Vec<&MockFunction> {
+fn regex_search<'a>(functions: &'a [MockFunction], pattern: &str) -> Vec<&'a MockFunction> {
     let regex = regex::Regex::new(pattern).unwrap();
     functions
         .iter()
@@ -38,7 +38,7 @@ fn regex_search(functions: &[MockFunction], pattern: &str) -> Vec<&MockFunction>
         .collect()
 }
 
-fn fuzzy_search(functions: &[MockFunction], pattern: &str) -> Vec<(&MockFunction, i64)> {
+fn fuzzy_search<'a>(functions: &'a [MockFunction], pattern: &str) -> Vec<(&'a MockFunction, i64)> {
     use fuzzy_matcher::FuzzyMatcher;
     use fuzzy_matcher::skim::SkimMatcherV2;
 
@@ -53,12 +53,12 @@ fn fuzzy_search(functions: &[MockFunction], pattern: &str) -> Vec<(&MockFunction
         .collect()
 }
 
-fn filtered_search(
-    functions: &[MockFunction],
+fn filtered_search<'a>(
+    functions: &'a [MockFunction],
     pattern: &str,
     is_async: Option<bool>,
     min_params: Option<u32>,
-) -> Vec<&MockFunction> {
+) -> Vec<&'a MockFunction> {
     functions
         .iter()
         .filter(|f| f.name.contains(pattern))

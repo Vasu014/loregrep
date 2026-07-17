@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use blake3;
 use regex::Regex;
 use std::time::Instant;
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, Tree};
 
 #[derive(Clone)]
@@ -17,7 +18,7 @@ pub struct PythonAnalyzer {
 impl PythonAnalyzer {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            language: tree_sitter_python::language(),
+            language: tree_sitter_python::LANGUAGE.into(),
         })
     }
 
@@ -40,23 +41,23 @@ impl PythonAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, *param_node, source.as_bytes());
+        let mut matches = cursor.matches(&query, *param_node, source.as_bytes());
 
         let mut param_name = String::new();
         let mut param_type = String::new();
         let mut default_value = String::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = self.safe_utf8_text(&capture.node, source);
 
-                match capture_name.as_str() {
+                match capture_name {
                     "param_name" => param_name = text.to_string(),
                     "param_type" => param_type = text.to_string(),
                     "default_value" => default_value = text.to_string(),
@@ -248,7 +249,7 @@ impl LanguageAnalyzer for PythonAnalyzer {
         // Parse with tree-sitter with comprehensive error handling
         let tree_result = std::panic::catch_unwind(|| {
             let mut parser = Parser::new();
-            match parser.set_language(self.language) {
+            match parser.set_language(&self.language) {
                 Ok(_) => parser.parse(content, None),
                 Err(_) => None,
             }
@@ -343,25 +344,25 @@ impl LanguageAnalyzer for PythonAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut functions = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut function_sig = FunctionSignature::new(String::new(), file_path.to_string());
             let mut function_node: Option<Node> = None;
             let mut is_async = false;
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = self.safe_utf8_text(&capture.node, source);
 
-                match capture_name.as_str() {
+                match capture_name {
                     "name" => function_sig.name = text.to_string(),
                     "function" => {
                         function_node = Some(capture.node);
@@ -489,23 +490,23 @@ impl LanguageAnalyzer for PythonAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut classes = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut class_sig = StructSignature::new(String::new(), file_path.to_string());
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = self.safe_utf8_text(&capture.node, source);
 
-                match capture_name.as_str() {
+                match capture_name {
                     "name" => class_sig.name = text.to_string(),
                     "inheritance" => {
                         // Extract base classes - simplified for now
@@ -584,23 +585,23 @@ impl LanguageAnalyzer for PythonAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut imports = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut import_stmt = ImportStatement::new(String::new(), file_path.to_string());
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = self.safe_utf8_text(&capture.node, source);
 
-                match capture_name.as_str() {
+                match capture_name {
                     "import_path" => {
                         import_stmt.module_path = text.to_string();
                         // Python imports are external unless they start with . (relative)
@@ -658,23 +659,23 @@ impl LanguageAnalyzer for PythonAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut exports = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut export_stmt = ExportStatement::new(String::new(), file_path.to_string());
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = self.safe_utf8_text(&capture.node, source);
 
-                match capture_name.as_str() {
+                match capture_name {
                     "func_name" | "class_name" | "var_name" => {
                         // Only consider public items (not starting with _) as exports
                         if !text.starts_with('_') {
@@ -717,23 +718,23 @@ impl LanguageAnalyzer for PythonAnalyzer {
         "#;
 
         let query =
-            Query::new(self.language, query_str).map_err(|e| AnalysisError::QueryError {
+            Query::new(&self.language, query_str).map_err(|e| AnalysisError::QueryError {
                 message: format!("{:?}", e),
             })?;
 
         let mut cursor = QueryCursor::new();
-        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
 
         let mut function_calls = Vec::new();
 
-        for query_match in matches {
+        while let Some(query_match) = matches.next() {
             let mut function_call = FunctionCall::new(String::new(), file_path.to_string(), 0);
 
             for capture in query_match.captures {
-                let capture_name = &query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 let text = self.safe_utf8_text(&capture.node, source);
 
-                match capture_name.as_str() {
+                match capture_name {
                     "function_name" => {
                         function_call.function_name = text.to_string();
                     }
@@ -843,7 +844,7 @@ def hello():
 
         // Test direct tree-sitter parsing
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(analyzer.language).unwrap();
+        parser.set_language(&analyzer.language).unwrap();
         let tree = parser.parse(code, None).unwrap();
 
         println!("Root node kind: {}", tree.root_node().kind());
@@ -857,7 +858,7 @@ def hello():
             ) @function
         "#;
         println!("Testing complex query:");
-        if let Ok(query) = tree_sitter::Query::new(analyzer.language, complex_query) {
+        if let Ok(query) = tree_sitter::Query::new(&analyzer.language, complex_query) {
             let mut cursor = tree_sitter::QueryCursor::new();
             let matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
 
@@ -865,11 +866,11 @@ def hello():
 
             // Re-run to actually process them
             let mut cursor = tree_sitter::QueryCursor::new();
-            let matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
+            let mut matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
 
-            for query_match in matches {
+            while let Some(query_match) = matches.next() {
                 for capture in query_match.captures {
-                    let capture_name = &query.capture_names()[capture.index as usize];
+                    let capture_name = query.capture_names()[capture.index as usize];
                     let text = analyzer.safe_utf8_text(&capture.node, code);
                     println!("Complex Capture: {} = {}", capture_name, text);
                 }
@@ -881,13 +882,13 @@ def hello():
         // Try simpler query
         let simple_query = r#"(function_definition name: (identifier) @name) @function"#;
         println!("Testing simple query:");
-        if let Ok(query) = tree_sitter::Query::new(analyzer.language, simple_query) {
+        if let Ok(query) = tree_sitter::Query::new(&analyzer.language, simple_query) {
             let mut cursor = tree_sitter::QueryCursor::new();
-            let matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
+            let mut matches = cursor.matches(&query, tree.root_node(), code.as_bytes());
 
-            for query_match in matches {
+            while let Some(query_match) = matches.next() {
                 for capture in query_match.captures {
-                    let capture_name = &query.capture_names()[capture.index as usize];
+                    let capture_name = query.capture_names()[capture.index as usize];
                     let text = analyzer.safe_utf8_text(&capture.node, code);
                     println!("Simple Capture: {} = {}", capture_name, text);
                 }
