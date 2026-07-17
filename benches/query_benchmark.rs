@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::collections::HashMap;
 
 // Mock data structures for benchmarking - these will be replaced with actual loregrep types
@@ -39,8 +39,8 @@ fn regex_search(functions: &[MockFunction], pattern: &str) -> Vec<&MockFunction>
 }
 
 fn fuzzy_search(functions: &[MockFunction], pattern: &str) -> Vec<(&MockFunction, i64)> {
-    use fuzzy_matcher::skim::SkimMatcherV2;
     use fuzzy_matcher::FuzzyMatcher;
+    use fuzzy_matcher::skim::SkimMatcherV2;
 
     let matcher = SkimMatcherV2::default();
     functions

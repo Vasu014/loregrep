@@ -337,7 +337,9 @@ impl LoreGrep {
                 // Provide helpful error message for unsupported languages
                 let supported_langs = self.language_registry.list_supported_languages();
                 if supported_langs.is_empty() {
-                    eprintln!("No language analyzers registered! Use LoreGrep::builder().with_rust_analyzer() or .with_python_analyzer()");
+                    eprintln!(
+                        "No language analyzers registered! Use LoreGrep::builder().with_rust_analyzer() or .with_python_analyzer()"
+                    );
                 } else {
                     eprintln!(
                         "No analyzer available for '{}' files. Supported: {}",
@@ -1103,15 +1105,21 @@ mod tests {
 
         // Verify default exclusions include test-repos
         let config = LoreGrepConfig::default();
-        assert!(config
-            .exclude_patterns
-            .contains(&"**/test-repos/**".to_string()));
-        assert!(config
-            .exclude_patterns
-            .contains(&"**/target/**".to_string()));
+        assert!(
+            config
+                .exclude_patterns
+                .contains(&"**/test-repos/**".to_string())
+        );
+        assert!(
+            config
+                .exclude_patterns
+                .contains(&"**/target/**".to_string())
+        );
         assert!(config.exclude_patterns.contains(&"**/.git/**".to_string()));
-        assert!(config
-            .exclude_patterns
-            .contains(&"**/node_modules/**".to_string()));
+        assert!(
+            config
+                .exclude_patterns
+                .contains(&"**/node_modules/**".to_string())
+        );
     }
 }

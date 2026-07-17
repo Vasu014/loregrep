@@ -3,7 +3,7 @@ use crate::types::{
     AnalysisError, ExportStatement, FunctionSignature, ImportStatement, StructSignature, TreeNode,
 };
 use anyhow::Context;
-use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

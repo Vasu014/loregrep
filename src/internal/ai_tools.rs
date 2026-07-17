@@ -1,10 +1,10 @@
 use crate::{
-    analyzers::{rust::RustAnalyzer, LanguageAnalyzer},
+    analyzers::{LanguageAnalyzer, rust::RustAnalyzer},
     storage::memory::RepoMap,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 use crate::core::types::ToolSchema;
@@ -732,10 +732,12 @@ mod tests {
         let result = tools.execute_tool("analyze_file", input).await.unwrap();
         assert!(!result.success);
         assert_eq!(result.data["status"], "error");
-        assert!(result.data["error"]
-            .as_str()
-            .unwrap()
-            .contains("Failed to read file"));
+        assert!(
+            result.data["error"]
+                .as_str()
+                .unwrap()
+                .contains("Failed to read file")
+        );
     }
 
     #[tokio::test]
@@ -1007,10 +1009,12 @@ mod tests {
 
         // Verify the repository tree structure is correct
         assert_eq!(metadata["root_path"], "/test");
-        assert!(metadata["languages"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("rust")));
+        assert!(
+            metadata["languages"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("rust"))
+        );
     }
 
     // === ToolResult Tests ===

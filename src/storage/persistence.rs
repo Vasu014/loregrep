@@ -1,7 +1,7 @@
 use blake3::Hasher;
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize};
-use std::fs::{create_dir_all, File};
+use std::fs::{File, create_dir_all};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -694,19 +694,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(update_info.new_files.len(), 1);
-        assert!(update_info
-            .new_files
-            .contains(&"/test/test3.rs".to_string()));
+        assert!(
+            update_info
+                .new_files
+                .contains(&"/test/test3.rs".to_string())
+        );
 
         assert_eq!(update_info.modified_files.len(), 1);
-        assert!(update_info
-            .modified_files
-            .contains(&"/test/test1.rs".to_string()));
+        assert!(
+            update_info
+                .modified_files
+                .contains(&"/test/test1.rs".to_string())
+        );
 
         assert_eq!(update_info.deleted_files.len(), 1);
-        assert!(update_info
-            .deleted_files
-            .contains(&"/test/test2.rs".to_string()));
+        assert!(
+            update_info
+                .deleted_files
+                .contains(&"/test/test2.rs".to_string())
+        );
 
         assert!(update_info.has_changes());
         assert_eq!(update_info.total_changes(), 3);

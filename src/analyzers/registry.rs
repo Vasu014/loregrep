@@ -295,18 +295,26 @@ mod tests {
         // Should have one language and three extensions
         assert_eq!(registry.list_supported_languages().len(), 1);
         assert_eq!(registry.list_supported_extensions().len(), 3);
-        assert!(registry
-            .list_supported_languages()
-            .contains(&"python".to_string()));
-        assert!(registry
-            .list_supported_extensions()
-            .contains(&"py".to_string()));
-        assert!(registry
-            .list_supported_extensions()
-            .contains(&"pyx".to_string()));
-        assert!(registry
-            .list_supported_extensions()
-            .contains(&"pyi".to_string()));
+        assert!(
+            registry
+                .list_supported_languages()
+                .contains(&"python".to_string())
+        );
+        assert!(
+            registry
+                .list_supported_extensions()
+                .contains(&"py".to_string())
+        );
+        assert!(
+            registry
+                .list_supported_extensions()
+                .contains(&"pyx".to_string())
+        );
+        assert!(
+            registry
+                .list_supported_extensions()
+                .contains(&"pyi".to_string())
+        );
     }
 
     #[test]
@@ -321,10 +329,12 @@ mod tests {
         let analyzer2 = Box::new(MockPythonAnalyzer);
         let result = registry.register(analyzer2);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("already registered"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already registered")
+        );
     }
 
     #[test]

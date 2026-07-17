@@ -1,7 +1,8 @@
 [package]
 name = "loregrep"
 version = "0.4.2"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 authors = ["Vasu Bhardwaj <voodoorapter014@gmail.com>"]
 description = "Repository indexing library for AI coding assistants. Tree-sitter parsing, fast in-memory indexing, and tool APIs for LLM integration."
 license = "MIT OR Apache-2.0"
@@ -72,7 +73,6 @@ clap = { version = "4.4", features = ["derive", "env"] }
 walkdir = "2.4"
 globset = "0.4"
 ignore = "0.4"
-notify = "6.1"
 
 # Text processing and search
 regex = "1.10"
@@ -93,7 +93,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Logging
 tracing = "0.1"

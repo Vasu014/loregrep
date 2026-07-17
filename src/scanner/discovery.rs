@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{Walk, WalkBuilder};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{info, warn};
 

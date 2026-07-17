@@ -6,13 +6,13 @@ use tracing::info;
 
 // Use public API instead of direct internal access
 use crate::{
+    LoreGrep,
     core::types::ScanResult as PublicScanResult,
     internal::{
         cli_types::{AnalyzeArgs, ScanArgs, SearchArgs},
         config::CliConfig,
     },
     types::{ExportStatement, FunctionSignature, ImportStatement, StructSignature},
-    LoreGrep,
 };
 
 /// Lightweight search result used for plain, machine-facing output.
