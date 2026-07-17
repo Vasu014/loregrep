@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use tokio;
 
 // Use the CLI wrapper for clean access to CLI functionality
-use loregrep::cli_main::{AnalyzeArgs, CliApp, CliConfig, ScanArgs, SearchArgs};
+use loregrep::cli_main::{AnalyzeArgs, CliApp, CliConfig, ExecToolArgs, ScanArgs, SearchArgs};
 
 #[derive(Parser)]
 #[command(name = "loregrep")]
@@ -45,6 +45,8 @@ pub enum Commands {
     Search(SearchArgs),
     /// Analyze a specific file
     Analyze(AnalyzeArgs),
+    /// Execute a single analysis tool and print its JSON result (for agents)
+    ExecTool(ExecToolArgs),
     /// Show current configuration
     Config,
 }
@@ -87,6 +89,12 @@ async fn main() -> Result<()> {
                 args.file = cli.directory.join(args.file);
             }
             app.analyze(args).await
+        }
+        Commands::ExecTool(mut args) => {
+            if args.path == PathBuf::from(".") {
+                args.path = cli.directory.clone();
+            }
+            app.exec_tool(args).await
         }
         Commands::Config => app.show_config().await,
     }

@@ -9,7 +9,7 @@ use crate::{
     LoreGrep,
     core::types::ScanResult as PublicScanResult,
     internal::{
-        cli_types::{AnalyzeArgs, ScanArgs, SearchArgs},
+        cli_types::{AnalyzeArgs, ExecToolArgs, ScanArgs, SearchArgs},
         config::CliConfig,
     },
 };
@@ -132,6 +132,32 @@ impl CliApp {
             eprintln!("Total scan time: {:?}", start_time.elapsed());
         }
 
+        Ok(())
+    }
+
+    /// Execute a single analysis tool and print its `ToolResult` as JSON to stdout.
+    /// Scans the target path first to populate the index; all diagnostics go to stderr,
+    /// so stdout carries only the JSON result (for agent/tool consumption).
+    pub async fn exec_tool(&mut self, args: ExecToolArgs) -> Result<()> {
+        self.loregrep
+            .scan(&args.path.to_string_lossy())
+            .await
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+        let params: serde_json::Value = serde_json::from_str(&args.params)
+            .map_err(|e| anyhow::anyhow!("Invalid --params JSON: {}", e))?;
+
+        let result = self
+            .loregrep
+            .execute_tool(&args.tool, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("Tool execution failed: {}", e))?;
+
+        println!("{}", serde_json::to_string_pretty(&result)?);
+
+        if !result.success {
+            std::process::exit(1);
+        }
         Ok(())
     }
 
@@ -891,6 +917,45 @@ struct PrivateStruct {
     }
 
     #[test]
+    async fn test_exec_tool_scans_and_executes() {
+        // exec-tool should scan the given path then run the named tool and succeed.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_rust_file(
+            &temp_dir,
+            "sample.rs",
+            "pub fn exec_target() -> i32 { 1 }\n",
+        );
+
+        let config = create_test_config();
+        let mut app = CliApp::new(config, false, false).await.unwrap();
+
+        let args = ExecToolArgs {
+            tool: "search_functions".to_string(),
+            params: r#"{"pattern":"exec_target"}"#.to_string(),
+            path: temp_dir.path().to_path_buf(),
+        };
+        // Success path returns Ok (prints JSON to stdout; no process exit).
+        assert!(app.exec_tool(args).await.is_ok());
+
+        // The exec-tool scan populated the index; the tool found the function.
+        let result = app
+            .loregrep
+            .execute_tool(
+                "search_functions",
+                serde_json::json!({"pattern": "exec_target"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        let count = result
+            .data
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(count >= 1, "expected exec-tool scan to index exec_target");
+    }
+
+    #[tokio::test]
     async fn test_analyze_directory_produces_output() {
         // Regression test for the `analyze <directory>` path, which used to call
         // a nonexistent `analyze_directory` tool. It now routes to

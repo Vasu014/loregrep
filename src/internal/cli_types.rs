@@ -67,3 +67,18 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub imports: bool,
 }
+
+#[derive(Args)]
+pub struct ExecToolArgs {
+    /// Tool to execute (search_functions, search_structs, find_callers,
+    /// get_dependencies, analyze_file, get_repository_tree)
+    pub tool: String,
+
+    /// Tool parameters as a JSON object
+    #[arg(long, default_value = "{}")]
+    pub params: String,
+
+    /// Directory to scan before executing the tool
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+}
