@@ -78,22 +78,44 @@ impl TypeScriptAnalyzer {
         false
     }
 
-    /// Is `node` nested (directly or a couple of levels up) inside an
-    /// `export_statement`? Used to decide public visibility of top-level items.
+    /// Is `node` exported directly at module level? Used to decide public
+    /// visibility of top-level items.
+    ///
+    /// A declaration is exported only when it sits DIRECTLY under an
+    /// `export_statement` (`export function foo`, `export class Bar`,
+    /// `export type Baz`), or, for arrow-bound `const`/`let`/`var`
+    /// declarations, when the enclosing `lexical_declaration`/
+    /// `variable_declaration` is itself under an `export_statement`
+    /// (`export const foo = () => {}`). Functions nested inside another
+    /// function/method body are NOT exported, even when the outer function is.
     fn is_exported(node: &Node) -> bool {
-        let mut current = node.parent();
-        let mut depth = 0;
-        while let Some(n) = current {
-            if n.kind() == "export_statement" {
-                return true;
+        match node.parent() {
+            Some(p) if p.kind() == "export_statement" => true,
+            Some(p) if p.kind() == "lexical_declaration" || p.kind() == "variable_declaration" => {
+                matches!(p.parent().map(|g| g.kind()), Some("export_statement"))
             }
-            if depth >= 3 {
-                break;
-            }
-            depth += 1;
-            current = n.parent();
+            _ => false,
         }
-        false
+    }
+
+    /// Is `node` (the `variable_declarator` captured for an arrow-bound
+    /// declaration) at module top-level? True when its enclosing
+    /// `lexical_declaration`/`variable_declaration` sits directly in the
+    /// program, optionally wrapped in a top-level `export_statement`. Arrows
+    /// declared inside a function or method body return false, so a nested
+    /// `const helper = () => {}` is not surfaced as a top-level function.
+    fn is_top_level_arrow_decl(node: &Node) -> bool {
+        let decl = match node.parent() {
+            Some(p) if p.kind() == "lexical_declaration" || p.kind() == "variable_declaration" => p,
+            _ => return false,
+        };
+        match decl.parent() {
+            Some(p) if p.kind() == "program" => true,
+            Some(p) if p.kind() == "export_statement" => {
+                matches!(p.parent().map(|g| g.kind()), Some("program"))
+            }
+            _ => false,
+        }
     }
 
     /// Extract generic type parameter names from a node's `type_parameters`
@@ -130,8 +152,19 @@ impl TypeScriptAnalyzer {
 
     /// Extract parameters (with type annotations and defaults) from a node that
     /// has a `parameters` field pointing at a `formal_parameters` node.
+    ///
+    /// A single-parameter arrow written without parentheses (`x => x + 1`) has
+    /// no `formal_parameters` wrapper; instead the arrow node exposes a bare
+    /// `parameter` field holding the identifier. Handle that case first.
     fn extract_params(&self, sig_node: &Node, source: &str) -> Vec<Parameter> {
         let mut out = Vec::new();
+        if let Some(param) = sig_node.child_by_field_name("parameter") {
+            let name = self.text(&param, source);
+            if !name.is_empty() {
+                out.push(Parameter::new(name, String::new()));
+            }
+            return out;
+        }
         if let Some(params) = sig_node.child_by_field_name("parameters") {
             let mut cursor = params.walk();
             if cursor.goto_first_child() {
@@ -338,6 +371,13 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                 _ => continue,
             };
             if name.is_empty() {
+                continue;
+            }
+
+            // Arrow functions are only surfaced when bound to a module top-level
+            // declaration. An arrow declared inside a function/method body (e.g.
+            // `const helper = () => {}`) is a local, not a top-level function.
+            if kind == "arrow" && !Self::is_top_level_arrow_decl(&outer) {
                 continue;
             }
 
@@ -759,8 +799,13 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
         }
 
         // Arrow functions bound to a variable: `const foo = async (`
+        //
+        // The variable's optional type annotation may itself contain `=>` (an
+        // arrow *type*), e.g. `const cb: (n: number) => void = (n) => {}`. The
+        // annotation matcher therefore tolerates `=>` while still stopping at the
+        // lone `=` that begins the assignment.
         if let Ok(re) = Regex::new(
-            r"(?m)^\s*(export\s+)?(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=]+)?=>",
+            r"(?m)^\s*(export\s+)?(?:const|let|var)\s+(\w+)\s*(?::(?:=>|[^=\n])+)?=\s*(async\s+)?(?:<[^>]*>\s*)?\([^)]*\)\s*(?::[^=]+)?=>",
         ) {
             for caps in re.captures_iter(content) {
                 if let Some(name) = caps.get(2) {
@@ -1172,6 +1217,71 @@ function main() { f(); }
         let h3 = analyzer.calculate_content_hash("const y = 2;");
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
+    }
+
+    #[tokio::test]
+    async fn test_nested_arrow_not_top_level() {
+        // Regression: an arrow bound inside a function body must NOT be surfaced
+        // as a top-level function.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = r#"
+function outer(): void {
+    const helper = () => 42;
+    helper();
+}
+"#;
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let f = &analysis.tree_node.functions;
+        assert!(
+            f.iter().any(|x| x.name == "outer"),
+            "outer should be surfaced"
+        );
+        assert!(
+            !f.iter().any(|x| x.name == "helper"),
+            "nested arrow `helper` must not be a top-level function"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_function_not_exported() {
+        // Regression: a function nested inside an exported function must not be
+        // marked public just because an ancestor is exported.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "export function outer() { function inner() {} }";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let f = &analysis.tree_node.functions;
+        let outer = f.iter().find(|x| x.name == "outer").unwrap();
+        let inner = f.iter().find(|x| x.name == "inner").unwrap();
+        assert!(outer.is_public, "outer is exported -> public");
+        assert!(!inner.is_public, "nested inner must not be public");
+    }
+
+    #[tokio::test]
+    async fn test_single_bare_identifier_arrow_param() {
+        // Regression: `x => x + 1` has a bare identifier parameter (no
+        // formal_parameters wrapper); the single param must still be captured.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "const inc = x => x + 1;";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let f = &analysis.tree_node.functions;
+        let inc = f.iter().find(|x| x.name == "inc").unwrap();
+        assert_eq!(inc.parameters.len(), 1);
+        assert_eq!(inc.parameters[0].name, "x");
+    }
+
+    #[tokio::test]
+    async fn test_fallback_arrow_with_arrow_typed_annotation() {
+        // Regression: the fallback arrow regex used to stop at the first `=`,
+        // so a declaration whose type annotation contains `=>` was missed.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let content = "export const cb: (n: number) => void = (n) => {};";
+        let fallback = analyzer.extract_with_fallback(content, "a.ts");
+        let names: Vec<&String> = fallback.functions.iter().map(|f| &f.name).collect();
+        assert!(
+            names.contains(&&"cb".to_string()),
+            "fallback should capture `cb`, got {:?}",
+            names
+        );
     }
 
     #[tokio::test]

@@ -105,7 +105,13 @@ impl LoreGrep {
 
         let mut builder = Self::builder();
 
-        // Register analyzers based on detection
+        // Register analyzers based on detection. Track whether every detected
+        // language has a matching analyzer: languages such as "javascript" or
+        // "go" are detected but have no analyzer yet, and a project made up only
+        // of those would otherwise fall through registering nothing useful (and
+        // then only the default Rust analyzer would be added at build time,
+        // silently dropping all supported files).
+        let mut all_detected_have_analyzer = true;
         for language in &detected_languages {
             builder = match language.as_str() {
                 "rust" => builder.with_rust_analyzer(),
@@ -113,13 +119,20 @@ impl LoreGrep {
                 "typescript" => builder.with_typescript_analyzer(),
                 // Future language support:
                 // "javascript" => builder.with_javascript_analyzer(),
-                _ => builder,
+                _ => {
+                    all_detected_have_analyzer = false;
+                    builder
+                }
             };
         }
 
-        // If nothing detected, use sensible defaults
-        if detected_languages.is_empty() {
-            builder = builder.with_rust_analyzer().with_python_analyzer();
+        // If nothing was detected, or a detected language has no analyzer yet,
+        // register the full set of available analyzers so the instance never
+        // ends up indexing nothing for supported file types. (A JS-only project
+        // still gets rust+python+typescript; JS itself remains unhandled until
+        // an analyzer exists, which is fine.)
+        if detected_languages.is_empty() || !all_detected_have_analyzer {
+            builder = builder.with_all_analyzers();
         }
 
         // Configure file patterns based on detected languages
@@ -1090,6 +1103,40 @@ mod tests {
             }
             _ => panic!("Unexpected error type"),
         }
+    }
+
+    #[test]
+    fn test_auto_discover_js_only_registers_available_analyzers() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // A JavaScript-only project: package.json + a .js file, but no
+        // tsconfig.json, so only "javascript" is detected. JavaScript has no
+        // analyzer yet, so auto_discover must fall through to registering the
+        // full available set (rust + python + typescript) rather than silently
+        // ending up with only the default Rust analyzer.
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("package.json"), "{}").unwrap();
+        fs::write(temp_dir.path().join("index.js"), "function f() {}").unwrap();
+
+        let loregrep = LoreGrep::auto_discover(temp_dir.path()).unwrap();
+        let langs = loregrep.language_registry.list_supported_languages();
+
+        assert!(
+            langs.contains(&"rust".to_string()),
+            "rust analyzer should be registered, got {:?}",
+            langs
+        );
+        assert!(
+            langs.contains(&"python".to_string()),
+            "python analyzer should be registered, got {:?}",
+            langs
+        );
+        assert!(
+            langs.contains(&"typescript".to_string()),
+            "typescript analyzer should be registered, got {:?}",
+            langs
+        );
     }
 
     #[test]
