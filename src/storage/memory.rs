@@ -368,6 +368,29 @@ impl RepoMap {
         self.file_index.get(file_path).copied()
     }
 
+    /// Resolve a file argument to an index, tolerant of how an agent phrases the
+    /// path: an exact match on the stored (absolute) path first, else a unique
+    /// whole-segment suffix match (so a repo-relative `src/config.rs` finds
+    /// `/abs/.../src/config.rs`). Ambiguous suffix → `None` (never guess).
+    pub fn resolve_file_index(&self, file_path: &str) -> Option<usize> {
+        if let Some(idx) = self.file_index_of(file_path) {
+            return Some(idx);
+        }
+        let norm = crate::storage::graph::normalize_path(file_path);
+        let needle = format!("/{norm}");
+        let mut hit = None;
+        for (i, f) in self.files.iter().enumerate() {
+            let np = crate::storage::graph::normalize_path(&f.file_path);
+            if np == norm || np.ends_with(&needle) {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(i);
+            }
+        }
+        hit
+    }
+
     /// Get files by language
     pub fn get_files_by_language(&self, language: &str) -> Vec<&TreeNode> {
         self.language_index

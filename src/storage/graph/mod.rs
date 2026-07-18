@@ -84,6 +84,103 @@ impl ModuleGraph {
         out.sort_unstable();
         out
     }
+
+    /// The resolved in-repo edges as `(from_file, to_file)` pairs (imports whose
+    /// target is another scanned file; `External`/`Unresolved` are skipped).
+    pub fn file_edges(&self) -> Vec<(usize, usize)> {
+        let mut edges = Vec::new();
+        for (from, imports) in self.forward.iter().enumerate() {
+            for imp in imports {
+                if let ImportTarget::File(to) = imp.target {
+                    edges.push((from, to));
+                }
+            }
+        }
+        edges
+    }
+
+    /// Import cycles among the scanned files: each returned group is a set of files
+    /// that mutually (transitively) import each other — a strongly-connected
+    /// component of size ≥ 2, plus any file that imports itself. Node indices in
+    /// each group are sorted; groups are sorted by their smallest member. Computed
+    /// with Tarjan's SCC algorithm over the resolved file edges.
+    pub fn cycles(&self) -> Vec<Vec<usize>> {
+        let n = self.forward.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut self_loops: HashSet<usize> = HashSet::new();
+        for (from, to) in self.file_edges() {
+            if from == to {
+                self_loops.insert(from);
+            } else if to < n {
+                adj[from].push(to);
+            }
+        }
+
+        let mut sccs = tarjan_scc(&adj);
+        // Keep only genuine cycles: multi-node SCCs, or single nodes with a self-loop.
+        sccs.retain(|c| c.len() > 1 || (c.len() == 1 && self_loops.contains(&c[0])));
+        for c in &mut sccs {
+            c.sort_unstable();
+        }
+        sccs.sort_by_key(|c| c.first().copied().unwrap_or(0));
+        sccs
+    }
+}
+
+/// Tarjan's strongly-connected-components over an adjacency list, iterative to
+/// avoid stack overflow on deep graphs. Returns every SCC (including singletons).
+fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    let mut index = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut next_index = 0usize;
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+
+    // Explicit DFS stack of (node, next-neighbor-cursor).
+    for start in 0..n {
+        if index[start] != usize::MAX {
+            continue;
+        }
+        let mut work: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some((v, ci)) = work.pop() {
+            if ci == 0 {
+                index[v] = next_index;
+                low[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if ci < adj[v].len() {
+                // Re-push v to resume after handling the child.
+                work.push((v, ci + 1));
+                let w = adj[v][ci];
+                if index[w] == usize::MAX {
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                // Done with v's neighbors; propagate low to parent (top of work).
+                if let Some(&(parent, _)) = work.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut comp = Vec::new();
+                    while let Some(w) = stack.pop() {
+                        on_stack[w] = false;
+                        comp.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    sccs.push(comp);
+                }
+            }
+        }
+    }
+    sccs
 }
 
 /// Read-only view over the scanned files that resolvers query: path→index lookup,
@@ -328,6 +425,25 @@ mod tests {
             g2.importers(1).is_empty(),
             "stale reverse edge survived rebuild"
         );
+    }
+
+    #[test]
+    fn cycles_reports_sccs_and_self_loops_only() {
+        // a -> b -> c -> a  (3-cycle);  d -> e (no cycle);  f -> f (self loop).
+        let files = vec![
+            file("a.x", "stub", &["./b"]),
+            file("b.x", "stub", &["./c"]),
+            file("c.x", "stub", &["./a"]),
+            file("d.x", "stub", &["./e"]),
+            file("e.x", "stub", &[]),
+            file("f.x", "stub", &["./f"]),
+        ];
+        let g = build_with(&files, stub);
+        let cycles = g.cycles();
+        // The 3-cycle {0,1,2} and the self-loop {5}; d/e are acyclic and absent.
+        assert_eq!(cycles.len(), 2);
+        assert_eq!(cycles[0], vec![0, 1, 2]);
+        assert_eq!(cycles[1], vec![5]);
     }
 
     #[test]

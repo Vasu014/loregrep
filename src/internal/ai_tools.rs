@@ -1,4 +1,10 @@
-use crate::{analyzers::registry::RegistryHandle, storage::memory::RepoMap, types::TypeKind};
+use crate::{
+    analyzers::registry::RegistryHandle,
+    storage::graph::{ImportTarget, ResolvedImport},
+    storage::memory::RepoMap,
+    types::TreeNode,
+    types::TypeKind,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -181,6 +187,38 @@ impl LocalAnalysisTools {
                     "required": ["function_name"]
                 }),
             },
+            ToolSchema {
+                name: "find_importers".to_string(),
+                description: "Return the files that import a given file, resolved through the module graph (not text search): direct importers, or the full transitive reverse-dependency closure when `transitive` is true. Import resolution follows relative/aliased specifiers, so this reaches importers a grep for the file name would miss.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Path of the file whose importers to find"
+                        },
+                        "transitive": {
+                            "type": "boolean",
+                            "description": "Include the full transitive importer closure, not just direct importers",
+                            "default": false
+                        }
+                    },
+                    "required": ["file"]
+                }),
+            },
+            ToolSchema {
+                name: "get_dependency_graph".to_string(),
+                description: "Return the resolved import dependency graph — files (nodes) and file→file import edges — optionally scoped to a directory or file prefix, plus a report of import cycles (mutually-importing file groups). Only edges resolved to in-repo files are included; external and unresolved imports are omitted from edges.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "description": "Optional path prefix (directory or file) to restrict the graph to; omit for the whole repository"
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -194,6 +232,8 @@ impl LocalAnalysisTools {
             "trace_callers" => self.trace_callers(input).await,
             "analyze_impact" => self.analyze_impact(input).await,
             "get_repository_tree" => self.get_repository_tree(input).await,
+            "find_importers" => self.find_importers(input).await,
+            "get_dependency_graph" => self.get_dependency_graph(input).await,
             _ => Ok(ToolResult::error(format!("Unknown tool: {}", tool_name))),
         }
     }
@@ -345,19 +385,131 @@ impl LocalAnalysisTools {
         let deps_input: GetDependenciesInput =
             serde_json::from_value(input).context("Invalid get_dependencies input")?;
 
-        let dependencies = self
-            .repo_map
-            .lock()
-            .unwrap()
-            .get_file_dependencies(&deps_input.file_path);
+        let (dependencies, resolved) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            // Unchanged raw module-path strings (shape is in shipped gold cases).
+            let dependencies = repo_map.get_file_dependencies(&deps_input.file_path);
+            // Additive: each import's resolution status + target file, from the
+            // module graph. Order matches `dependencies` (both iterate file.imports).
+            let resolved = match repo_map.file_index_of(&deps_input.file_path) {
+                Some(idx) => {
+                    let graph = repo_map.module_graph();
+                    let files = repo_map.get_all_files();
+                    graph
+                        .imports(idx)
+                        .iter()
+                        .map(|imp| resolved_import_json(imp, files))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            (dependencies, resolved)
+        };
 
         let result = json!({
             "status": "success",
             "file_path": deps_input.file_path,
-            "dependencies": dependencies
+            "dependencies": dependencies,
+            "resolved": resolved
         });
 
         Ok(ToolResult::success(result))
+    }
+
+    async fn find_importers(&self, input: Value) -> Result<ToolResult> {
+        let importers_input: FindImportersInput =
+            serde_json::from_value(input).context("Invalid find_importers input")?;
+        let transitive = importers_input.transitive.unwrap_or(false);
+
+        let importers: Option<Vec<String>> = {
+            let repo_map = self.repo_map.lock().unwrap();
+            repo_map
+                .resolve_file_index(&importers_input.file)
+                .map(|idx| {
+                    let graph = repo_map.module_graph();
+                    let files = repo_map.get_all_files();
+                    let indices = if transitive {
+                        graph.transitive_importers(idx)
+                    } else {
+                        graph.importers(idx).to_vec()
+                    };
+                    indices
+                        .into_iter()
+                        .filter_map(|i| files.get(i).map(|f| f.file_path.clone()))
+                        .collect()
+                })
+        };
+
+        match importers {
+            Some(importers) => Ok(ToolResult::success(json!({
+                "status": "success",
+                "file": importers_input.file,
+                "transitive": transitive,
+                "count": importers.len(),
+                "importers": importers,
+            }))),
+            None => Ok(ToolResult::error(format!(
+                "file not found in the index: {}",
+                importers_input.file
+            ))),
+        }
+    }
+
+    async fn get_dependency_graph(&self, input: Value) -> Result<ToolResult> {
+        let graph_input: GetDependencyGraphInput =
+            serde_json::from_value(input).unwrap_or(GetDependencyGraphInput { scope: None });
+        let scope = graph_input.scope.as_deref();
+
+        let (files_in_scope, edges, cycles) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            let graph = repo_map.module_graph();
+            let files = repo_map.get_all_files();
+
+            let in_scope = |idx: usize| -> bool {
+                match (scope, files.get(idx)) {
+                    (Some(prefix), Some(f)) => f.file_path.contains(prefix),
+                    (None, _) => true,
+                    _ => false,
+                }
+            };
+            let path_of = |idx: usize| files.get(idx).map(|f| f.file_path.clone());
+
+            let files_in_scope: Vec<String> = (0..files.len())
+                .filter(|&i| in_scope(i))
+                .filter_map(path_of)
+                .collect();
+
+            let edges: Vec<Value> = graph
+                .file_edges()
+                .into_iter()
+                .filter(|&(from, to)| in_scope(from) && in_scope(to))
+                .filter_map(|(from, to)| {
+                    Some(json!({ "from": path_of(from)?, "to": path_of(to)? }))
+                })
+                .collect();
+
+            // Report a cycle only when all its members are in scope.
+            let cycles: Vec<Value> = graph
+                .cycles()
+                .into_iter()
+                .filter(|c| c.iter().all(|&i| in_scope(i)))
+                .map(|c| {
+                    let members: Vec<String> = c.into_iter().filter_map(path_of).collect();
+                    json!(members)
+                })
+                .collect();
+
+            (files_in_scope, edges, cycles)
+        };
+
+        Ok(ToolResult::success(json!({
+            "status": "success",
+            "scope": scope,
+            "files": files_in_scope,
+            "edges": edges,
+            "cycles": cycles,
+            "cycle_count": cycles.len(),
+        })))
     }
 
     async fn find_callers(&self, input: Value) -> Result<ToolResult> {
@@ -819,7 +971,34 @@ fn parse_type_kind(s: &str) -> Option<TypeKind> {
     }
 }
 
+/// Render one resolved import as `{module_path, status, target_file}`. `status` is
+/// from the closed set `file | external | unresolved`; `target_file` is the resolved
+/// path for `file`, else null. Additive to get_dependencies (raw strings stay).
+fn resolved_import_json(imp: &ResolvedImport, files: &[TreeNode]) -> Value {
+    let (status, target_file) = match &imp.target {
+        ImportTarget::File(idx) => ("file", files.get(*idx).map(|f| f.file_path.clone())),
+        ImportTarget::External(_) => ("external", None),
+        ImportTarget::Unresolved(_) => ("unresolved", None),
+    };
+    json!({
+        "module_path": imp.module_path,
+        "status": status,
+        "target_file": target_file,
+    })
+}
+
 // Input types for tool functions
+#[derive(Debug, Deserialize)]
+struct FindImportersInput {
+    file: String,
+    transitive: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetDependencyGraphInput {
+    scope: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct SearchFunctionsInput {
     pattern: String,
@@ -907,7 +1086,7 @@ mod tests {
         let tools = create_mock_tools();
         let schemas = tools.get_tool_schemas();
 
-        assert_eq!(schemas.len(), 8, "Should have exactly 8 tool schemas");
+        assert_eq!(schemas.len(), 10, "Should have exactly 10 tool schemas");
 
         let tool_names: Vec<_> = schemas.iter().map(|s| &s.name).collect();
         assert!(tool_names.contains(&&"search_functions".to_string()));
@@ -918,6 +1097,8 @@ mod tests {
         assert!(tool_names.contains(&&"trace_callers".to_string()));
         assert!(tool_names.contains(&&"analyze_impact".to_string()));
         assert!(tool_names.contains(&&"get_repository_tree".to_string()));
+        assert!(tool_names.contains(&&"find_importers".to_string()));
+        assert!(tool_names.contains(&&"get_dependency_graph".to_string()));
 
         // The graph tools' descriptions must explain the ambiguity vocabulary so an
         // agent knows candidate callers are not confirmed (P0-4).
@@ -1717,6 +1898,140 @@ mod tests {
 
     // === Integration Tests ===
 
+    // A resolvable Rust import chain a -> b -> c (each `use crate::<next>`), for the
+    // module-graph tools. Paths are chosen so the Rust resolver's suffix match finds
+    // `<next>.rs`.
+    fn create_tools_with_import_chain() -> LocalAnalysisTools {
+        use crate::types::{ImportStatement, TreeNode};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |file: &str, imports: &[&str]| {
+                let path = format!("/repo/src/{}.rs", file);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                for spec in imports {
+                    node.imports.push(
+                        ImportStatement::new(spec.to_string(), path.clone()).with_external(false),
+                    );
+                }
+                node.content_hash = format!("h_{}", file);
+                node
+            };
+            rm.add_file(mk("a", &["crate::b"])).unwrap();
+            rm.add_file(mk("b", &["crate::c"])).unwrap();
+            rm.add_file(mk("c", &[])).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    #[tokio::test]
+    async fn test_find_importers_direct_and_transitive() {
+        let tools = create_tools_with_import_chain();
+
+        // Direct importers of c: only b.
+        let direct = tools
+            .execute_tool("find_importers", json!({ "file": "/repo/src/c.rs" }))
+            .await
+            .unwrap();
+        assert_eq!(direct.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(direct.data["importers"][0], "/repo/src/b.rs");
+
+        // Transitive importers of c: b and a.
+        let trans = tools
+            .execute_tool(
+                "find_importers",
+                json!({ "file": "/repo/src/c.rs", "transitive": true }),
+            )
+            .await
+            .unwrap();
+        let importers: Vec<&str> = trans.data["importers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(importers.len(), 2);
+        assert!(importers.contains(&"/repo/src/a.rs"));
+        assert!(importers.contains(&"/repo/src/b.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_find_importers_unknown_file_errors() {
+        let tools = create_tools_with_import_chain();
+        let result = tools
+            .execute_tool("find_importers", json!({ "file": "/nope.rs" }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_get_dependencies_keeps_raw_and_adds_resolved() {
+        let tools = create_tools_with_import_chain();
+        let result = tools
+            .execute_tool("get_dependencies", json!({ "file_path": "/repo/src/a.rs" }))
+            .await
+            .unwrap();
+        // Old field unchanged: raw module-path strings.
+        assert_eq!(result.data["dependencies"][0], "crate::b");
+        // New field: resolved status + target file.
+        let resolved = &result.data["resolved"][0];
+        assert_eq!(resolved["module_path"], "crate::b");
+        assert_eq!(resolved["status"], "file");
+        assert_eq!(resolved["target_file"], "/repo/src/b.rs");
+    }
+
+    #[tokio::test]
+    async fn test_get_dependency_graph_edges_and_no_cycle() {
+        let tools = create_tools_with_import_chain();
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.data["files"].as_array().unwrap().len(), 3);
+        // Two resolved edges: a->b, b->c. Acyclic.
+        assert_eq!(result.data["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(result.data["cycle_count"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_dependency_graph_reports_cycle() {
+        use crate::types::{ImportStatement, TreeNode};
+        // a -> b -> a: a real import cycle.
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |file: &str, dep: &str| {
+                let path = format!("/repo/src/{}.rs", file);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.imports.push(
+                    ImportStatement::new(format!("crate::{dep}"), path.clone())
+                        .with_external(false),
+                );
+                node.content_hash = format!("h_{}", file);
+                node
+            };
+            rm.add_file(mk("a", "b")).unwrap();
+            rm.add_file(mk("b", "a")).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.data["cycle_count"].as_u64().unwrap(), 1);
+        let cycle: Vec<&str> = result.data["cycles"][0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(cycle.len(), 2);
+        assert!(cycle.contains(&"/repo/src/a.rs"));
+        assert!(cycle.contains(&"/repo/src/b.rs"));
+    }
+
     #[tokio::test]
     async fn test_all_tools_execute_without_panic() {
         let tools = create_mock_tools();
@@ -1729,6 +2044,8 @@ mod tests {
             "trace_callers",
             "analyze_impact",
             "get_repository_tree",
+            "find_importers",
+            "get_dependency_graph",
         ];
 
         for tool_name in tool_names {
@@ -1741,6 +2058,8 @@ mod tests {
                 "trace_callers" => json!({"function_name": "test"}),
                 "analyze_impact" => json!({"function_name": "test"}),
                 "get_repository_tree" => json!({}),
+                "find_importers" => json!({"file": "/test.rs"}),
+                "get_dependency_graph" => json!({}),
                 _ => json!({}),
             };
 
