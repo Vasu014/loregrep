@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Cancel an in-progress run when new commits are pushed to the same PR/branch, so
+# stale runs don't pile up (and burn minutes) behind the latest one.
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
