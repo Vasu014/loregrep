@@ -1595,7 +1595,6 @@ dependencies = [
  "tree-sitter-typescript",
  "unicode-segmentation",
  "uuid",
- "walkdir",
  "wiremock",
  "xxhash-rust",
 ]
