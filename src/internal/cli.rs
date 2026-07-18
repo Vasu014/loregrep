@@ -136,13 +136,46 @@ impl CliApp {
     }
 
     /// Execute a single analysis tool and print its `ToolResult` as JSON to stdout.
-    /// Scans the target path first to populate the index; all diagnostics go to stderr,
-    /// so stdout carries only the JSON result (for agent/tool consumption).
+    ///
+    /// To avoid rescanning the repository on every invocation, this first tries a
+    /// persisted per-repo index cache (`<path>/.loregrep/index.cache`): if a fresh
+    /// cache exists it is loaded and the scan is skipped; otherwise the path is
+    /// scanned and the resulting index is saved for next time. Cache use is
+    /// opportunistic (no flag required). All diagnostics go to stderr, so stdout
+    /// carries only the JSON result (for agent/tool consumption).
     pub async fn exec_tool(&mut self, args: ExecToolArgs) -> Result<()> {
-        self.loregrep
-            .scan(&args.path.to_string_lossy())
-            .await
-            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+        let cache_path = LoreGrep::default_cache_path(&args.path);
+
+        // Try to reuse a fresh cache; fall back to scanning on any miss/failure.
+        let loaded_from_cache = if self.loregrep.is_cache_fresh(&cache_path, &args.path) {
+            match self.loregrep.load_index(&cache_path) {
+                Ok(()) => {
+                    eprintln!("Loaded index cache from {}", cache_path.display());
+                    true
+                }
+                Err(e) => {
+                    eprintln!("Cache load failed ({}); rescanning", e);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !loaded_from_cache {
+            self.loregrep
+                .scan(&args.path.to_string_lossy())
+                .await
+                .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+            // Persist the freshly built index so the next invocation can skip the
+            // scan. A save failure is non-fatal: warn and continue.
+            if let Err(e) = self.loregrep.save_index(&cache_path) {
+                eprintln!("Warning: failed to save index cache: {}", e);
+            } else {
+                eprintln!("Saved index cache to {}", cache_path.display());
+            }
+        }
 
         let params: serde_json::Value = serde_json::from_str(&args.params)
             .map_err(|e| anyhow::anyhow!("Invalid --params JSON: {}", e))?;
@@ -731,9 +764,15 @@ impl CliApp {
 
     // Helper methods
 
-    async fn save_cache(&self, _root_path: &Path) -> Result<()> {
-        // Cache operations would be implemented here
-        // For now, this is a placeholder
+    /// Persist the current in-memory index to the per-repo cache
+    /// (`<root>/.loregrep/index.cache`) so later invocations can skip rescanning.
+    /// Diagnostics go to stderr only; stdout is untouched.
+    async fn save_cache(&self, root_path: &Path) -> Result<()> {
+        let cache_path = LoreGrep::default_cache_path(root_path);
+        self.loregrep
+            .save_index(&cache_path)
+            .map_err(|e| anyhow::anyhow!("Failed to save index cache: {}", e))?;
+        eprintln!("Saved index cache to {}", cache_path.display());
         Ok(())
     }
 }
@@ -961,6 +1000,77 @@ struct PrivateStruct {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         assert!(count >= 1, "expected exec-tool scan to index exec_target");
+    }
+
+    #[test]
+    async fn test_exec_tool_persists_and_reuses_cache() {
+        // First exec-tool invocation scans and writes a per-repo index cache;
+        // a second, fresh CliApp on the same path finds that cache fresh and
+        // loads it (proving repeated use does not require a rescan).
+        let temp_dir = TempDir::new().unwrap();
+        create_test_rust_file(
+            &temp_dir,
+            "cached.rs",
+            "pub fn cached_target() -> i32 { 7 }\n",
+        );
+
+        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        assert!(
+            !cache_path.exists(),
+            "no cache should exist before first run"
+        );
+
+        // First invocation: scans, then persists the index.
+        {
+            let config = create_test_config();
+            let mut app = CliApp::new(config, false, false).await.unwrap();
+            let args = ExecToolArgs {
+                tool: "search_functions".to_string(),
+                params: r#"{"pattern":"cached_target"}"#.to_string(),
+                path: temp_dir.path().to_path_buf(),
+            };
+            assert!(app.exec_tool(args).await.is_ok());
+        }
+        assert!(
+            cache_path.exists(),
+            "first exec-tool run should have written the index cache"
+        );
+
+        // Second invocation with a brand-new app: the cache is fresh and used.
+        let config = create_test_config();
+        let mut app2 = CliApp::new(config, false, false).await.unwrap();
+        assert!(
+            app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
+            "the just-written cache should be considered fresh"
+        );
+
+        let args = ExecToolArgs {
+            tool: "search_functions".to_string(),
+            params: r#"{"pattern":"cached_target"}"#.to_string(),
+            path: temp_dir.path().to_path_buf(),
+        };
+        assert!(app2.exec_tool(args).await.is_ok());
+
+        // The cache-loaded index resolves the function (loaded, not empty).
+        assert!(app2.loregrep.is_scanned());
+        let result = app2
+            .loregrep
+            .execute_tool(
+                "search_functions",
+                serde_json::json!({"pattern": "cached_target"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        let count = result
+            .data
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            count >= 1,
+            "cache-loaded index should contain cached_target"
+        );
     }
 
     #[tokio::test]

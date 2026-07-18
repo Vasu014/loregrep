@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::analyzers::{
@@ -12,6 +13,7 @@ use crate::core::{LoreGrepError, Result, ScanResult, ToolResult, ToolSchema};
 use crate::internal::{ai_tools::LocalAnalysisTools, config::FileScanningConfig};
 use crate::scanner::discovery::RepositoryScanner;
 use crate::storage::memory::RepoMap;
+use crate::storage::persistence::PersistenceManager;
 
 /// The main struct for interacting with LoreGrep
 #[derive(Clone)]
@@ -437,6 +439,122 @@ impl LoreGrep {
             Err(_) => return false,
         };
         repo_map.get_metadata().total_files > 0
+    }
+
+    /// Return the stable, per-repository cache path for a scanned root:
+    /// `<root>/.loregrep/index.cache`.
+    ///
+    /// This is the location the CLI reads from / writes to so that repeated
+    /// invocations on the same repository can reuse a previously persisted
+    /// index instead of rescanning. The containing `.loregrep/` directory is
+    /// created on demand by [`LoreGrep::save_index`].
+    pub fn default_cache_path<P: AsRef<Path>>(root: P) -> PathBuf {
+        root.as_ref().join(".loregrep").join("index.cache")
+    }
+
+    /// Split a full cache file path (e.g. `<root>/.loregrep/index.cache`) into
+    /// the `(directory, name)` pair expected by [`PersistenceManager`], where
+    /// `name` is the file stem (`index`) and the manager re-appends `.cache`.
+    fn cache_dir_and_name(cache_path: &Path) -> Result<(PathBuf, String)> {
+        let dir = cache_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let name = cache_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                LoreGrepError::InternalError(format!("Invalid cache path: {:?}", cache_path))
+            })?
+            .to_string();
+        Ok((dir, name))
+    }
+
+    /// Persist the current in-memory index to `cache_path` (gzip-compressed
+    /// JSON via [`PersistenceManager`]). Creates the parent directory if needed.
+    ///
+    /// The written cache embeds the crate version and a content hash so a stale
+    /// or version-mismatched cache is rejected on load rather than silently
+    /// serving wrong results.
+    pub fn save_index(&self, cache_path: &Path) -> Result<()> {
+        let (dir, name) = Self::cache_dir_and_name(cache_path)?;
+        let manager = PersistenceManager::new(&dir)?;
+
+        let repo_map = self
+            .repo_map
+            .lock()
+            .map_err(|e| LoreGrepError::InternalError(format!("Failed to lock repo map: {}", e)))?;
+        manager.save_to_disk(&repo_map, &name)?;
+        Ok(())
+    }
+
+    /// Load a persisted index from `cache_path`, replacing the current in-memory
+    /// index. After a successful load, [`LoreGrep::is_scanned`] reflects the
+    /// loaded state.
+    ///
+    /// [`PersistenceManager::load_from_disk`] enforces the crate-version gate:
+    /// a cache written by a different version is rejected with an error so the
+    /// caller can fall back to rescanning.
+    pub fn load_index(&self, cache_path: &Path) -> Result<()> {
+        let (dir, name) = Self::cache_dir_and_name(cache_path)?;
+        let manager = PersistenceManager::new(&dir)?;
+        let loaded = manager.load_from_disk(&name)?;
+
+        let mut repo_map = self
+            .repo_map
+            .lock()
+            .map_err(|e| LoreGrepError::InternalError(format!("Failed to lock repo map: {}", e)))?;
+        *repo_map = loaded;
+        Ok(())
+    }
+
+    /// Freshness gate for a persisted cache. Returns `true` only when the cache
+    /// file exists and is at least as new as the repository `root`'s directory
+    /// modification time (the same heuristic used by the persistence layer).
+    ///
+    /// This is intentionally conservative: when either modification time cannot
+    /// be read, it returns `false` so the caller re-scans rather than trusting a
+    /// cache it cannot validate. The crate-version / content-hash gate is
+    /// additionally enforced at [`LoreGrep::load_index`] time.
+    pub fn is_cache_fresh(&self, cache_path: &Path, root: &Path) -> bool {
+        let cache_modified = match std::fs::metadata(cache_path).and_then(|m| m.modified()) {
+            Ok(m) => m,
+            Err(_) => return false, // missing/unreadable cache -> not fresh
+        };
+
+        // The cache is stale if ANY source file under `root` is newer than it.
+        // A directory's mtime does NOT change when an existing file's *content*
+        // is edited, so checking only the root dir mtime would serve stale
+        // results after an edit. Walk the files instead (O(files) stat, no reads),
+        // skipping heavy/irrelevant dirs and our own cache directory.
+        let mut newest: Option<std::time::SystemTime> = None;
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !matches!(
+                    name.as_ref(),
+                    ".loregrep" | ".git" | "target" | "node_modules"
+                )
+            })
+            .flatten()
+        {
+            if entry.file_type().is_file() {
+                if let Ok(md) = entry.metadata() {
+                    if let Ok(m) = md.modified() {
+                        if newest.is_none_or(|n| m > n) {
+                            newest = Some(m);
+                        }
+                    }
+                }
+            }
+        }
+
+        match newest {
+            Some(newest_file) => cache_modified >= newest_file,
+            None => true, // no source files -> trivially fresh
+        }
     }
 
     /// Print a comprehensive scan summary with language breakdown
@@ -1103,6 +1221,99 @@ mod tests {
             }
             _ => panic!("Unexpected error type"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_cache_stale_after_file_edit() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("lib.rs");
+        fs::write(&src, "pub fn a() -> i32 { 1 }\n").unwrap();
+
+        let mut lg = LoreGrep::builder().build().unwrap();
+        lg.scan(temp_dir.path().to_str().unwrap()).await.unwrap();
+        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        lg.save_index(&cache_path).unwrap();
+
+        // A freshly written cache is fresh.
+        assert!(lg.is_cache_fresh(&cache_path, temp_dir.path()));
+
+        // Editing a file's CONTENT must invalidate the cache. The file's mtime
+        // advances past the cache even though the directory's mtime does not, so a
+        // dir-mtime-only gate would wrongly report "fresh". Sleep past coarse
+        // filesystem mtime granularity so the edit is strictly newer.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&src, "pub fn b() -> i32 { 2 }\n").unwrap();
+        assert!(
+            !lg.is_cache_fresh(&cache_path, temp_dir.path()),
+            "cache must be stale after a source file content edit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_index_round_trip() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Scan a temp repo and record a tool result.
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("lib.rs"),
+            "pub fn persisted_fn() -> i32 { 42 }\npub struct PersistedStruct { pub x: i32 }\n",
+        )
+        .unwrap();
+
+        let mut original = LoreGrep::builder().build().unwrap();
+        original
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(original.is_scanned());
+
+        let before = original
+            .execute_tool("search_functions", json!({"pattern": "persisted_fn"}))
+            .await
+            .unwrap();
+        assert!(before.success);
+
+        // Persist the index to disk.
+        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        original.save_index(&cache_path).unwrap();
+        assert!(cache_path.exists(), "cache file should be written");
+
+        // A brand-new instance is empty until it loads the cache.
+        let fresh = LoreGrep::builder().build().unwrap();
+        assert!(!fresh.is_scanned());
+        fresh.load_index(&cache_path).unwrap();
+        assert!(
+            fresh.is_scanned(),
+            "is_scanned should reflect the loaded index"
+        );
+
+        // The same query returns the same functions from the loaded index.
+        let after = fresh
+            .execute_tool("search_functions", json!({"pattern": "persisted_fn"}))
+            .await
+            .unwrap();
+        assert!(after.success);
+        assert_eq!(
+            before.data.get("count"),
+            after.data.get("count"),
+            "loaded index should return the same result count as the original"
+        );
+        assert_eq!(
+            before.data.get("results"),
+            after.data.get("results"),
+            "loaded index should return identical results"
+        );
+
+        // Freshness gate: the just-written cache is fresh for its root.
+        assert!(fresh.is_cache_fresh(&cache_path, temp_dir.path()));
+        // A missing cache is never fresh.
+        let missing = temp_dir.path().join("nope").join("index.cache");
+        assert!(!fresh.is_cache_fresh(&missing, temp_dir.path()));
     }
 
     #[test]
