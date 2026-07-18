@@ -3,6 +3,6 @@
 
 pub use crate::internal::{
     cli::CliApp,
-    cli_types::{AnalyzeArgs, ScanArgs, SearchArgs},
+    cli_types::{AnalyzeArgs, ExecToolArgs, ScanArgs, SearchArgs},
     config::CliConfig,
 };

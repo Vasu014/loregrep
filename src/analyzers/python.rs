@@ -141,6 +141,7 @@ impl PythonAnalyzer {
         &self,
         function_node: &Node,
         function_sig: &FunctionSignature,
+        source: &str,
     ) -> (bool, bool, bool) {
         let mut is_method = false;
         let mut is_static = false;
@@ -158,7 +159,7 @@ impl PythonAnalyzer {
 
         if is_method {
             // Check for @staticmethod or @classmethod decorators
-            let decorators = self.extract_decorators(function_node, "");
+            let decorators = self.extract_decorators(function_node, source);
             for decorator in &decorators {
                 if decorator.contains("staticmethod") {
                     is_static = true;
@@ -450,7 +451,7 @@ impl LanguageAnalyzer for PythonAnalyzer {
             // Analyze method type and visibility
             if let Some(node) = function_node {
                 let (is_method, is_static_method, is_class_method) =
-                    self.analyze_method_type(&node, &function_sig);
+                    self.analyze_method_type(&node, &function_sig, source);
 
                 if is_method {
                     function_sig.is_static = is_static_method;
@@ -1012,6 +1013,41 @@ class User:
 
         let get_name_method = functions.iter().find(|f| f.name == "get_name").unwrap();
         assert!(get_name_method.is_public);
+    }
+
+    #[tokio::test]
+    async fn test_staticmethod_detected() {
+        // Regression: decorators were previously read from an empty source, so
+        // `@staticmethod` was never seen and a static method with a non-self
+        // first parameter was misclassified. With the real source passed
+        // through, `make` must be reported as static.
+        let analyzer = PythonAnalyzer::new().expect("Failed to create PythonAnalyzer");
+
+        let code = r#"
+class Factory:
+    @staticmethod
+    def make(x):
+        return x
+
+    @classmethod
+    def build(cls, y):
+        return y
+
+    def instance(self):
+        return self
+        "#;
+
+        let analysis = analyzer
+            .analyze_file(code, "test.py")
+            .await
+            .expect("Analysis failed");
+        let functions = &analysis.tree_node.functions;
+
+        let make = functions.iter().find(|f| f.name == "make").unwrap();
+        assert!(make.is_static, "@staticmethod should be reported as static");
+
+        let instance = functions.iter().find(|f| f.name == "instance").unwrap();
+        assert!(!instance.is_static, "instance method should not be static");
     }
 
     #[tokio::test]

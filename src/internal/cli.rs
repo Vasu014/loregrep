@@ -9,7 +9,7 @@ use crate::{
     LoreGrep,
     core::types::ScanResult as PublicScanResult,
     internal::{
-        cli_types::{AnalyzeArgs, ScanArgs, SearchArgs},
+        cli_types::{AnalyzeArgs, ExecToolArgs, ScanArgs, SearchArgs},
         config::CliConfig,
     },
 };
@@ -53,7 +53,7 @@ impl CliApp {
 
         // Create LoreGrep instance using public API
         let mut builder = LoreGrep::builder()
-            .with_rust_analyzer()
+            .with_all_analyzers() // Rust, Python, TypeScript/TSX
             .max_files(10000) // Default max files
             .cache_ttl(config.cache.ttl_hours * 3600) // Convert hours to seconds
             .include_patterns(config.file_scanning.include_patterns.clone())
@@ -132,6 +132,32 @@ impl CliApp {
             eprintln!("Total scan time: {:?}", start_time.elapsed());
         }
 
+        Ok(())
+    }
+
+    /// Execute a single analysis tool and print its `ToolResult` as JSON to stdout.
+    /// Scans the target path first to populate the index; all diagnostics go to stderr,
+    /// so stdout carries only the JSON result (for agent/tool consumption).
+    pub async fn exec_tool(&mut self, args: ExecToolArgs) -> Result<()> {
+        self.loregrep
+            .scan(&args.path.to_string_lossy())
+            .await
+            .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
+
+        let params: serde_json::Value = serde_json::from_str(&args.params)
+            .map_err(|e| anyhow::anyhow!("Invalid --params JSON: {}", e))?;
+
+        let result = self
+            .loregrep
+            .execute_tool(&args.tool, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("Tool execution failed: {}", e))?;
+
+        println!("{}", serde_json::to_string_pretty(&result)?);
+
+        if !result.success {
+            std::process::exit(1);
+        }
         Ok(())
     }
 
@@ -279,6 +305,14 @@ impl CliApp {
                 eprintln!("Output format: {}", args.format);
             }
 
+            // Scan the directory first to populate the in-memory RepoMap;
+            // `get_repository_tree` reads from that index, so without a scan a
+            // real run would print an empty tree.
+            self.loregrep
+                .scan(&args.file.to_string_lossy())
+                .await
+                .map_err(|e| anyhow::anyhow!("Directory scan failed: {}", e))?;
+
             // There is no dedicated "analyze_directory" tool; the repository
             // tree tool is the natural fit for a directory overview.
             let tool_result = self
@@ -318,7 +352,7 @@ impl CliApp {
                     "analyze_file",
                     serde_json::json!({
                         "file_path": args.file.to_string_lossy(),
-                        "include_source": true
+                        "include_content": true
                     }),
                 )
                 .await
@@ -891,6 +925,45 @@ struct PrivateStruct {
     }
 
     #[test]
+    async fn test_exec_tool_scans_and_executes() {
+        // exec-tool should scan the given path then run the named tool and succeed.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_rust_file(
+            &temp_dir,
+            "sample.rs",
+            "pub fn exec_target() -> i32 { 1 }\n",
+        );
+
+        let config = create_test_config();
+        let mut app = CliApp::new(config, false, false).await.unwrap();
+
+        let args = ExecToolArgs {
+            tool: "search_functions".to_string(),
+            params: r#"{"pattern":"exec_target"}"#.to_string(),
+            path: temp_dir.path().to_path_buf(),
+        };
+        // Success path returns Ok (prints JSON to stdout; no process exit).
+        assert!(app.exec_tool(args).await.is_ok());
+
+        // The exec-tool scan populated the index; the tool found the function.
+        let result = app
+            .loregrep
+            .execute_tool(
+                "search_functions",
+                serde_json::json!({"pattern": "exec_target"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        let count = result
+            .data
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(count >= 1, "expected exec-tool scan to index exec_target");
+    }
+
+    #[tokio::test]
     async fn test_analyze_directory_produces_output() {
         // Regression test for the `analyze <directory>` path, which used to call
         // a nonexistent `analyze_directory` tool. It now routes to
@@ -911,17 +984,9 @@ pub struct DirStruct {
         let config = create_test_config();
         let mut app = CliApp::new(config, false, false).await.unwrap();
 
-        // Scan first so the repository tree is populated.
-        let scan_args = ScanArgs {
-            path: temp_dir.path().to_path_buf(),
-            include: vec![],
-            exclude: vec![],
-            follow_symlinks: false,
-            cache: false,
-        };
-        app.scan(scan_args).await.unwrap();
-
-        // The analyze-directory branch should complete successfully.
+        // Do NOT scan manually here: the `analyze <directory>` path must scan
+        // the directory itself before reading the repository tree. Without that,
+        // a real run would print an empty tree.
         let analyze_args = AnalyzeArgs {
             file: temp_dir.path().to_path_buf(),
             format: "text".to_string(),
@@ -930,6 +995,12 @@ pub struct DirStruct {
             imports: false,
         };
         assert!(app.analyze(analyze_args).await.is_ok());
+
+        // The analyze path itself populated the index.
+        assert!(
+            app.loregrep.is_scanned(),
+            "analyze <directory> should have scanned the directory"
+        );
 
         // Exercise the underlying tool call and assert non-empty output.
         let tool_result = app
@@ -1013,6 +1084,57 @@ pub struct DirStruct {
 
         let result = app.analyze(analyze_args).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    async fn test_analyze_file_json_includes_content() {
+        // Regression: the single-file analyze branch passed `include_source`,
+        // but the analyze_file tool reads `include_content`, so source was never
+        // included. Verify the corrected key surfaces `content`, and that the
+        // old (wrong) key does not.
+        let temp_dir = TempDir::new().unwrap();
+        let rust_content = "pub fn simple() -> i32 { 1 }";
+        let file_path = create_test_rust_file(&temp_dir, "simple.rs", rust_content);
+
+        let config = create_test_config();
+        let app = CliApp::new(config, false, false).await.unwrap();
+
+        // Corrected key used by `analyze <file>` -> content present.
+        let with_content = app
+            .loregrep
+            .execute_tool(
+                "analyze_file",
+                serde_json::json!({
+                    "file_path": file_path.to_string_lossy(),
+                    "include_content": true
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(with_content.success);
+        assert_eq!(
+            with_content.data.get("content").and_then(|v| v.as_str()),
+            Some(rust_content),
+            "include_content: true should surface the file content"
+        );
+
+        // Old/wrong key is ignored by the tool -> no content field.
+        let wrong_key = app
+            .loregrep
+            .execute_tool(
+                "analyze_file",
+                serde_json::json!({
+                    "file_path": file_path.to_string_lossy(),
+                    "include_source": true
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(wrong_key.success);
+        assert!(
+            wrong_key.data.get("content").is_none(),
+            "the wrong key must not surface content"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{info, warn};
 
+use crate::analyzers::registry::RegistryHandle;
 use crate::internal::config::FileScanningConfig;
 
 #[derive(Clone)]
@@ -54,6 +55,11 @@ pub struct RepositoryScanner {
     language_detector: LanguageDetector,
     config: ScanConfig,
     scanning_config: FileScanningConfig,
+    /// Optional handle into the analyzer registry. When present, language
+    /// labeling is driven by the registered analyzers' extensions (so adding a
+    /// language needs no change here). When absent, the built-in
+    /// `LanguageDetector` fallback is used.
+    registry: Option<RegistryHandle>,
 }
 
 impl FileFilters {
@@ -170,7 +176,43 @@ impl RepositoryScanner {
             language_detector,
             config,
             scanning_config: scanning_config.clone(),
+            registry: None,
         })
+    }
+
+    /// Construct a scanner whose language labeling is driven by the analyzer
+    /// registry. Extensions of registered analyzers determine the language of
+    /// each discovered file, so no per-language edits are needed in this module
+    /// when a new analyzer is added.
+    pub fn new_with_registry(
+        scanning_config: &FileScanningConfig,
+        registry: RegistryHandle,
+        scan_config: Option<ScanConfig>,
+    ) -> Result<Self> {
+        let mut scanner = Self::new(scanning_config, scan_config)?;
+        scanner.registry = Some(registry);
+        Ok(scanner)
+    }
+
+    /// Determine the language label for a path, preferring the registry (when
+    /// present) and falling back to the built-in extension detector.
+    ///
+    /// The registry label wins when an analyzer is registered for the file's
+    /// extension (this keeps drop-in support for newly-registered languages).
+    /// When the registry does not recognize the extension, we fall back to the
+    /// built-in `LanguageDetector` so that files of a *known* language whose
+    /// analyzer simply isn't registered (e.g. Python when only Rust is
+    /// registered) are still discovered. This lets the scan loop emit its
+    /// helpful "No analyzer available for '<lang>' files" guidance instead of
+    /// silently dropping them at discovery. Genuinely-unknown extensions map to
+    /// "unknown" through both paths and are skipped by the scan loop.
+    fn resolve_language(&self, path: &Path) -> String {
+        if let Some(registry) = &self.registry {
+            if let Some(label) = registry.detect_language(&path.to_string_lossy()) {
+                return label;
+            }
+        }
+        self.language_detector.detect_language(path)
     }
 
     pub fn scan<P: AsRef<Path>>(&self, root_path: P) -> Result<ScanResult> {
@@ -219,8 +261,8 @@ impl RepositoryScanner {
                         continue;
                     }
 
-                    // Detect language
-                    let language = self.language_detector.detect_language(path);
+                    // Detect language (via the registry when available)
+                    let language = self.resolve_language(path);
 
                     // Skip unknown languages for now
                     if language == "unknown" {
@@ -306,7 +348,7 @@ impl RepositoryScanner {
 
                     if let Ok(metadata) = entry.metadata() {
                         if self.filters.should_include(path, metadata.len()) {
-                            let language = self.language_detector.detect_language(path);
+                            let language = self.resolve_language(path);
                             if language != "unknown" {
                                 count += 1;
                                 *languages.entry(language).or_insert(0) += 1;
@@ -331,7 +373,7 @@ impl RepositoryScanner {
 
     /// Get language for a specific file
     pub fn detect_file_language(&self, path: &Path) -> String {
-        self.language_detector.detect_language(path)
+        self.resolve_language(path)
     }
 }
 
@@ -383,6 +425,40 @@ mod tests {
             detector.detect_language(Path::new("unknown.txt")),
             "unknown"
         );
+    }
+
+    #[test]
+    fn test_resolve_language_falls_back_for_unregistered_known_language() -> Result<()> {
+        use crate::analyzers::LanguageAnalyzerRegistry;
+        use crate::analyzers::registry::{DefaultLanguageRegistry, RegistryHandle};
+        use crate::analyzers::rust::RustAnalyzer;
+
+        // Registry with ONLY Rust registered.
+        let mut registry = DefaultLanguageRegistry::new();
+        registry.register(Box::new(RustAnalyzer::new().unwrap()))?;
+        let handle = RegistryHandle::new(&registry);
+
+        let config = create_test_config();
+        let scanner = RepositoryScanner::new_with_registry(&config, handle, None)?;
+
+        // Rust is registered -> label from registry.
+        assert_eq!(scanner.detect_file_language(Path::new("main.rs")), "rust");
+
+        // Python is a KNOWN language whose analyzer is not registered. It must
+        // still be discovered (labeled "python"), not dropped as "unknown", so
+        // the scan loop can emit its "no analyzer for python" guidance.
+        assert_eq!(
+            scanner.detect_file_language(Path::new("script.py")),
+            "python"
+        );
+
+        // Genuinely-unknown extensions remain "unknown".
+        assert_eq!(
+            scanner.detect_file_language(Path::new("readme.txt")),
+            "unknown"
+        );
+
+        Ok(())
     }
 
     #[test]

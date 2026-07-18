@@ -9,10 +9,10 @@ pub trait LanguageAnalyzerRegistry: Send + Sync {
     fn register(&mut self, analyzer: Box<dyn LanguageAnalyzer>) -> Result<()>;
 
     /// Get an analyzer by language name
-    fn get_by_language(&self, language: &str) -> Option<&dyn LanguageAnalyzer>;
+    fn get_by_language(&self, language: &str) -> Option<Arc<dyn LanguageAnalyzer>>;
 
     /// Get an analyzer by file extension
-    fn get_by_extension(&self, extension: &str) -> Option<&dyn LanguageAnalyzer>;
+    fn get_by_extension(&self, extension: &str) -> Option<Arc<dyn LanguageAnalyzer>>;
 
     /// Detect language from file path (extension-based for now)
     fn detect_language(&self, file_path: &str, content: &str) -> Option<String>;
@@ -27,8 +27,12 @@ pub trait LanguageAnalyzerRegistry: Send + Sync {
 /// Default implementation of the language analyzer registry
 #[derive(Clone)]
 pub struct DefaultLanguageRegistry {
-    /// Map from language name to analyzer
-    analyzers_by_language: Arc<RwLock<HashMap<String, Box<dyn LanguageAnalyzer>>>>,
+    /// Map from language name to analyzer.
+    ///
+    /// Analyzers are stored behind an `Arc` so they can be cheaply cloned out
+    /// of the registry (via the `RwLock`) and shared across the scan loop and
+    /// the analysis tools without reconstructing per-file.
+    analyzers_by_language: Arc<RwLock<HashMap<String, Arc<dyn LanguageAnalyzer>>>>,
     /// Map from file extension to language name for fast lookup
     extensions_to_language: Arc<RwLock<HashMap<String, String>>>,
 }
@@ -40,6 +44,24 @@ impl DefaultLanguageRegistry {
             analyzers_by_language: Arc::new(RwLock::new(HashMap::new())),
             extensions_to_language: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Resolve the analyzer for a file path by mapping its extension to a
+    /// registered language. Returns a cloned `Arc` handle, or `None` when no
+    /// analyzer is registered for the file's extension.
+    pub fn get_analyzer_for_path(&self, file_path: &str) -> Option<Arc<dyn LanguageAnalyzer>> {
+        let extension = Self::extract_extension(file_path)?;
+        let language = self
+            .extensions_to_language
+            .read()
+            .ok()?
+            .get(&extension)
+            .cloned()?;
+        self.analyzers_by_language
+            .read()
+            .ok()?
+            .get(&language)
+            .cloned()
     }
 
     /// Extract file extension from path (without the dot)
@@ -89,7 +111,9 @@ impl LanguageAnalyzerRegistry for DefaultLanguageRegistry {
                 });
             }
 
-            analyzers.insert(language.clone(), analyzer);
+            // Store the analyzer behind an `Arc` so it can be handed out (cloned)
+            // to callers that resolve analyzers by language/extension/path.
+            analyzers.insert(language.clone(), Arc::from(analyzer));
         }
 
         // Register the file extensions
@@ -113,16 +137,24 @@ impl LanguageAnalyzerRegistry for DefaultLanguageRegistry {
         Ok(())
     }
 
-    fn get_by_language(&self, language: &str) -> Option<&dyn LanguageAnalyzer> {
-        // Note: This is a simplified implementation. In a real-world scenario,
-        // we'd need to handle the lifetime issues with RwLock guards properly.
-        // For now, we'll return None and handle this in the integration phase.
-        None
+    fn get_by_language(&self, language: &str) -> Option<Arc<dyn LanguageAnalyzer>> {
+        // Clone the `Arc` out from behind the read lock so the caller owns a
+        // shared handle to the analyzer without borrowing the lock guard.
+        self.analyzers_by_language
+            .read()
+            .ok()?
+            .get(language)
+            .cloned()
     }
 
-    fn get_by_extension(&self, extension: &str) -> Option<&dyn LanguageAnalyzer> {
-        // Same note as above - simplified for now
-        None
+    fn get_by_extension(&self, extension: &str) -> Option<Arc<dyn LanguageAnalyzer>> {
+        let language = self
+            .extensions_to_language
+            .read()
+            .ok()?
+            .get(extension)
+            .cloned()?;
+        self.get_by_language(&language)
     }
 
     fn detect_language(&self, file_path: &str, _content: &str) -> Option<String> {
@@ -149,9 +181,15 @@ impl LanguageAnalyzerRegistry for DefaultLanguageRegistry {
     }
 }
 
-/// Helper struct for working with the registry in a thread-safe manner
+/// Helper struct for working with the registry in a thread-safe manner.
+///
+/// A handle shares the registry's underlying maps (via `Arc`), so it always
+/// reflects analyzers registered on the registry it was created from. It is
+/// cheap to clone and can be embedded in `Clone` types such as the scanner and
+/// the analysis tools.
+#[derive(Clone)]
 pub struct RegistryHandle {
-    analyzers_by_language: Arc<RwLock<HashMap<String, Box<dyn LanguageAnalyzer>>>>,
+    analyzers_by_language: Arc<RwLock<HashMap<String, Arc<dyn LanguageAnalyzer>>>>,
     extensions_to_language: Arc<RwLock<HashMap<String, String>>>,
 }
 
@@ -163,17 +201,14 @@ impl RegistryHandle {
         }
     }
 
-    /// Get analyzer by language name (thread-safe)
-    pub fn get_analyzer_by_language(&self, language: &str) -> Option<String> {
-        if let Ok(analyzers) = self.analyzers_by_language.read() {
-            if analyzers.contains_key(language) {
-                Some(language.to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    /// Get analyzer by language name (thread-safe). Returns a cloned `Arc`
+    /// handle to the analyzer, or `None` if the language is not registered.
+    pub fn get_analyzer_by_language(&self, language: &str) -> Option<Arc<dyn LanguageAnalyzer>> {
+        self.analyzers_by_language
+            .read()
+            .ok()?
+            .get(language)
+            .cloned()
     }
 
     /// Get language by extension (thread-safe)
@@ -189,6 +224,13 @@ impl RegistryHandle {
     pub fn detect_language(&self, file_path: &str) -> Option<String> {
         let extension = DefaultLanguageRegistry::extract_extension(file_path)?;
         self.get_language_by_extension(&extension)
+    }
+
+    /// Resolve the analyzer for a file path: extension -> language -> analyzer.
+    /// Returns a cloned `Arc` handle, or `None` when no analyzer matches.
+    pub fn get_analyzer_for_path(&self, file_path: &str) -> Option<Arc<dyn LanguageAnalyzer>> {
+        let language = self.detect_language(file_path)?;
+        self.get_analyzer_by_language(&language)
     }
 }
 
@@ -315,6 +357,18 @@ mod tests {
                 .list_supported_extensions()
                 .contains(&"pyi".to_string())
         );
+
+        // The analyzer is now retrievable by language, by extension, and by path.
+        let by_lang = registry.get_by_language("python");
+        assert!(by_lang.is_some());
+        assert_eq!(by_lang.unwrap().language(), "python");
+        assert!(registry.get_by_extension("py").is_some());
+        assert!(registry.get_analyzer_for_path("module.pyx").is_some());
+
+        // Unknown language / extension / path still resolve to None.
+        assert!(registry.get_by_language("rust").is_none());
+        assert!(registry.get_by_extension("rs").is_none());
+        assert!(registry.get_analyzer_for_path("main.rs").is_none());
     }
 
     #[test]

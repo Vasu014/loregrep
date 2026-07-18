@@ -1,7 +1,4 @@
-use crate::{
-    analyzers::{LanguageAnalyzer, rust::RustAnalyzer},
-    storage::memory::RepoMap,
-};
+use crate::{analyzers::registry::RegistryHandle, storage::memory::RepoMap};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -12,15 +9,15 @@ use crate::core::types::ToolSchema;
 #[derive(Clone)]
 pub struct LocalAnalysisTools {
     repo_map: Arc<Mutex<RepoMap>>,
-    rust_analyzer: RustAnalyzer,
+    /// Handle into the language-analyzer registry. Analysis is dispatched to the
+    /// analyzer that matches each file's language, rather than a single
+    /// hard-coded analyzer.
+    registry: RegistryHandle,
 }
 
 impl LocalAnalysisTools {
-    pub fn new(repo_map: Arc<Mutex<RepoMap>>, rust_analyzer: RustAnalyzer) -> Self {
-        Self {
-            repo_map,
-            rust_analyzer,
-        }
+    pub fn new(repo_map: Arc<Mutex<RepoMap>>, registry: RegistryHandle) -> Self {
+        Self { repo_map, registry }
     }
 
     pub fn get_tool_schemas(&self) -> Vec<ToolSchema> {
@@ -205,11 +202,26 @@ impl LocalAnalysisTools {
         let analyze_input: AnalyzeFileInput =
             serde_json::from_value(input).context("Invalid analyze_file input")?;
 
+        // Resolve the analyzer for this file's language via the registry. If no
+        // analyzer is registered for the file's extension, report a clear error
+        // instead of silently analyzing it with the wrong language.
+        let analyzer = match self
+            .registry
+            .get_analyzer_for_path(&analyze_input.file_path)
+        {
+            Some(analyzer) => analyzer,
+            None => {
+                return Ok(ToolResult::error(format!(
+                    "unsupported language for {}",
+                    analyze_input.file_path
+                )));
+            }
+        };
+
         // Try to read the file and analyze it
         match tokio::fs::read_to_string(&analyze_input.file_path).await {
             Ok(content) => {
-                let file_analysis = self
-                    .rust_analyzer
+                let file_analysis = analyzer
                     .analyze_file(&content, &analyze_input.file_path)
                     .await?;
 
@@ -567,6 +579,8 @@ struct GetRepositoryTreeInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzers::registry::{DefaultLanguageRegistry, LanguageAnalyzerRegistry};
+    use crate::analyzers::rust::RustAnalyzer;
     use crate::internal::config::FileScanningConfig;
 
     // Helper to create minimal test instances
@@ -574,15 +588,19 @@ mod tests {
         Arc::new(Mutex::new(RepoMap::new()))
     }
 
-    fn create_test_analyzer() -> RustAnalyzer {
-        RustAnalyzer::new().unwrap()
+    // Build a registry handle with the Rust analyzer registered, mirroring the
+    // default configuration used throughout the crate.
+    fn create_test_registry() -> RegistryHandle {
+        let mut registry = DefaultLanguageRegistry::new();
+        registry
+            .register(Box::new(RustAnalyzer::new().unwrap()))
+            .unwrap();
+        RegistryHandle::new(&registry)
     }
 
     fn create_mock_tools() -> LocalAnalysisTools {
         let repo_map = create_test_repo_map();
-        let rust_analyzer = create_test_analyzer();
-
-        LocalAnalysisTools::new(repo_map, rust_analyzer)
+        LocalAnalysisTools::new(repo_map, create_test_registry())
     }
 
     // === Tool Schema Tests ===
@@ -942,8 +960,7 @@ mod tests {
     async fn test_repository_tree_builds_with_scanned_files() {
         // Test that the repository tree tool properly builds the tree when files are present
         let repo_map = create_test_repo_map();
-        let rust_analyzer = create_test_analyzer();
-        let tools = LocalAnalysisTools::new(repo_map.clone(), rust_analyzer);
+        let tools = LocalAnalysisTools::new(repo_map.clone(), create_test_registry());
 
         // Add some test files to the repo map
         {
