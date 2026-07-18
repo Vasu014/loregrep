@@ -38,6 +38,12 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+      # Layer 1 retrieval eval: runs the real exec-tool CLI against pinned fixtures
+      # with gold answer sets and fails on any non-documented regression. Also
+      # catches stdout-purity / exit-code regressions that break agents.
+      - name: Retrieval eval (Layer 1)
+        run: python3 evals/retrieval/run.py
+
       # Clippy is currently INFORMATIONAL (continue-on-error) — the codebase has a
       # backlog of warnings, much of it in code slated for removal/rewrite in the
       # TUI-strip and dependency-upgrade phases. This gate is promoted to blocking

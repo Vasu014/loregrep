@@ -193,6 +193,9 @@ data/
 test-results/
 test-output/
 
+# Eval harness (Layer 1) runner output
+evals/retrieval/results/
+
 # Backup files
 *.bak
 *.backup

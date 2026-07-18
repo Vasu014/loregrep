@@ -1,0 +1,8 @@
+[package]
+name = "rust-basic-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-basic-fixture"
+path = "src/main.rs"
