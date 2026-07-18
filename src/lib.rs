@@ -133,13 +133,15 @@
 //! // Get tool definitions for your AI system
 //! let tools = LoreGrep::get_tool_definitions();
 //!
-//! // 6 tools available:
+//! // 8 tools available:
 //! // 1. search_functions      - Find functions by name/pattern
-//! // 2. search_structs        - Find structures by name/pattern  
+//! // 2. search_structs        - Find structures by name/pattern
 //! // 3. analyze_file          - Get detailed file analysis
 //! // 4. get_dependencies      - Find imports/exports for a file
-//! // 5. find_callers          - Get function call sites
-//! // 6. get_repository_tree   - Get repository structure and overview
+//! // 5. find_callers          - Get direct function call sites
+//! // 6. trace_callers         - Trace transitive (upstream) callers via the call graph
+//! // 7. analyze_impact        - Compute change blast radius via the call graph
+//! // 8. get_repository_tree   - Get repository structure and overview
 //! ```
 //!
 //! ## Architecture Overview

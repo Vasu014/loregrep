@@ -22,6 +22,16 @@ pub struct CallSite {
     pub caller_function: Option<String>,
 }
 
+/// A function that transitively calls a target function, discovered by walking
+/// UP the call graph. `depth` is the number of hops from the target (1 = direct
+/// caller).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransitiveCaller {
+    pub function_name: String,
+    pub file_path: String,
+    pub depth: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryResult<T> {
     pub items: Vec<T>,
@@ -485,6 +495,75 @@ impl RepoMap {
             .get(function_name)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Walk UP the call graph to find every function that TRANSITIVELY calls
+    /// `function_name`.
+    ///
+    /// BFS starting from the target: level-1 callers are the distinct enclosing
+    /// functions (`caller_function`) taken from `find_function_callers`; for each
+    /// of those we recurse to find ITS callers, and so on. `depth` records the
+    /// level at which each caller was first reached (1 = direct caller). Visited
+    /// functions are tracked so cycles terminate. `max_depth == 0` means
+    /// unlimited depth.
+    ///
+    /// NOTE: traversal is keyed by function NAME. If two functions in different
+    /// files share a name, they are treated as the same node (their callers
+    /// merge). This is an accepted simplification for v1.
+    pub fn transitive_callers(
+        &self,
+        function_name: &str,
+        max_depth: usize,
+    ) -> Vec<TransitiveCaller> {
+        let mut results: Vec<TransitiveCaller> = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        // The target itself is "visited" so a direct self-recursive call does not
+        // re-enqueue it as its own caller.
+        visited.insert(function_name.to_string());
+
+        // BFS frontier: function names whose callers we still need to expand.
+        let mut frontier: Vec<String> = vec![function_name.to_string()];
+        let mut depth: usize = 1;
+
+        while !frontier.is_empty() {
+            if max_depth != 0 && depth > max_depth {
+                break;
+            }
+
+            let mut next_frontier: Vec<String> = Vec::new();
+
+            for callee in &frontier {
+                for call_site in self.find_function_callers(callee) {
+                    // Skip top-level/module-level calls with no enclosing function.
+                    let caller = match &call_site.caller_function {
+                        Some(name) => name.clone(),
+                        None => continue,
+                    };
+
+                    if visited.contains(&caller) {
+                        continue;
+                    }
+                    visited.insert(caller.clone());
+
+                    results.push(TransitiveCaller {
+                        function_name: caller.clone(),
+                        file_path: call_site.file_path.clone(),
+                        depth,
+                    });
+                    next_frontier.push(caller);
+                }
+            }
+
+            frontier = next_frontier;
+            depth += 1;
+        }
+
+        results.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.function_name.cmp(&b.function_name))
+        });
+        results
     }
 
     /// Get repository metadata
@@ -1145,12 +1224,23 @@ impl RepoMap {
 
         // Update call graph
         for call in &tree_node.function_calls {
+            // Determine the enclosing function by line-range containment: the
+            // function in this same file whose [start_line, end_line] contains the
+            // call's line_number. If several functions contain it (nested/impl
+            // blocks), pick the INNERMOST one (smallest containing range).
+            let caller_function = tree_node
+                .functions
+                .iter()
+                .filter(|f| f.start_line <= call.line_number && call.line_number <= f.end_line)
+                .min_by_key(|f| f.end_line.saturating_sub(f.start_line))
+                .map(|f| f.name.clone());
+
             let call_site = CallSite {
                 file_path: tree_node.file_path.clone(),
                 line_number: call.line_number,
                 column: call.column,
                 function_name: call.function_name.clone(),
-                caller_function: None, // TODO: Extract caller context
+                caller_function,
             };
 
             self.call_graph
@@ -1639,6 +1729,124 @@ mod tests {
             "call_graph retained an empty CallSite vector after removal"
         );
         assert!(!repo_map.call_graph.contains_key("call_test"));
+    }
+
+    /// Build a TreeNode with an explicitly positioned outer and (nested) inner
+    /// function plus a call, so we can assert enclosing-function resolution.
+    fn tree_node_with_nested_call() -> TreeNode {
+        let mut node = TreeNode::new("/test/nested.rs".to_string(), "rust".to_string());
+
+        // outer spans lines 1..=20, inner is nested inside it spanning 5..=15.
+        node.functions.push(
+            FunctionSignature::new("outer".to_string(), node.file_path.clone())
+                .with_location(1, 20),
+        );
+        node.functions.push(
+            FunctionSignature::new("inner".to_string(), node.file_path.clone())
+                .with_location(5, 15),
+        );
+
+        // A call on line 10 sits inside BOTH outer and inner; innermost = inner.
+        node.function_calls.push(FunctionCall::new(
+            "target".to_string(),
+            node.file_path.clone(),
+            10,
+        ));
+        // A call on line 18 sits inside outer only.
+        node.function_calls.push(FunctionCall::new(
+            "outer_only".to_string(),
+            node.file_path.clone(),
+            18,
+        ));
+        // A call on line 25 is outside every function (module-level).
+        node.function_calls.push(FunctionCall::new(
+            "top_level".to_string(),
+            node.file_path.clone(),
+            25,
+        ));
+
+        node.content_hash = "hash_nested".to_string();
+        node
+    }
+
+    #[test]
+    fn test_caller_function_populated_for_nested_call() {
+        let mut repo_map = RepoMap::new();
+        repo_map.add_file(tree_node_with_nested_call()).unwrap();
+
+        // Innermost enclosing function wins for the nested call.
+        let target_callers = repo_map.find_function_callers("target");
+        assert_eq!(target_callers.len(), 1);
+        assert_eq!(
+            target_callers[0].caller_function,
+            Some("inner".to_string()),
+            "nested call should resolve to the innermost enclosing function"
+        );
+
+        // A call inside only the outer function resolves to outer.
+        let outer_callers = repo_map.find_function_callers("outer_only");
+        assert_eq!(outer_callers[0].caller_function, Some("outer".to_string()));
+
+        // A module-level call has no enclosing function.
+        let top_callers = repo_map.find_function_callers("top_level");
+        assert_eq!(top_callers[0].caller_function, None);
+    }
+
+    #[test]
+    fn test_transitive_callers_multi_level() {
+        // Build a chain across files: a -> b -> c -> parse_config
+        // Each function calls the next; we assert BFS depth + cycle safety.
+        let mut repo_map = RepoMap::new();
+
+        let mut mk = |fname: &str, calls: &str, line: u32| {
+            let path = format!("/test/{}.rs", fname);
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.functions
+                .push(FunctionSignature::new(fname.to_string(), path.clone()).with_location(1, 10));
+            node.function_calls
+                .push(FunctionCall::new(calls.to_string(), path.clone(), line));
+            node.content_hash = format!("hash_{}", fname);
+            node
+        };
+
+        repo_map.add_file(mk("a", "b", 5)).unwrap();
+        repo_map.add_file(mk("b", "c", 5)).unwrap();
+        repo_map.add_file(mk("c", "parse_config", 5)).unwrap();
+
+        let callers = repo_map.transitive_callers("parse_config", 0);
+        let names: Vec<(&str, usize)> = callers
+            .iter()
+            .map(|c| (c.function_name.as_str(), c.depth))
+            .collect();
+        assert_eq!(names, vec![("c", 1), ("b", 2), ("a", 3)]);
+
+        // max_depth limits the walk.
+        let shallow = repo_map.transitive_callers("parse_config", 1);
+        assert_eq!(shallow.len(), 1);
+        assert_eq!(shallow[0].function_name, "c");
+    }
+
+    #[test]
+    fn test_transitive_callers_cycle_safe() {
+        // a -> b -> a (cycle). Traversal must terminate.
+        let mut repo_map = RepoMap::new();
+        let mut mk = |fname: &str, calls: &str| {
+            let path = format!("/test/{}.rs", fname);
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.functions
+                .push(FunctionSignature::new(fname.to_string(), path.clone()).with_location(1, 10));
+            node.function_calls
+                .push(FunctionCall::new(calls.to_string(), path.clone(), 5));
+            node.content_hash = format!("hash_{}", fname);
+            node
+        };
+        repo_map.add_file(mk("a", "b")).unwrap();
+        repo_map.add_file(mk("b", "a")).unwrap();
+
+        let callers = repo_map.transitive_callers("a", 0);
+        // b calls a (depth 1); a calls b but a is the target (visited) -> stop.
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].function_name, "b");
     }
 
     #[test]

@@ -103,7 +103,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "find_callers".to_string(),
-                description: "Return the direct call sites of a function across the repository, each with file path and line, resolved from the parsed call graph — call expressions only (not comments, string literals, imports, or the definition).".to_string(),
+                description: "Return the direct call sites of a function across the repository, each with file path and line, resolved from the parsed call graph — call expressions only (not comments, string literals, imports, or the definition). For the full transitive upstream chain, see trace_callers.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -139,6 +139,39 @@ impl LocalAnalysisTools {
                     }
                 })
             },
+            ToolSchema {
+                name: "trace_callers".to_string(),
+                description: "Return the transitive (upstream) callers of a function — every function that reaches the target through the call graph, across files, each with its depth. Where find_callers returns one hop, this walks the graph to the full upstream chain. Depth is bounded by max_depth (0 = unlimited).".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "function_name": {
+                            "type": "string",
+                            "description": "Name of the function whose transitive callers to trace"
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Maximum number of hops to walk up the call graph (0 = unlimited)",
+                            "default": 0
+                        }
+                    },
+                    "required": ["function_name"]
+                }),
+            },
+            ToolSchema {
+                name: "analyze_impact".to_string(),
+                description: "Return the change blast radius of a function: every function and file that transitively depends on it, resolved through the call graph. Summarizes direct callers, transitively affected functions, and the set of affected files.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "function_name": {
+                            "type": "string",
+                            "description": "Name of the function whose change impact to compute"
+                        }
+                    },
+                    "required": ["function_name"]
+                }),
+            },
         ]
     }
 
@@ -149,6 +182,8 @@ impl LocalAnalysisTools {
             "analyze_file" => self.analyze_file(input).await,
             "get_dependencies" => self.get_dependencies(input).await,
             "find_callers" => self.find_callers(input).await,
+            "trace_callers" => self.trace_callers(input).await,
+            "analyze_impact" => self.analyze_impact(input).await,
             "get_repository_tree" => self.get_repository_tree(input).await,
             _ => Ok(ToolResult::error(format!("Unknown tool: {}", tool_name))),
         }
@@ -319,6 +354,89 @@ impl LocalAnalysisTools {
             "function_name": callers_input.function_name,
             "callers": limited_callers,
             "count": limited_callers.len()
+        });
+
+        Ok(ToolResult::success(result))
+    }
+
+    async fn trace_callers(&self, input: Value) -> Result<ToolResult> {
+        let trace_input: TraceCallersInput =
+            serde_json::from_value(input).context("Invalid trace_callers input")?;
+
+        let max_depth = trace_input.max_depth.unwrap_or(0);
+        let callers = self
+            .repo_map
+            .lock()
+            .unwrap()
+            .transitive_callers(&trace_input.function_name, max_depth);
+
+        let max_depth_reached = callers.iter().map(|c| c.depth).max().unwrap_or(0);
+        let callers_json: Vec<Value> = callers
+            .iter()
+            .map(|c| {
+                json!({
+                    "function_name": c.function_name,
+                    "file_path": c.file_path,
+                    "depth": c.depth
+                })
+            })
+            .collect();
+
+        let result = json!({
+            "status": "success",
+            "function_name": trace_input.function_name,
+            "callers": callers_json,
+            "count": callers.len(),
+            "max_depth_reached": max_depth_reached
+        });
+
+        Ok(ToolResult::success(result))
+    }
+
+    async fn analyze_impact(&self, input: Value) -> Result<ToolResult> {
+        let impact_input: AnalyzeImpactInput =
+            serde_json::from_value(input).context("Invalid analyze_impact input")?;
+
+        let (direct_callers, transitive) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            // Direct callers = distinct enclosing functions one hop up.
+            let direct: std::collections::HashSet<String> = repo_map
+                .find_function_callers(&impact_input.function_name)
+                .into_iter()
+                .filter_map(|c| c.caller_function)
+                .collect();
+            let transitive = repo_map.transitive_callers(&impact_input.function_name, 0);
+            (direct.len(), transitive)
+        };
+
+        // Aggregate affected files across the whole transitive set.
+        let mut affected_files: Vec<String> = transitive
+            .iter()
+            .map(|c| c.file_path.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        affected_files.sort();
+
+        let transitive_functions = transitive.len();
+        let affected_file_count = affected_files.len();
+        let summary = format!(
+            "Changing `{}` transitively affects {} function{} across {} file{}",
+            impact_input.function_name,
+            transitive_functions,
+            if transitive_functions == 1 { "" } else { "s" },
+            affected_file_count,
+            if affected_file_count == 1 { "" } else { "s" }
+        );
+
+        let result = json!({
+            "status": "success",
+            "function_name": impact_input.function_name,
+            "direct_callers": direct_callers,
+            "transitive_functions": transitive_functions,
+            "affected_files": affected_files,
+            "affected_file_count": affected_file_count,
+            "summary": summary
         });
 
         Ok(ToolResult::success(result))
@@ -592,6 +710,17 @@ struct FindCallersInput {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TraceCallersInput {
+    function_name: String,
+    max_depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnalyzeImpactInput {
+    function_name: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct GetRepositoryTreeInput {
     include_file_details: Option<bool>,
@@ -632,7 +761,7 @@ mod tests {
         let tools = create_mock_tools();
         let schemas = tools.get_tool_schemas();
 
-        assert_eq!(schemas.len(), 6, "Should have exactly 6 tool schemas");
+        assert_eq!(schemas.len(), 8, "Should have exactly 8 tool schemas");
 
         let tool_names: Vec<_> = schemas.iter().map(|s| &s.name).collect();
         assert!(tool_names.contains(&&"search_functions".to_string()));
@@ -640,6 +769,8 @@ mod tests {
         assert!(tool_names.contains(&&"analyze_file".to_string()));
         assert!(tool_names.contains(&&"get_dependencies".to_string()));
         assert!(tool_names.contains(&&"find_callers".to_string()));
+        assert!(tool_names.contains(&&"trace_callers".to_string()));
+        assert!(tool_names.contains(&&"analyze_impact".to_string()));
         assert!(tool_names.contains(&&"get_repository_tree".to_string()));
     }
 
@@ -871,6 +1002,88 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // === Trace Callers / Analyze Impact Tests ===
+
+    // Build tools whose repo_map contains a multi-level chain a -> b -> c -> leaf
+    // across separate files, so graph traversal has something to walk.
+    fn create_tools_with_chain() -> LocalAnalysisTools {
+        use crate::types::{FunctionCall, FunctionSignature, TreeNode};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |fname: &str, calls: &str| {
+                let path = format!("/src/{}.rs", fname);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.functions.push(
+                    FunctionSignature::new(fname.to_string(), path.clone()).with_location(1, 10),
+                );
+                node.function_calls
+                    .push(FunctionCall::new(calls.to_string(), path.clone(), 5));
+                node.content_hash = format!("h_{}", fname);
+                node
+            };
+            rm.add_file(mk("a", "b")).unwrap();
+            rm.add_file(mk("b", "c")).unwrap();
+            rm.add_file(mk("c", "leaf")).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_tool() {
+        let tools = create_tools_with_chain();
+        let input = json!({ "function_name": "leaf" });
+
+        let result = tools.execute_tool("trace_callers", input).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.data["function_name"], "leaf");
+        // c (depth 1), b (depth 2), a (depth 3)
+        assert_eq!(result.data["count"].as_u64().unwrap(), 3);
+        assert_eq!(result.data["max_depth_reached"].as_u64().unwrap(), 3);
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers[0]["function_name"], "c");
+        assert_eq!(callers[0]["depth"].as_u64().unwrap(), 1);
+        assert_eq!(callers[2]["function_name"], "a");
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_max_depth() {
+        let tools = create_tools_with_chain();
+        let input = json!({ "function_name": "leaf", "max_depth": 1 });
+
+        let result = tools.execute_tool("trace_callers", input).await.unwrap();
+        assert_eq!(result.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(result.data["callers"][0]["function_name"], "c");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_tool() {
+        let tools = create_tools_with_chain();
+        let input = json!({ "function_name": "leaf" });
+
+        let result = tools.execute_tool("analyze_impact", input).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.data["direct_callers"].as_u64().unwrap(), 1);
+        assert_eq!(result.data["transitive_functions"].as_u64().unwrap(), 3);
+        assert_eq!(result.data["affected_file_count"].as_u64().unwrap(), 3);
+        let files = result.data["affected_files"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(
+            result.data["summary"]
+                .as_str()
+                .unwrap()
+                .contains("transitively affects 3 functions across 3 files")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_invalid_input() {
+        let tools = create_mock_tools();
+        let input = json!({ "wrong_field": "value" });
+        let result = tools.execute_tool("trace_callers", input).await;
+        assert!(result.is_err());
+    }
+
     // === Repository Tree Tests ===
 
     #[tokio::test]
@@ -1087,6 +1300,8 @@ mod tests {
             "analyze_file",
             "get_dependencies",
             "find_callers",
+            "trace_callers",
+            "analyze_impact",
             "get_repository_tree",
         ];
 
@@ -1097,6 +1312,8 @@ mod tests {
                 "analyze_file" => json!({"file_path": "/test.rs"}),
                 "get_dependencies" => json!({"file_path": "/test.rs"}),
                 "find_callers" => json!({"function_name": "test"}),
+                "trace_callers" => json!({"function_name": "test"}),
+                "analyze_impact" => json!({"function_name": "test"}),
                 "get_repository_tree" => json!({}),
                 _ => json!({}),
             };

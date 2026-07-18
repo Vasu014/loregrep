@@ -9,6 +9,9 @@ mod fs_utils;
 mod handlers;
 mod loader;
 mod models;
+mod pipeline_a;
+mod pipeline_b;
+mod pipeline_c;
 
 use config::parse_config;
 use loader::Loader;

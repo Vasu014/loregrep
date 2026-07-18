@@ -5,8 +5,9 @@ description: >-
   tree-sitter into a queryable graph of functions, types, imports, and call
   relationships, and returns structured results (signatures, call sites,
   dependencies, line numbers). Use it for structural questions about code: where a
-  symbol is defined and its signature, who calls a function, what a file imports or
-  exports, a file's skeleton, or a map of the repository. Languages: Rust, Python,
+  symbol is defined and its signature, who calls a function (directly or
+  transitively), the blast radius of a change, what a file imports or exports, a
+  file's skeleton, or a map of the repository. Languages: Rust, Python,
   TypeScript/TSX.
 ---
 
@@ -40,21 +41,32 @@ cargo install loregrep      # Rust toolchain
 | Tool | What it returns | Required params |
 |---|---|---|
 | `find_callers` | The direct call sites of a function (file:line), from the call graph | `function_name` |
+| `trace_callers` | The transitive (upstream) callers of a function — the call chain across files, each with its depth | `function_name` |
+| `analyze_impact` | The change blast radius of a function — every function and file that transitively depends on it | `function_name` |
 | `search_functions` | Function definitions matching a name/regex, with their signatures | `pattern` |
 | `search_structs` | Struct/class/interface definitions matching a name/regex, with their fields | `pattern` |
 | `get_dependencies` | A file's imports and exports | `file_path` |
 | `analyze_file` | A file's skeleton (functions, structs, imports, exports, calls) | `file_path` |
 | `get_repository_tree` | A structural map of the repository | — |
 
-Optional params: `limit` (search/callers), `language` (`rust`/`python`/`typescript`),
-`include_content` (analyze_file), `include_file_details` + `max_depth` (repository tree).
+Optional params: `limit` (search/callers), `max_depth` (`trace_callers`; `0` =
+unlimited, the default), `language` (`rust`/`python`/`typescript`), `include_content`
+(analyze_file), `include_file_details` + `max_depth` (repository tree).
 
 ## Examples
 
-Find the call sites of a function:
+Find the direct call sites of a function:
 
 ```bash
 loregrep exec-tool find_callers --params '{"function_name":"parse_config"}' --path .
+```
+
+Everything that transitively calls a function, and the blast radius of changing it
+(both walk the call graph across files):
+
+```bash
+loregrep exec-tool trace_callers --params '{"function_name":"parse_config"}' --path .
+loregrep exec-tool analyze_impact --params '{"function_name":"parse_config"}' --path .
 ```
 
 Find a function's definition and signature:
@@ -79,6 +91,9 @@ loregrep exec-tool get_repository_tree --params '{"include_file_details":false,"
 
 Each call returns `{"success": bool, "data": {...}, "error": null|string}`.
 `find_callers` → `data.callers` (`file_path`, `line_number`, `caller_function`).
+`trace_callers` → `data.callers` (`function_name`, `file_path`, `depth`), ordered
+by depth, plus `count` and `max_depth_reached`. `analyze_impact` → `direct_callers`,
+`transitive_functions`, `affected_files`, `affected_file_count`, and a `summary`.
 Search tools → `data.results` with `name`, `file_path`, `start_line`, and (for
 functions) `parameters`, `return_type`, `is_async`, `is_public`. Read those fields
 directly rather than re-parsing source.
