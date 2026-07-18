@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/loregrep.svg)](https://crates.io/crates/loregrep)
 [![PyPI](https://img.shields.io/pypi/v/loregrep.svg)](https://pypi.org/project/loregrep/)
 [![CI](https://github.com/Vasu014/loregrep/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/Vasu014/loregrep/actions/workflows/rust-ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/Vasu014/loregrep#license)
 
 **Structural code intelligence for AI coding agents.**
 
@@ -18,6 +18,42 @@ It's the *context engine* an agent calls; it is **not** an AI itself.
 **Languages:** Rust · Python · TypeScript/TSX &nbsp;(Go, JavaScript planned)
 
 ---
+
+```mermaid
+flowchart LR
+    A(["🤖  Coding agent"]):::agent
+
+    subgraph IF["Interfaces"]
+        direction TB
+        S["Claude Code skill"]:::iface
+        P["pi extension"]:::iface
+        C["exec-tool CLI"]:::iface
+    end
+
+    subgraph ENG["loregrep engine"]
+        direction TB
+        SC["Scanner<br/>gitignore-aware"]:::eng
+        AN["Tree-sitter analyzers<br/>Rust · Python · TS / TSX"]:::eng
+        IX[("Index · RepoMap<br/>persistent cache")]:::index
+        SC --> AN --> IX
+    end
+
+    T["6 structural tools"]:::tools
+    J(["Structured JSON<br/>names · signatures · lines"]):::out
+
+    A -->|invoke| IF
+    IF -->|exec-tool| ENG
+    IX --> T
+    T --> J
+    J -->|precise context| A
+
+    classDef agent fill:#6366f1,stroke:#4338ca,color:#ffffff,font-weight:bold
+    classDef iface fill:#8b5cf6,stroke:#6d28d9,color:#ffffff
+    classDef eng fill:#0284c7,stroke:#075985,color:#ffffff
+    classDef index fill:#f59e0b,stroke:#b45309,color:#1f2937,font-weight:bold
+    classDef tools fill:#14b8a6,stroke:#0f766e,color:#ffffff
+    classDef out fill:#10b981,stroke:#047857,color:#ffffff,font-weight:bold
+```
 
 ## Why
 
@@ -66,9 +102,10 @@ invalidates the cache automatically.
 
 ### 2. Inside your coding agent (skill / extension)
 
-- **Claude Code** — the [`loregrep` skill](skills/loregrep/SKILL.md) teaches the agent when and how
-  to call these tools. Point Claude Code at `skills/loregrep/`.
-- **pi** — install the [`loregrep-pi`](integrations/pi/) extension: `pi install npm:loregrep-pi`.
+- **Claude Code** — the [`loregrep` skill](https://github.com/Vasu014/loregrep/blob/main/skills/loregrep/SKILL.md)
+  teaches the agent when and how to call these tools.
+- **pi** — install the [`loregrep-pi`](https://github.com/Vasu014/loregrep/tree/main/integrations/pi)
+  extension: `pi install npm:loregrep-pi`.
 
 Both wrap the same six tools, so your agent reaches for structural search instead of grep.
 
@@ -136,24 +173,22 @@ Optional: `limit`, `language` (`rust`/`python`/`typescript`), `include_content`,
 | JavaScript, Go | _planned_ | | | |
 
 Adding a language is a **drop-in** contribution: implement one trait in one file — see
-[docs/adding-a-language.md](docs/adding-a-language.md).
+[docs/adding-a-language.md](https://github.com/Vasu014/loregrep/blob/main/docs/adding-a-language.md).
 
 ## How it works
 
-```
-files ──▶ scanner ──▶ tree-sitter analyzer ──▶ in-memory index ──▶ tools ──▶ JSON
-        (gitignore-aware)   (per language)        (RepoMap)         (agent-facing)
-```
-
-The registry dispatches by language, so analyzers are additive; the index persists to disk and
-re-scans only when files change. See [ARCHITECTURE.md](ARCHITECTURE.md).
+The registry dispatches by language, so analyzers are additive; the scanner is gitignore-aware, and
+the index persists to disk and re-scans only when files change (see the diagram above). Full design
+in [ARCHITECTURE.md](https://github.com/Vasu014/loregrep/blob/main/ARCHITECTURE.md).
 
 ## Contributing
 
 Contributions — especially new language analyzers — are welcome. See
-[CONTRIBUTING.md](CONTRIBUTING.md) and [docs/adding-a-language.md](docs/adding-a-language.md).
+[CONTRIBUTING.md](https://github.com/Vasu014/loregrep/blob/main/CONTRIBUTING.md) and
+[docs/adding-a-language.md](https://github.com/Vasu014/loregrep/blob/main/docs/adding-a-language.md).
 CI runs `cargo fmt`, `cargo test`, and the Python binding tests on every PR.
 
 ## License
 
-Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Dual-licensed under either [MIT](https://github.com/Vasu014/loregrep/blob/main/LICENSE-MIT) or
+[Apache-2.0](https://github.com/Vasu014/loregrep/blob/main/LICENSE-APACHE), at your option.

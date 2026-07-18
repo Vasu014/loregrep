@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "loregrep"
 description = "Fast repository indexing and code analysis tools for AI coding assistants - 6 standardized tools for Claude, GPT, and more"
-readme = "README-python.md"
+readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT OR Apache-2.0"}
 authors = [
