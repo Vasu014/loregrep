@@ -143,10 +143,10 @@
     "extract": "data.metadata.total_files",
     "expect": {
       "mode": "exact_set",
-      "items": [11]
+      "items": [13]
     },
-    "tags": ["rust", "tree", "known-failure", "file-count"],
-    "notes": "KNOWN FAILURE. The fixture has 11 .rs files (and the tree contains 11 distinct file nodes), but metadata.total_files / file_count reports 22 (exactly doubled). See known_failures.json."
+    "tags": ["rust", "tree", "file-count"],
+    "notes": "13 .rs files: the 11 original plus collision_a.rs and collision_b.rs (added for the same-name ingest collision cases). metadata.total_files must equal the distinct file count exactly (the earlier double-count bug is fixed)."
   },
   {
     "id": "rust-basic/trace_callers/parse_config-transitive",
@@ -219,5 +219,78 @@
     },
     "tags": ["rust", "impact", "files"],
     "notes": "Changing parse_config touches 5 files transitively: main.rs, loader.rs, pipeline_a.rs, pipeline_b.rs, pipeline_c.rs."
+  },
+  {
+    "id": "rust-basic/trace_callers/ingest-name-ambiguous",
+    "tool": "trace_callers",
+    "params": { "function_name": "ingest" },
+    "extract": "data.callers",
+    "match_on": ["function_name", "file_path", "depth", "resolution"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "function_name": "feed_a", "file_path": "src/collision_a.rs", "depth": 1, "resolution": "name_ambiguous" },
+        { "function_name": "feed_b", "file_path": "src/collision_b.rs", "depth": 1, "resolution": "name_ambiguous" },
+        { "function_name": "drive_a", "file_path": "src/collision_a.rs", "depth": 2, "resolution": "exact" },
+        { "function_name": "drive_b", "file_path": "src/collision_b.rs", "depth": 2, "resolution": "exact" }
+      ]
+    },
+    "tags": ["rust", "callers", "transitive", "ambiguity", "collision"],
+    "notes": "SourceA::ingest and SourceB::ingest collide by name. Direct callers feed_a/feed_b cannot be attributed to one definition (name-keyed call graph) so both are flagged resolution=name_ambiguous, NEVER merged into one node. Their unique-named upstreams drive_a/drive_b resolve exact and stay disjoint (feed_a->drive_a in collision_a.rs only, feed_b->drive_b in collision_b.rs only). In P3 the typed receivers let this flip: feed_a/feed_b become resolution=resolved (one-line gold edit here)."
+  },
+  {
+    "id": "rust-basic/trace_callers/ingest-ambiguous-names-summary",
+    "tool": "trace_callers",
+    "params": { "function_name": "ingest" },
+    "extract": "data.ambiguous_names",
+    "match_on": ["name", "definition_count", "candidates_truncated"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "ingest", "definition_count": 2, "candidates_truncated": false }
+      ]
+    },
+    "tags": ["rust", "callers", "ambiguity", "collision"],
+    "notes": "The ambiguous_names summary names the collision (ingest, 2 definitions) so an agent can see WHY callers are candidates. candidate_files order is not asserted (name-index iteration order is not stable)."
+  },
+  {
+    "id": "rust-basic/analyze_impact/ingest-exact-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "ingest" },
+    "extract": "data.transitive_functions",
+    "expect": {
+      "mode": "exact_set",
+      "items": [2]
+    },
+    "tags": ["rust", "impact", "ambiguity", "collision"],
+    "notes": "transitive_functions counts ONLY exact callers (drive_a, drive_b) — the headline blast radius is not inflated by the two name-ambiguous candidates."
+  },
+  {
+    "id": "rust-basic/analyze_impact/ingest-ambiguous-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "ingest" },
+    "extract": "data.ambiguous_functions",
+    "expect": {
+      "mode": "exact_set",
+      "items": [2]
+    },
+    "tags": ["rust", "impact", "ambiguity", "collision"],
+    "notes": "The two candidate callers (feed_a, feed_b) reached via the ingest collision are reported separately as ambiguous_functions, never dropped and never counted as confirmed."
+  },
+  {
+    "id": "rust-basic/find_callers/ingest-per-callsite",
+    "tool": "find_callers",
+    "params": { "function_name": "ingest" },
+    "extract": "data.callers",
+    "match_on": ["caller_function", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "caller_function": "feed_a", "file_path": "src/collision_a.rs" },
+        { "caller_function": "feed_b", "file_path": "src/collision_b.rs" }
+      ]
+    },
+    "tags": ["rust", "callers", "direct", "collision"],
+    "notes": "find_callers is per-call-site (it reports the two literal ingest() call expressions), so the name collision does not affect it — no merging, no ambiguity flag, one entry per real call site."
   }
 ]
