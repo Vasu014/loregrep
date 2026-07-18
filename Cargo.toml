@@ -13,6 +13,7 @@ readme = "README.md"
 homepage = "https://github.com/Vasu014/loregrep"
 exclude = [
     "test-repos/",
+    "evals/",
     "target/",
     ".git/",
     "*.log",

@@ -1,0 +1,150 @@
+[
+  {
+    "id": "rust-basic/search_functions/parse-exact",
+    "tool": "search_functions",
+    "params": { "pattern": "parse" },
+    "extract": "data.results",
+    "match_on": ["name", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "parse", "file_path": "src/config.rs" }
+      ]
+    },
+    "tags": ["rust", "functions", "exact-match-first"],
+    "notes": "Exact-match-first branch: searching 'parse' returns ONLY the function named parse, NOT parse_config (which a substring/grep search would also match)."
+  },
+  {
+    "id": "rust-basic/search_functions/handle-pattern",
+    "tool": "search_functions",
+    "params": { "pattern": "^handle_.*" },
+    "extract": "data.results",
+    "match_on": ["name", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "handle_get", "file_path": "src/handlers.rs" },
+        { "name": "handle_post", "file_path": "src/handlers.rs" },
+        { "name": "handle_delete", "file_path": "src/handlers.rs" }
+      ]
+    },
+    "tags": ["rust", "functions", "regex-pattern"],
+    "notes": "Regex-fallback branch: ^handle_.* matches the three handlers but NOT dispatch()."
+  },
+  {
+    "id": "rust-basic/search_structs/cache-generic",
+    "tool": "search_structs",
+    "params": { "pattern": "Cache" },
+    "extract": "data.results",
+    "match_on": ["name", "file_path", "is_tuple_struct"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "Cache", "file_path": "src/cache.rs", "is_tuple_struct": false }
+      ]
+    },
+    "tags": ["rust", "structs", "generics"],
+    "notes": "Generic struct Cache<T>; distinguished from the tuple struct Span."
+  },
+  {
+    "id": "rust-basic/analyze_file/config",
+    "tool": "analyze_file",
+    "params": { "file_path": "src/config.rs" },
+    "extract": "data.functions",
+    "match_on": ["name"],
+    "expect": {
+      "mode": "superset",
+      "items": [
+        { "name": "parse" },
+        { "name": "parse_config" }
+      ]
+    },
+    "tags": ["rust", "analyze"],
+    "notes": "analyze_file re-parses the file directly; must report both functions defined in config.rs."
+  },
+  {
+    "id": "rust-basic/get_dependencies/main",
+    "tool": "get_dependencies",
+    "params": { "file_path": "src/main.rs" },
+    "extract": "data.dependencies",
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        "std::collections::HashMap",
+        "std::process",
+        "config::parse_config",
+        "loader::Loader"
+      ]
+    },
+    "tags": ["rust", "dependencies", "imports"],
+    "notes": "Import module paths for main.rs. String array, so no match_on. Runner absolutizes the file_path param to match the absolute-path file index key."
+  },
+  {
+    "id": "rust-basic/find_callers/parse_config",
+    "tool": "find_callers",
+    "params": { "function_name": "parse_config" },
+    "extract": "data.callers",
+    "match_on": ["file_path", "line_number"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "file_path": "src/main.rs", "line_number": 18 },
+        { "file_path": "src/loader.rs", "line_number": 17 }
+      ]
+    },
+    "tags": ["rust", "callers", "cross-file", "trap"],
+    "notes": "Core value claim. Two REAL call sites: a free call in main (main.rs:18) and a method call in Loader::load (loader.rs:17). The commented-out call in cache.rs, the `use config::parse_config` import (main.rs:13), the doc example, the comment mention and the string-literal mention in config.rs must NOT appear."
+  },
+  {
+    "id": "rust-basic/find_callers/save-trap",
+    "tool": "find_callers",
+    "params": { "function_name": "save" },
+    "extract": "data.callers",
+    "match_on": ["file_path", "line_number"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "file_path": "src/main.rs", "line_number": 29 }
+      ]
+    },
+    "tags": ["rust", "callers", "trap"],
+    "notes": "Trap case: `save` has exactly one real call site (main.rs:29). The doc-example mention, the comment mention and the string-literal mention in fs_utils.rs must NOT be returned."
+  },
+  {
+    "id": "rust-basic/get_repository_tree/languages",
+    "tool": "get_repository_tree",
+    "params": { "include_file_details": false },
+    "extract": "data.metadata.languages",
+    "expect": {
+      "mode": "superset",
+      "items": ["rust"]
+    },
+    "tags": ["rust", "tree"],
+    "notes": "get_repository_tree must report rust among the languages. Scored as superset on the stable languages key (file_count is buggy; see known_failures)."
+  },
+  {
+    "id": "rust-basic/search_functions/language-filter-noop",
+    "tool": "search_functions",
+    "params": { "pattern": "^handle_.*", "language": "python" },
+    "extract": "data.results",
+    "match_on": ["name"],
+    "expect": {
+      "mode": "exact_set",
+      "items": []
+    },
+    "tags": ["rust", "functions", "known-failure", "language-filter"],
+    "notes": "KNOWN FAILURE. Correct behavior: a python language filter over an all-Rust repo returns zero functions. Actual: the language param is parsed but never applied, so the three Rust handlers are returned. See known_failures.json."
+  },
+  {
+    "id": "rust-basic/get_repository_tree/file-count",
+    "tool": "get_repository_tree",
+    "params": { "include_file_details": false },
+    "extract": "data.metadata.total_files",
+    "expect": {
+      "mode": "exact_set",
+      "items": [8]
+    },
+    "tags": ["rust", "tree", "known-failure", "file-count"],
+    "notes": "KNOWN FAILURE. The fixture has 8 .rs files (and the tree contains 8 distinct file nodes), but metadata.total_files / file_count reports 16 (exactly doubled). See known_failures.json."
+  }
+]
