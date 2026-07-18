@@ -1,6 +1,7 @@
 // Placeholder RepoMap - will be enhanced in Phase 2: Task 2.1
 use crate::types::{
     AnalysisError, ExportStatement, FunctionSignature, ImportStatement, StructSignature, TreeNode,
+    TypeKind,
 };
 use anyhow::Context;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
@@ -515,6 +516,27 @@ impl RepoMap {
             .collect()
     }
 
+    /// The owning type of the function named `name` defined in `file_path`, if any
+    /// (Rust `impl` type, Python/TS class). Used to render qualified caller names
+    /// like `Loader::load`. Returns the first match when a file has more than one
+    /// function of that name.
+    pub fn function_owner(&self, file_path: &str, name: &str) -> Option<String> {
+        let file = self.get_file(file_path)?;
+        file.functions
+            .iter()
+            .find(|f| f.name == name)
+            .and_then(|f| f.owner.clone())
+    }
+
+    /// Render a function's display name as `Owner::name` when it has an owning
+    /// type, else the bare name.
+    pub fn qualified_function_name(&self, file_path: &str, name: &str) -> String {
+        match self.function_owner(file_path, name) {
+            Some(owner) => format!("{owner}::{name}"),
+            None => name.to_string(),
+        }
+    }
+
     /// Walk UP the call graph to find every function that TRANSITIVELY calls
     /// `function_name`.
     ///
@@ -845,7 +867,7 @@ impl RepoMap {
                 name: struct_def.name.clone(),
                 is_public: struct_def.is_public,
                 field_count: struct_def.fields.len(),
-                is_enum: false, // TreeNode doesn't distinguish enums from structs currently
+                is_enum: struct_def.kind == TypeKind::Enum,
                 line_number: struct_def.start_line,
             })
             .collect();

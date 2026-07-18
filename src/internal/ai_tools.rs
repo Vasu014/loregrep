@@ -1,4 +1,4 @@
-use crate::{analyzers::registry::RegistryHandle, storage::memory::RepoMap};
+use crate::{analyzers::registry::RegistryHandle, storage::memory::RepoMap, types::TypeKind};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,7 +24,7 @@ impl LocalAnalysisTools {
         vec![
             ToolSchema {
                 name: "search_functions".to_string(),
-                description: "Look up functions by name or regex and return their structured signature: parameters, return type, visibility, async/const/static flags, and the definition's file path and line range.".to_string(),
+                description: "Look up functions by name or regex and return their structured signature: parameters, return type, visibility, async/const/static flags, the owning type (impl/class) if it is a method, and the definition's file path and line range.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -40,6 +40,10 @@ impl LocalAnalysisTools {
                         "language": {
                             "type": "string",
                             "description": "Filter by programming language (optional)"
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "Filter to methods whose owning type (impl block / class) has this exact name (optional)"
                         }
                     },
                     "required": ["pattern"]
@@ -47,13 +51,13 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "search_structs".to_string(),
-                description: "Look up structs, classes, and interfaces by name or regex and return their fields, generics, visibility, and definition location.".to_string(),
+                description: "Look up named types — structs, enums, traits, classes, abstract classes, interfaces, and type aliases — by name or regex and return their fields, generics, visibility, declared supertypes (supertraits / base classes / extends+implements), the `kind` of each, and definition location.".to_string(),
                 input_schema: json!({
-                    "type": "object", 
+                    "type": "object",
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Name or regex pattern to match struct/class names"
+                            "description": "Name or regex pattern to match type names"
                         },
                         "limit": {
                             "type": "integer",
@@ -63,6 +67,11 @@ impl LocalAnalysisTools {
                         "language": {
                             "type": "string",
                             "description": "Filter by programming language (optional)"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["struct", "enum", "trait", "class", "abstract_class", "interface", "type_alias"],
+                            "description": "Filter to a single kind of type (optional)"
                         }
                     },
                     "required": ["pattern"]
@@ -201,6 +210,7 @@ impl LocalAnalysisTools {
         // FunctionSignature does not carry the language directly. A filter for a
         // language absent from the repo therefore yields an empty set.
         let language_filter = search_input.language.as_deref();
+        let owner_filter = search_input.owner.as_deref();
         let limited_results: Vec<_> = results
             .items
             .into_iter()
@@ -209,6 +219,11 @@ impl LocalAnalysisTools {
                     .get_file(&func.file_path)
                     .map(|node| node.language.eq_ignore_ascii_case(lang))
                     .unwrap_or(false),
+                None => true,
+            })
+            // Optional owner filter: keep only methods of the named type.
+            .filter(|func| match owner_filter {
+                Some(owner) => func.owner.as_deref() == Some(owner),
                 None => true,
             })
             .take(search_input.limit.unwrap_or(20))
@@ -232,6 +247,11 @@ impl LocalAnalysisTools {
         let results = repo_map.find_structs(&search_input.pattern);
         // Apply the optional language filter (see search_functions above).
         let language_filter = search_input.language.as_deref();
+        // Parse the optional kind filter once. An unrecognized kind string yields
+        // Some(None) -> matches nothing (honest: the requested kind does not exist),
+        // versus None -> no kind filter at all.
+        let kind_filter: Option<Option<TypeKind>> =
+            search_input.kind.as_deref().map(parse_type_kind);
         let limited_results: Vec<_> = results
             .items
             .into_iter()
@@ -240,6 +260,11 @@ impl LocalAnalysisTools {
                     .get_file(&struct_def.file_path)
                     .map(|node| node.language.eq_ignore_ascii_case(lang))
                     .unwrap_or(false),
+                None => true,
+            })
+            // Optional kind filter: keep only types whose kind matches.
+            .filter(|struct_def| match &kind_filter {
+                Some(parsed) => *parsed == Some(struct_def.kind),
                 None => true,
             })
             .take(search_input.limit.unwrap_or(20))
@@ -339,21 +364,31 @@ impl LocalAnalysisTools {
         let callers_input: FindCallersInput =
             serde_json::from_value(input).context("Invalid find_callers input")?;
 
-        let callers = self
-            .repo_map
-            .lock()
-            .unwrap()
-            .find_function_callers(&callers_input.function_name);
-        let limited_callers: Vec<_> = callers
-            .into_iter()
-            .take(callers_input.limit.unwrap_or(50))
-            .collect();
+        let callers_json: Vec<Value> = {
+            let repo_map = self.repo_map.lock().unwrap();
+            repo_map
+                .find_function_callers(&callers_input.function_name)
+                .into_iter()
+                .take(callers_input.limit.unwrap_or(50))
+                .map(|cs| {
+                    // Preserve every CallSite field, then add an owner-qualified
+                    // display for the enclosing caller (e.g. "Loader::load").
+                    let mut v = serde_json::to_value(&cs).unwrap_or_else(|_| json!({}));
+                    let caller_display = cs
+                        .caller_function
+                        .as_deref()
+                        .map(|name| repo_map.qualified_function_name(&cs.file_path, name));
+                    v["caller_display"] = json!(caller_display);
+                    v
+                })
+                .collect()
+        };
 
         let result = json!({
             "status": "success",
             "function_name": callers_input.function_name,
-            "callers": limited_callers,
-            "count": limited_callers.len()
+            "callers": callers_json,
+            "count": callers_json.len()
         });
 
         Ok(ToolResult::success(result))
@@ -364,37 +399,47 @@ impl LocalAnalysisTools {
             serde_json::from_value(input).context("Invalid trace_callers input")?;
 
         let max_depth = trace_input.max_depth.unwrap_or(0);
-        let (callers, ambiguous_names) = {
+        let (callers_json, callers_len, ambiguous_names) = {
             let repo_map = self.repo_map.lock().unwrap();
             let callers = repo_map.transitive_callers(&trace_input.function_name, max_depth);
             let ambiguous_names =
                 Self::ambiguous_names_summary(&repo_map, &trace_input.function_name, &callers);
-            (callers, ambiguous_names)
+            let callers_json: Vec<Value> = callers
+                .iter()
+                .map(|c| {
+                    json!({
+                        "function_name": c.function_name,
+                        // Owner-qualified display (e.g. "Loader::load") when the
+                        // caller is a method; bare name otherwise.
+                        "display_name": repo_map.qualified_function_name(&c.file_path, &c.function_name),
+                        "file_path": c.file_path,
+                        "depth": c.depth,
+                        // "name_ambiguous": reached by expanding a name with >1
+                        // definition, so which definition it calls is unresolved — a
+                        // candidate, not a confirmed caller. "exact": single-definition.
+                        "resolution": if c.ambiguous { "name_ambiguous" } else { "exact" }
+                    })
+                })
+                .collect();
+            (callers_json, callers.len(), ambiguous_names)
         };
 
-        let max_depth_reached = callers.iter().map(|c| c.depth).max().unwrap_or(0);
-        let ambiguous_count = callers.iter().filter(|c| c.ambiguous).count();
-        let callers_json: Vec<Value> = callers
+        let max_depth_reached = callers_json
             .iter()
-            .map(|c| {
-                json!({
-                    "function_name": c.function_name,
-                    "file_path": c.file_path,
-                    "depth": c.depth,
-                    // "name_ambiguous": reached by expanding a name with >1
-                    // definition, so which definition it calls is unresolved — a
-                    // candidate, not a confirmed caller. "exact": single-definition.
-                    "resolution": if c.ambiguous { "name_ambiguous" } else { "exact" }
-                })
-            })
-            .collect();
+            .filter_map(|c| c["depth"].as_u64())
+            .max()
+            .unwrap_or(0);
+        let ambiguous_count = callers_json
+            .iter()
+            .filter(|c| c["resolution"] == "name_ambiguous")
+            .count();
 
         let result = json!({
             "status": "success",
             "function_name": trace_input.function_name,
             "callers": callers_json,
-            "count": callers.len(),
-            "exact_count": callers.len() - ambiguous_count,
+            "count": callers_len,
+            "exact_count": callers_len - ambiguous_count,
             "ambiguous_count": ambiguous_count,
             "max_depth_reached": max_depth_reached,
             "ambiguous_names": ambiguous_names
@@ -749,12 +794,35 @@ impl ToolResult {
     }
 }
 
+/// Parse a `kind` filter string (case-insensitive, `_`/space/`-` insensitive) into
+/// a `TypeKind`. Returns `None` for an unrecognized string so callers can treat it
+/// as "matches nothing" rather than silently ignoring the filter.
+fn parse_type_kind(s: &str) -> Option<TypeKind> {
+    let normalized: String = s
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | ' '))
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    match normalized.as_str() {
+        "struct" => Some(TypeKind::Struct),
+        "enum" => Some(TypeKind::Enum),
+        "trait" => Some(TypeKind::Trait),
+        "class" => Some(TypeKind::Class),
+        "abstractclass" => Some(TypeKind::AbstractClass),
+        "interface" => Some(TypeKind::Interface),
+        "typealias" => Some(TypeKind::TypeAlias),
+        _ => None,
+    }
+}
+
 // Input types for tool functions
 #[derive(Debug, Deserialize)]
 struct SearchFunctionsInput {
     pattern: String,
     limit: Option<usize>,
     language: Option<String>,
+    /// Keep only methods whose owning type (impl/class) equals this name.
+    owner: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -762,6 +830,9 @@ struct SearchStructsInput {
     pattern: String,
     limit: Option<usize>,
     language: Option<String>,
+    /// Keep only types of this kind (struct/enum/trait/class/abstract_class/
+    /// interface/type_alias).
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1193,6 +1264,140 @@ mod tests {
             rm.add_file(mk("b", "caller_b")).unwrap();
         }
         LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    // A repo with a struct + enum and an owned method `Loader::load` that calls
+    // parse_config, plus a free function. Exercises the P1-5 surfacing: kind/owner
+    // filters and owner-qualified caller display.
+    fn create_tools_with_owned_types() -> LocalAnalysisTools {
+        use crate::types::{FunctionCall, FunctionSignature, StructSignature, TreeNode, TypeKind};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let path = "/src/loader.rs".to_string();
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.structs.push(
+                StructSignature::new("Config".to_string(), path.clone())
+                    .with_kind(TypeKind::Struct),
+            );
+            node.structs.push(
+                StructSignature::new("ConfigError".to_string(), path.clone())
+                    .with_kind(TypeKind::Enum),
+            );
+            node.functions.push(
+                FunctionSignature::new("load".to_string(), path.clone())
+                    .with_owner("Loader")
+                    .with_location(1, 10),
+            );
+            node.functions.push(
+                FunctionSignature::new("helper".to_string(), path.clone()).with_location(12, 15),
+            );
+            // load() calls parse_config() at line 5 (inside load's span).
+            node.function_calls
+                .push(FunctionCall::new("parse_config".to_string(), path.clone(), 5));
+            node.content_hash = "h_loader".to_string();
+            rm.add_file(node).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    #[tokio::test]
+    async fn test_search_structs_kind_filter() {
+        let tools = create_tools_with_owned_types();
+
+        // The task's acceptance: search_structs {pattern: "ConfigError", kind: "enum"}
+        // returns the enum, with its kind surfaced.
+        let result = tools
+            .execute_tool(
+                "search_structs",
+                json!({ "pattern": "ConfigError", "kind": "enum" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(result.data["results"][0]["name"], "ConfigError");
+        assert_eq!(result.data["results"][0]["kind"], "enum");
+
+        // The same pattern with the wrong kind excludes it (not silently ignored).
+        let as_struct = tools
+            .execute_tool(
+                "search_structs",
+                json!({ "pattern": "ConfigError", "kind": "struct" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(as_struct.data["count"].as_u64().unwrap(), 0);
+
+        // An unrecognized kind matches nothing rather than ignoring the filter.
+        let bogus = tools
+            .execute_tool(
+                "search_structs",
+                json!({ "pattern": "ConfigError", "kind": "widget" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bogus.data["count"].as_u64().unwrap(), 0);
+
+        // Struct search without a kind filter still surfaces the struct's kind.
+        let plain = tools
+            .execute_tool("search_structs", json!({ "pattern": "Config" }))
+            .await
+            .unwrap();
+        assert_eq!(plain.data["results"][0]["name"], "Config");
+        assert_eq!(plain.data["results"][0]["kind"], "struct");
+    }
+
+    #[tokio::test]
+    async fn test_search_functions_owner_filter() {
+        let tools = create_tools_with_owned_types();
+
+        let owned = tools
+            .execute_tool(
+                "search_functions",
+                json!({ "pattern": "load", "owner": "Loader" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owned.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(owned.data["results"][0]["name"], "load");
+        assert_eq!(owned.data["results"][0]["owner"], "Loader");
+
+        // A non-matching owner yields nothing.
+        let none = tools
+            .execute_tool(
+                "search_functions",
+                json!({ "pattern": "load", "owner": "Nope" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(none.data["count"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_shows_owner_qualified_display() {
+        let tools = create_tools_with_owned_types();
+        let result = tools
+            .execute_tool("trace_callers", json!({ "function_name": "parse_config" }))
+            .await
+            .unwrap();
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["function_name"], "load");
+        // The owning type is rendered into display_name.
+        assert_eq!(callers[0]["display_name"], "Loader::load");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_caller_display_qualified() {
+        let tools = create_tools_with_owned_types();
+        let result = tools
+            .execute_tool("find_callers", json!({ "function_name": "parse_config" }))
+            .await
+            .unwrap();
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["caller_function"], "load");
+        assert_eq!(callers[0]["caller_display"], "Loader::load");
     }
 
     #[tokio::test]
