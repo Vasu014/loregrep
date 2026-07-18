@@ -510,50 +510,68 @@ impl LoreGrep {
     }
 
     /// Freshness gate for a persisted cache. Returns `true` only when the cache
-    /// file exists and is at least as new as the repository `root`'s directory
-    /// modification time (the same heuristic used by the persistence layer).
+    /// file exists and is strictly newer than every source file that would be
+    /// indexed under `root`.
     ///
-    /// This is intentionally conservative: when either modification time cannot
-    /// be read, it returns `false` so the caller re-scans rather than trusting a
-    /// cache it cannot validate. The crate-version / content-hash gate is
-    /// additionally enforced at [`LoreGrep::load_index`] time.
+    /// The set of files considered is exactly the set the scanner would index:
+    /// the same gitignore-aware walker and include/exclude filters are reused
+    /// (via [`RepositoryScanner::newest_modified_time`]). This matters because a
+    /// narrower skip list than the scanner's would let a regenerated file in an
+    /// excluded directory (`target/`, `dist/`, `.venv/`, a gitignored path, …)
+    /// make the cache look stale on every run, defeating it entirely.
+    ///
+    /// A directory's mtime does NOT change when an existing file's *content* is
+    /// edited, so per-file mtimes (not the root dir mtime) are compared.
+    ///
+    /// This is intentionally conservative:
+    /// - when the cache modification time cannot be read, it returns `false` so
+    ///   the caller re-scans rather than trusting a cache it cannot validate;
+    /// - the comparison is strict (`>`): if a source edit lands in the *same*
+    ///   coarse mtime tick as the cache write (possible on low-granularity
+    ///   filesystems), the cache is treated as potentially stale and a rescan
+    ///   is forced. This prefers an occasional redundant scan over ever serving
+    ///   stale symbols.
+    ///
+    /// Freshness does NOT detect a *deleted* source file (removing a file makes
+    /// nothing newer than the cache); callers pair this with
+    /// [`LoreGrep::first_missing_indexed_path`] after loading to catch that.
+    /// The crate-version gate is additionally enforced at
+    /// [`LoreGrep::load_index`] time.
     pub fn is_cache_fresh(&self, cache_path: &Path, root: &Path) -> bool {
         let cache_modified = match std::fs::metadata(cache_path).and_then(|m| m.modified()) {
             Ok(m) => m,
             Err(_) => return false, // missing/unreadable cache -> not fresh
         };
 
-        // The cache is stale if ANY source file under `root` is newer than it.
-        // A directory's mtime does NOT change when an existing file's *content*
-        // is edited, so checking only the root dir mtime would serve stale
-        // results after an edit. Walk the files instead (O(files) stat, no reads),
-        // skipping heavy/irrelevant dirs and our own cache directory.
-        let mut newest: Option<std::time::SystemTime> = None;
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                !matches!(
-                    name.as_ref(),
-                    ".loregrep" | ".git" | "target" | "node_modules"
-                )
-            })
-            .flatten()
-        {
-            if entry.file_type().is_file() {
-                if let Ok(md) = entry.metadata() {
-                    if let Ok(m) = md.modified() {
-                        if newest.is_none_or(|n| m > n) {
-                            newest = Some(m);
-                        }
-                    }
-                }
-            }
+        match self.scanner.newest_modified_time(root) {
+            Some(newest_file) => cache_modified > newest_file,
+            None => true, // no indexable source files -> trivially fresh
         }
+    }
 
-        match newest {
-            Some(newest_file) => cache_modified >= newest_file,
-            None => true, // no source files -> trivially fresh
+    /// Return the first indexed file path that no longer exists on disk, if any.
+    ///
+    /// mtime-based freshness ([`LoreGrep::is_cache_fresh`]) cannot notice a
+    /// *deleted* source file: removing a file makes no remaining file newer than
+    /// the cache, so a loaded cache would keep serving the deleted file's
+    /// symbols. Callers invoke this right after [`LoreGrep::load_index`] and, if
+    /// it returns `Some`, discard the loaded index (via
+    /// [`LoreGrep::clear_index`]) and rescan.
+    pub fn first_missing_indexed_path(&self) -> Option<String> {
+        let repo_map = self.repo_map.lock().ok()?;
+        repo_map
+            .get_all_files()
+            .iter()
+            .map(|file| file.file_path.clone())
+            .find(|path| !Path::new(path).exists())
+    }
+
+    /// Reset the in-memory index to empty. Used to discard a loaded cache that
+    /// was found stale (e.g. an indexed file was deleted) before rescanning, so
+    /// the subsequent scan does not leave the removed file's symbols behind.
+    pub fn clear_index(&self) {
+        if let Ok(mut repo_map) = self.repo_map.lock() {
+            *repo_map = RepoMap::new();
         }
     }
 

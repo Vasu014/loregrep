@@ -125,7 +125,7 @@ impl CliApp {
 
         // Cache results if enabled
         if args.cache && self.config.cache.enabled {
-            self.save_cache(&args.path).await?;
+            self.save_cache(&args.path);
         }
 
         if self.verbose {
@@ -147,11 +147,28 @@ impl CliApp {
         let cache_path = LoreGrep::default_cache_path(&args.path);
 
         // Try to reuse a fresh cache; fall back to scanning on any miss/failure.
+        // The freshness walk (inside `is_cache_fresh`) only runs when the cache
+        // file exists — on the first run there is no cache, so we skip straight
+        // to a single scan below rather than walking the tree twice.
         let loaded_from_cache = if self.loregrep.is_cache_fresh(&cache_path, &args.path) {
             match self.loregrep.load_index(&cache_path) {
                 Ok(()) => {
-                    eprintln!("Loaded index cache from {}", cache_path.display());
-                    true
+                    // Deletion guard: mtime freshness cannot detect a *removed*
+                    // source file (nothing remaining is newer than the cache),
+                    // so a loaded cache would still return the deleted file's
+                    // symbols. Verify every indexed path still exists; if one is
+                    // gone, discard the loaded index and rescan.
+                    if let Some(missing) = self.loregrep.first_missing_indexed_path() {
+                        eprintln!(
+                            "Cache stale: indexed file no longer exists ({}); rescanning",
+                            missing
+                        );
+                        self.loregrep.clear_index();
+                        false
+                    } else {
+                        eprintln!("Loaded index cache from {}", cache_path.display());
+                        true
+                    }
                 }
                 Err(e) => {
                     eprintln!("Cache load failed ({}); rescanning", e);
@@ -168,13 +185,9 @@ impl CliApp {
                 .await
                 .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
-            // Persist the freshly built index so the next invocation can skip the
-            // scan. A save failure is non-fatal: warn and continue.
-            if let Err(e) = self.loregrep.save_index(&cache_path) {
-                eprintln!("Warning: failed to save index cache: {}", e);
-            } else {
-                eprintln!("Saved index cache to {}", cache_path.display());
-            }
+            // Persist the freshly built index so the next invocation can skip
+            // the scan. Uses the shared, non-fatal save path.
+            self.save_cache(&args.path);
         }
 
         let params: serde_json::Value = serde_json::from_str(&args.params)
@@ -766,14 +779,18 @@ impl CliApp {
 
     /// Persist the current in-memory index to the per-repo cache
     /// (`<root>/.loregrep/index.cache`) so later invocations can skip rescanning.
-    /// Diagnostics go to stderr only; stdout is untouched.
-    async fn save_cache(&self, root_path: &Path) -> Result<()> {
+    ///
+    /// This is the single save path shared by `scan` and `exec_tool`: it owns
+    /// the cache-path computation and the error policy. Cache saving is a
+    /// best-effort optimization, so a failure is non-fatal — it warns on stderr
+    /// and returns rather than aborting the command. Diagnostics go to stderr
+    /// only; stdout is untouched (machine-first output).
+    fn save_cache(&self, root_path: &Path) {
         let cache_path = LoreGrep::default_cache_path(root_path);
-        self.loregrep
-            .save_index(&cache_path)
-            .map_err(|e| anyhow::anyhow!("Failed to save index cache: {}", e))?;
-        eprintln!("Saved index cache to {}", cache_path.display());
-        Ok(())
+        match self.loregrep.save_index(&cache_path) {
+            Ok(()) => eprintln!("Saved index cache to {}", cache_path.display()),
+            Err(e) => eprintln!("Warning: failed to save index cache: {}", e),
+        }
     }
 }
 
@@ -1070,6 +1087,148 @@ struct PrivateStruct {
         assert!(
             count >= 1,
             "cache-loaded index should contain cached_target"
+        );
+    }
+
+    #[test]
+    async fn test_exec_tool_cache_invalidated_on_file_deletion() {
+        // Regression: mtime-based freshness cannot see a *deleted* source file
+        // (removing it makes no remaining file newer than the cache), so a naive
+        // cache would keep returning the deleted file's symbols. exec_tool must
+        // detect the missing indexed path, discard the cache, and rescan.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_rust_file(&temp_dir, "keep.rs", "pub fn alpha_keep() -> i32 { 1 }\n");
+        let doomed = create_test_rust_file(
+            &temp_dir,
+            "doomed.rs",
+            "pub fn beta_doomed() -> i32 { 2 }\n",
+        );
+
+        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+
+        // First run: scan both files and persist the cache.
+        {
+            let mut app = CliApp::new(create_test_config(), false, false)
+                .await
+                .unwrap();
+            let args = ExecToolArgs {
+                tool: "search_functions".to_string(),
+                params: r#"{"pattern":"beta_doomed"}"#.to_string(),
+                path: temp_dir.path().to_path_buf(),
+            };
+            assert!(app.exec_tool(args).await.is_ok());
+        }
+        assert!(cache_path.exists(), "first run should write the cache");
+
+        // Delete one indexed file. Its removal does NOT make any surviving file
+        // newer than the cache, so pure mtime freshness still reports "fresh".
+        fs::remove_file(&doomed).unwrap();
+
+        let mut app2 = CliApp::new(create_test_config(), false, false)
+            .await
+            .unwrap();
+        assert!(
+            app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
+            "mtime freshness alone cannot see the deletion (this is the hole)"
+        );
+
+        // Second run: the deletion guard must fire, discard the cache, and
+        // rescan so the deleted file's symbols are gone.
+        let args = ExecToolArgs {
+            tool: "search_functions".to_string(),
+            params: r#"{"pattern":"beta_doomed"}"#.to_string(),
+            path: temp_dir.path().to_path_buf(),
+        };
+        assert!(app2.exec_tool(args).await.is_ok());
+
+        let beta = app2
+            .loregrep
+            .execute_tool(
+                "search_functions",
+                serde_json::json!({"pattern": "beta_doomed"}),
+            )
+            .await
+            .unwrap();
+        let beta_count = beta.data.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        assert_eq!(
+            beta_count, 0,
+            "deleted file's symbols must not survive in the rescanned index"
+        );
+
+        // Sanity: the surviving file is still indexed.
+        let alpha = app2
+            .loregrep
+            .execute_tool(
+                "search_functions",
+                serde_json::json!({"pattern": "alpha_keep"}),
+            )
+            .await
+            .unwrap();
+        let alpha_count = alpha
+            .data
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(alpha_count >= 1, "surviving file should remain indexed");
+    }
+
+    #[test]
+    async fn test_freshness_ignores_files_in_excluded_dirs() {
+        // Regression: the freshness check must consider the SAME files the
+        // scanner indexes. A regenerated file under an excluded directory must
+        // NOT mark the cache stale (otherwise the cache never helps), while a
+        // real edit to an indexed file MUST.
+        let temp_dir = TempDir::new().unwrap();
+        create_test_rust_file(&temp_dir, "main.rs", "pub fn indexed_fn() -> i32 { 1 }\n");
+
+        // A file inside an excluded directory: it is not indexed, so it must not
+        // influence freshness.
+        let excluded_dir = temp_dir.path().join("excluded");
+        fs::create_dir(&excluded_dir).unwrap();
+        let excluded_file = excluded_dir.join("generated.rs");
+        fs::write(&excluded_file, "pub fn excluded_fn() -> i32 { 2 }\n").unwrap();
+
+        // Configure the scanner to exclude that directory (mirrors how config
+        // exclude_patterns / gitignore drop build artifacts).
+        let mut config = create_test_config();
+        config
+            .file_scanning
+            .exclude_patterns
+            .push("**/excluded/**".to_string());
+
+        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        {
+            let mut app = CliApp::new(config.clone(), false, false).await.unwrap();
+            let args = ExecToolArgs {
+                tool: "search_functions".to_string(),
+                params: r#"{"pattern":"indexed_fn"}"#.to_string(),
+                path: temp_dir.path().to_path_buf(),
+            };
+            assert!(app.exec_tool(args).await.is_ok());
+        }
+        assert!(cache_path.exists(), "first run should write the cache");
+
+        let app2 = CliApp::new(config.clone(), false, false).await.unwrap();
+
+        // Touch the excluded file so it is strictly newer than the cache. Since
+        // it is excluded from indexing, the cache must still be considered fresh.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&excluded_file, "pub fn excluded_fn() -> i32 { 3 }\n").unwrap();
+        assert!(
+            app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
+            "a change under an excluded dir must NOT make the cache stale"
+        );
+
+        // Control: editing the indexed file MUST invalidate the cache.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(
+            temp_dir.path().join("main.rs"),
+            "pub fn indexed_fn() -> i32 { 42 }\n",
+        )
+        .unwrap();
+        assert!(
+            !app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
+            "editing an indexed file MUST make the cache stale"
         );
     }
 
