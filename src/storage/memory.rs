@@ -1079,10 +1079,24 @@ impl RepoMap {
         self.remove_from_import_index(index);
         self.remove_from_export_index(index);
         self.remove_from_language_index(index);
+        // call_graph is keyed by call-site file_path (not numeric file index), so it is
+        // pruned by path here and needs no shift in reindex_after_removal.
+        self.remove_from_call_graph(&file_path);
 
         // Remove from files vector and update remaining indexes
         self.files.remove(index);
         self.reindex_after_removal(index);
+    }
+
+    /// Drop every call site originating in `file_path` from the call graph, removing any
+    /// key whose call-site vector becomes empty. Without this, `add_file` re-adding a path
+    /// appends its call sites a second time (duplicates) and `remove_file` leaves stale ones
+    /// — poisoning `find_function_callers`, `trace_callers`, and `analyze_impact`.
+    fn remove_from_call_graph(&mut self, file_path: &str) {
+        self.call_graph.retain(|_name, sites| {
+            sites.retain(|site| site.file_path != file_path);
+            !sites.is_empty()
+        });
     }
 
     fn update_indexes_for_file(&mut self, index: usize, tree_node: &TreeNode) -> Result<()> {
@@ -1570,6 +1584,61 @@ mod tests {
         assert_eq!(callers.len(), 1);
         assert_eq!(callers[0].function_name, "call_test");
         assert_eq!(callers[0].line_number, 42);
+    }
+
+    // P0-1 regression: call_graph must not accumulate stale/duplicate call sites across
+    // file re-add and removal (previously remove_file_by_index skipped the call_graph).
+    #[test]
+    fn test_call_graph_no_duplicates_on_readd() {
+        let mut repo_map = RepoMap::new();
+        let node = create_test_tree_node("test", "rust");
+
+        repo_map.add_file(node.clone()).unwrap();
+        let before = repo_map.find_function_callers("call_test").len();
+        assert_eq!(before, 1);
+
+        // Re-adding the same file (watch mode / re-scan) must not duplicate call sites.
+        repo_map.add_file(node.clone()).unwrap();
+        let after = repo_map.find_function_callers("call_test").len();
+        assert_eq!(after, before, "re-adding a file duplicated its call sites");
+    }
+
+    #[test]
+    fn test_call_graph_cleared_on_remove() {
+        let mut repo_map = RepoMap::new();
+        let node = create_test_tree_node("test", "rust");
+        let file_path = node.file_path.clone();
+
+        repo_map.add_file(node).unwrap();
+        assert_eq!(repo_map.find_function_callers("call_test").len(), 1);
+
+        repo_map.remove_file(&file_path).unwrap();
+
+        // No CallSite from the removed file may survive.
+        let callers = repo_map.find_function_callers("call_test");
+        assert!(
+            callers.iter().all(|c| c.file_path != file_path),
+            "removed file left stale call sites in the call graph"
+        );
+        assert_eq!(callers.len(), 0);
+    }
+
+    #[test]
+    fn test_call_graph_drops_emptied_keys_on_remove() {
+        let mut repo_map = RepoMap::new();
+        let node = create_test_tree_node("test", "rust");
+        let file_path = node.file_path.clone();
+
+        repo_map.add_file(node).unwrap();
+        repo_map.remove_file(&file_path).unwrap();
+
+        // The only key ("call_test") had all its sites removed, so it must not linger as an
+        // empty Vec keyed in the map.
+        assert!(
+            repo_map.call_graph.values().all(|sites| !sites.is_empty()),
+            "call_graph retained an empty CallSite vector after removal"
+        );
+        assert!(!repo_map.call_graph.contains_key("call_test"));
     }
 
     #[test]
