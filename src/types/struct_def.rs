@@ -281,9 +281,6 @@ mod p1_1_tests {
             serde_json::to_string(&TypeKind::AbstractClass).unwrap(),
             "\"abstract_class\""
         );
-        assert_eq!(
-            serde_json::to_string(&TypeKind::Enum).unwrap(),
-            "\"enum\""
-        );
+        assert_eq!(serde_json::to_string(&TypeKind::Enum).unwrap(), "\"enum\"");
     }
 }

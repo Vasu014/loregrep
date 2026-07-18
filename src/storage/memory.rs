@@ -1772,9 +1772,12 @@ mod tests {
         repo_map.add_file(node).unwrap();
 
         let result = repo_map.find_functions("ingest");
-        assert_eq!(result.items.len(), 2, "each definition counted exactly once");
-        let owners: Vec<Option<&str>> =
-            result.items.iter().map(|f| f.owner.as_deref()).collect();
+        assert_eq!(
+            result.items.len(),
+            2,
+            "each definition counted exactly once"
+        );
+        let owners: Vec<Option<&str>> = result.items.iter().map(|f| f.owner.as_deref()).collect();
         assert!(owners.contains(&None));
         assert!(owners.contains(&Some("Thing")));
     }
@@ -1966,8 +1969,9 @@ mod tests {
             let mut node = TreeNode::new(path.clone(), "rust".to_string());
             node.functions
                 .push(FunctionSignature::new("load".to_string(), path.clone()).with_location(1, 3));
-            node.functions
-                .push(FunctionSignature::new(caller.to_string(), path.clone()).with_location(5, 10));
+            node.functions.push(
+                FunctionSignature::new(caller.to_string(), path.clone()).with_location(5, 10),
+            );
             node.functions
                 .push(FunctionSignature::new(top.to_string(), path.clone()).with_location(12, 18));
             // caller() calls load(); top() calls caller().
@@ -1979,8 +1983,12 @@ mod tests {
             node
         };
 
-        repo_map.add_file(mk_chain("coll_a", "caller_a", "top_a")).unwrap();
-        repo_map.add_file(mk_chain("coll_b", "caller_b", "top_b")).unwrap();
+        repo_map
+            .add_file(mk_chain("coll_a", "caller_a", "top_a"))
+            .unwrap();
+        repo_map
+            .add_file(mk_chain("coll_b", "caller_b", "top_b"))
+            .unwrap();
 
         let callers = repo_map.transitive_callers("load", 0);
 
@@ -1999,7 +2007,10 @@ mod tests {
         // each stays attributed to its own file — the chains do not cross.
         let deep: Vec<&TransitiveCaller> = callers.iter().filter(|c| c.depth == 2).collect();
         assert_eq!(deep.len(), 2);
-        assert!(deep.iter().all(|c| !c.ambiguous), "unique-named callers are exact");
+        assert!(
+            deep.iter().all(|c| !c.ambiguous),
+            "unique-named callers are exact"
+        );
         let top_a = deep.iter().find(|c| c.function_name == "top_a").unwrap();
         assert_eq!(top_a.file_path, "/test/coll_a.rs");
         let top_b = deep.iter().find(|c| c.function_name == "top_b").unwrap();

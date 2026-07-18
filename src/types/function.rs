@@ -205,7 +205,10 @@ mod p1_1_tests {
 
     #[test]
     fn function_signature_new_has_no_owner() {
-        assert_eq!(FunctionSignature::new("f".into(), "f.rs".into()).owner, None);
+        assert_eq!(
+            FunctionSignature::new("f".into(), "f.rs".into()).owner,
+            None
+        );
     }
 
     #[test]

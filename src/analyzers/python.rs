@@ -1365,10 +1365,7 @@ class Multi(A, B):
 
         let multi = classes.iter().find(|c| c.name == "Multi").unwrap();
         assert_eq!(multi.kind, TypeKind::Class);
-        assert_eq!(
-            multi.supertypes,
-            vec!["A".to_string(), "B".to_string()]
-        );
+        assert_eq!(multi.supertypes, vec!["A".to_string(), "B".to_string()]);
     }
 
     #[tokio::test]

@@ -256,9 +256,7 @@ impl TypeScriptAnalyzer {
                         }
                     }
                     // Interface heritage: `interface I extends A, B`.
-                    "extends_type_clause" => {
-                        out.extend(self.named_children_text(&child, source))
-                    }
+                    "extends_type_clause" => out.extend(self.named_children_text(&child, source)),
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {

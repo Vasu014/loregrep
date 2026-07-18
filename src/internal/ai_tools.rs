@@ -473,7 +473,8 @@ impl LocalAnalysisTools {
                 if total <= 1 {
                     return None;
                 }
-                let candidates: Vec<String> = files.into_iter().take(AMBIGUOUS_CANDIDATE_CAP).collect();
+                let candidates: Vec<String> =
+                    files.into_iter().take(AMBIGUOUS_CANDIDATE_CAP).collect();
                 Some(json!({
                     "name": name,
                     "definition_count": total,
@@ -511,8 +512,10 @@ impl LocalAnalysisTools {
 
         // Affected files, split the same way (a file may hold both kinds; it is
         // "confirmed" affected if any exact caller lives there).
-        let mut confirmed_files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut candidate_only: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut confirmed_files: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut candidate_only: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for c in &transitive {
             if c.ambiguous {
                 candidate_only.insert(c.file_path.clone());
@@ -1293,8 +1296,11 @@ mod tests {
                 FunctionSignature::new("helper".to_string(), path.clone()).with_location(12, 15),
             );
             // load() calls parse_config() at line 5 (inside load's span).
-            node.function_calls
-                .push(FunctionCall::new("parse_config".to_string(), path.clone(), 5));
+            node.function_calls.push(FunctionCall::new(
+                "parse_config".to_string(),
+                path.clone(),
+                5,
+            ));
             node.content_hash = "h_loader".to_string();
             rm.add_file(node).unwrap();
         }
@@ -1415,7 +1421,10 @@ mod tests {
         // the multiply-defined `load` are flagged name_ambiguous.
         for c in callers {
             let res = c["resolution"].as_str().unwrap();
-            assert!(res == "exact" || res == "name_ambiguous", "resolution: {res}");
+            assert!(
+                res == "exact" || res == "name_ambiguous",
+                "resolution: {res}"
+            );
             assert_eq!(res, "name_ambiguous");
         }
 
@@ -1451,7 +1460,12 @@ mod tests {
         assert_eq!(result.data["ambiguous_functions"].as_u64().unwrap(), 2);
         assert_eq!(result.data["affected_file_count"].as_u64().unwrap(), 0);
         assert_eq!(result.data["candidate_files"].as_array().unwrap().len(), 2);
-        assert!(!result.data["ambiguous_names"].as_array().unwrap().is_empty());
+        assert!(
+            !result.data["ambiguous_names"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             result.data["summary"]
                 .as_str()

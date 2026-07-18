@@ -362,9 +362,10 @@ impl LanguageAnalyzer for RustAnalyzer {
             // under the `type:` field (the `Type` in `impl Type` / `impl Trait for Type`),
             // which becomes the method's `owner`.
             if let Some(node) = function_node {
-                let impl_item = node.parent().filter(|p| p.kind() == "declaration_list").and_then(
-                    |parent| parent.parent().filter(|gp| gp.kind() == "impl_item"),
-                );
+                let impl_item = node
+                    .parent()
+                    .filter(|p| p.kind() == "declaration_list")
+                    .and_then(|parent| parent.parent().filter(|gp| gp.kind() == "impl_item"));
 
                 if let Some(impl_node) = impl_item {
                     // A method without a `self` receiver is an associated (static) function.
@@ -525,12 +526,11 @@ impl LanguageAnalyzer for RustAnalyzer {
             ) @trait
         "#;
 
-        let enum_trait_query =
-            Query::new(&self.language, enum_trait_query_str).map_err(|e| {
-                AnalysisError::QueryError {
-                    message: format!("{:?}", e),
-                }
-            })?;
+        let enum_trait_query = Query::new(&self.language, enum_trait_query_str).map_err(|e| {
+            AnalysisError::QueryError {
+                message: format!("{:?}", e),
+            }
+        })?;
 
         let mut et_cursor = QueryCursor::new();
         let mut et_matches =
@@ -545,9 +545,7 @@ impl LanguageAnalyzer for RustAnalyzer {
 
                 match capture_name {
                     "enum_name" | "trait_name" => sig.name = text.to_string(),
-                    "enum_visibility" | "trait_visibility" => {
-                        sig.is_public = text.contains("pub")
-                    }
+                    "enum_visibility" | "trait_visibility" => sig.is_public = text.contains("pub"),
                     "enum_generics" | "trait_generics" => {
                         sig.generics = self.extract_generics(&capture.node, source);
                     }
