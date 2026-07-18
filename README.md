@@ -20,18 +20,18 @@ It's the *context engine* an agent calls; it is **not** an AI itself.
 ---
 
 ```mermaid
-flowchart LR
+flowchart TB
     A(["🤖  Coding agent"]):::agent
 
     subgraph IF["Interfaces"]
-        direction TB
+        direction LR
         S["Claude Code skill"]:::iface
         P["pi extension"]:::iface
         C["exec-tool CLI"]:::iface
     end
 
     subgraph ENG["loregrep engine"]
-        direction TB
+        direction LR
         SC["Scanner<br/>gitignore-aware"]:::eng
         AN["Tree-sitter analyzers<br/>Rust · Python · TS / TSX"]:::eng
         IX[("Index · RepoMap<br/>persistent cache")]:::index
