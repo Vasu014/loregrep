@@ -357,9 +357,17 @@ impl RepoMap {
 
         let mut results = Vec::new();
 
-        // Try exact match first
+        // Try exact match first. function_index[pattern] lists a file index once
+        // per definition of that name, so a file defining the name more than once
+        // (e.g. a trait method signature plus its impl) appears multiple times.
+        // Visit each file once — the inner loop already collects every matching
+        // function in it — otherwise results are duplicated.
         if let Some(file_indices) = self.function_index.get(pattern) {
+            let mut seen_files = HashSet::new();
             for &file_idx in file_indices {
+                if !seen_files.insert(file_idx) {
+                    continue;
+                }
                 if let Some(file) = self.files.get(file_idx) {
                     for func in &file.functions {
                         if func.name == pattern {
@@ -422,9 +430,15 @@ impl RepoMap {
         let start_time = std::time::Instant::now();
         let mut results = Vec::new();
 
-        // Try exact match first
+        // Try exact match first. Dedup file indices for the same reason as
+        // find_functions: struct_index lists a file once per definition of the
+        // name, so visiting each file once avoids duplicated results.
         if let Some(file_indices) = self.struct_index.get(pattern) {
+            let mut seen_files = HashSet::new();
             for &file_idx in file_indices {
+                if !seen_files.insert(file_idx) {
+                    continue;
+                }
                 if let Some(file) = self.files.get(file_idx) {
                     for struct_def in &file.structs {
                         if struct_def.name == pattern {
@@ -1737,6 +1751,32 @@ mod tests {
         assert_eq!(callers.len(), 1);
         assert_eq!(callers[0].function_name, "call_test");
         assert_eq!(callers[0].line_number, 42);
+    }
+
+    // A file defining the same name twice (e.g. a trait method signature + its
+    // impl) lists that file twice in function_index; find_functions must not
+    // return the matches multiple times.
+    #[test]
+    fn test_find_functions_no_duplicate_same_file_same_name() {
+        let mut repo_map = RepoMap::new();
+        let path = "/test/dup.rs".to_string();
+        let mut node = TreeNode::new(path.clone(), "rust".to_string());
+        node.functions
+            .push(FunctionSignature::new("ingest".to_string(), path.clone()).with_location(1, 2));
+        node.functions.push(
+            FunctionSignature::new("ingest".to_string(), path.clone())
+                .with_owner("Thing")
+                .with_location(5, 7),
+        );
+        node.content_hash = "h_dup".to_string();
+        repo_map.add_file(node).unwrap();
+
+        let result = repo_map.find_functions("ingest");
+        assert_eq!(result.items.len(), 2, "each definition counted exactly once");
+        let owners: Vec<Option<&str>> =
+            result.items.iter().map(|f| f.owner.as_deref()).collect();
+        assert!(owners.contains(&None));
+        assert!(owners.contains(&Some("Thing")));
     }
 
     // P0-1 regression: call_graph must not accumulate stale/duplicate call sites across
