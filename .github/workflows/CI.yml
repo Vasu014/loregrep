@@ -195,3 +195,18 @@ jobs:
         with:
           command: upload
           args: --non-interactive --skip-existing wheels-*/*
+
+  # Publish the Rust crate to crates.io on a tag. Requires a CARGO_REGISTRY_TOKEN
+  # repository secret (crates.io API token). Independent of the PyPI release above.
+  crate-release:
+    name: Publish crate to crates.io
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish

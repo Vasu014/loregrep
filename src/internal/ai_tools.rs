@@ -24,7 +24,7 @@ impl LocalAnalysisTools {
         vec![
             ToolSchema {
                 name: "search_functions".to_string(),
-                description: "Look up functions from the code graph by name or regex and get their STRUCTURED signature — parameters, return type, visibility, async, and exact definition line. Returns real definitions, not text matches, so unlike grep it skips comments, string literals, and call sites.".to_string(),
+                description: "Look up functions by name or regex and return their structured signature: parameters, return type, visibility, async/const/static flags, and the definition's file path and line range.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -47,7 +47,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "search_structs".to_string(),
-                description: "Look up structs/classes/interfaces from the code graph by name or regex, with their fields, generics, and definition line. Real type definitions, not text matches — no comment or string-literal noise.".to_string(),
+                description: "Look up structs, classes, and interfaces by name or regex and return their fields, generics, visibility, and definition location.".to_string(),
                 input_schema: json!({
                     "type": "object", 
                     "properties": {
@@ -103,7 +103,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "find_callers".to_string(),
-                description: "Find the EXACT call sites of a function across the repo, with file:line, from the call graph. Returns only real calls — excludes comments, string literals, imports, and the function's own definition, which a text search (grep) would wrongly include. Use this instead of grep for 'who calls X'.".to_string(),
+                description: "Return the direct call sites of a function across the repository, each with file path and line, resolved from the parsed call graph — call expressions only (not comments, string literals, imports, or the definition).".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -160,9 +160,22 @@ impl LocalAnalysisTools {
 
         let repo_map = self.repo_map.lock().unwrap();
         let results = repo_map.find_functions(&search_input.pattern);
+        // Apply the optional language filter: keep only functions defined in a
+        // file whose analyzer language matches (case-insensitive). Each result's
+        // owning file is looked up in the repo map to recover its language, since
+        // FunctionSignature does not carry the language directly. A filter for a
+        // language absent from the repo therefore yields an empty set.
+        let language_filter = search_input.language.as_deref();
         let limited_results: Vec<_> = results
             .items
             .into_iter()
+            .filter(|func| match language_filter {
+                Some(lang) => repo_map
+                    .get_file(&func.file_path)
+                    .map(|node| node.language.eq_ignore_ascii_case(lang))
+                    .unwrap_or(false),
+                None => true,
+            })
             .take(search_input.limit.unwrap_or(20))
             .collect();
 
@@ -182,9 +195,18 @@ impl LocalAnalysisTools {
 
         let repo_map = self.repo_map.lock().unwrap();
         let results = repo_map.find_structs(&search_input.pattern);
+        // Apply the optional language filter (see search_functions above).
+        let language_filter = search_input.language.as_deref();
         let limited_results: Vec<_> = results
             .items
             .into_iter()
+            .filter(|struct_def| match language_filter {
+                Some(lang) => repo_map
+                    .get_file(&struct_def.file_path)
+                    .map(|node| node.language.eq_ignore_ascii_case(lang))
+                    .unwrap_or(false),
+                None => true,
+            })
             .take(search_input.limit.unwrap_or(20))
             .collect();
 
