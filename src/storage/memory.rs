@@ -502,6 +502,19 @@ impl RepoMap {
             .unwrap_or_default()
     }
 
+    /// Return the file paths of every definition of `function_name`. More than one
+    /// entry means the name is multiply-defined (a name collision): callers
+    /// attributed to it through the name-keyed call graph are candidates, not a
+    /// confirmed single target. Used to explain ambiguity in tool output.
+    pub fn function_definition_files(&self, function_name: &str) -> Vec<String> {
+        self.function_index
+            .get(function_name)
+            .into_iter()
+            .flatten()
+            .filter_map(|&idx| self.files.get(idx).map(|f| f.file_path.clone()))
+            .collect()
+    }
+
     /// Walk UP the call graph to find every function that TRANSITIVELY calls
     /// `function_name`.
     ///

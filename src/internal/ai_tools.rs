@@ -141,7 +141,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "trace_callers".to_string(),
-                description: "Return the transitive (upstream) callers of a function — every function that reaches the target through the call graph, across files, each with its depth. Where find_callers returns one hop, this walks the graph to the full upstream chain. Depth is bounded by max_depth (0 = unlimited).".to_string(),
+                description: "Return the transitive (upstream) callers of a function — every function that reaches the target through the call graph, across files, each with its depth. Where find_callers returns one hop, this walks the graph to the full upstream chain. Depth is bounded by max_depth (0 = unlimited). Each caller carries a `resolution`: \"exact\" (single-definition, confirmed) or \"name_ambiguous\" (reached via a name with more than one definition, so it is a candidate — the specific target is unresolved). `exact_count`/`ambiguous_count` split the total, and `ambiguous_names` lists the colliding names with their candidate definition files.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -160,7 +160,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "analyze_impact".to_string(),
-                description: "Return the change blast radius of a function: every function and file that transitively depends on it, resolved through the call graph. Summarizes direct callers, transitively affected functions, and the set of affected files.".to_string(),
+                description: "Return the change blast radius of a function: every function and file that transitively depends on it, resolved through the call graph. `transitive_functions` and `affected_files` count only exact (confirmed) callers; `ambiguous_functions` and `candidate_files` hold candidates reached via multiply-defined names, and `ambiguous_names` explains each collision — so the headline impact is never inflated by unconfirmed links.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -364,20 +364,27 @@ impl LocalAnalysisTools {
             serde_json::from_value(input).context("Invalid trace_callers input")?;
 
         let max_depth = trace_input.max_depth.unwrap_or(0);
-        let callers = self
-            .repo_map
-            .lock()
-            .unwrap()
-            .transitive_callers(&trace_input.function_name, max_depth);
+        let (callers, ambiguous_names) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            let callers = repo_map.transitive_callers(&trace_input.function_name, max_depth);
+            let ambiguous_names =
+                Self::ambiguous_names_summary(&repo_map, &trace_input.function_name, &callers);
+            (callers, ambiguous_names)
+        };
 
         let max_depth_reached = callers.iter().map(|c| c.depth).max().unwrap_or(0);
+        let ambiguous_count = callers.iter().filter(|c| c.ambiguous).count();
         let callers_json: Vec<Value> = callers
             .iter()
             .map(|c| {
                 json!({
                     "function_name": c.function_name,
                     "file_path": c.file_path,
-                    "depth": c.depth
+                    "depth": c.depth,
+                    // "name_ambiguous": reached by expanding a name with >1
+                    // definition, so which definition it calls is unresolved — a
+                    // candidate, not a confirmed caller. "exact": single-definition.
+                    "resolution": if c.ambiguous { "name_ambiguous" } else { "exact" }
                 })
             })
             .collect();
@@ -387,17 +394,56 @@ impl LocalAnalysisTools {
             "function_name": trace_input.function_name,
             "callers": callers_json,
             "count": callers.len(),
-            "max_depth_reached": max_depth_reached
+            "exact_count": callers.len() - ambiguous_count,
+            "ambiguous_count": ambiguous_count,
+            "max_depth_reached": max_depth_reached,
+            "ambiguous_names": ambiguous_names
         });
 
         Ok(ToolResult::success(result))
+    }
+
+    /// Build the `ambiguous_names` summary: for every name in the traced chain
+    /// (the target plus each caller) that has more than one definition, report the
+    /// name, its definition count, and up to `AMBIGUOUS_CANDIDATE_CAP` candidate
+    /// files. These are the collisions that make some callers candidates rather
+    /// than confirmed links. Empty when the chain has no name collisions.
+    fn ambiguous_names_summary(
+        repo_map: &RepoMap,
+        target: &str,
+        callers: &[crate::storage::memory::TransitiveCaller],
+    ) -> Vec<Value> {
+        const AMBIGUOUS_CANDIDATE_CAP: usize = 5;
+        let mut names: Vec<&str> = Vec::with_capacity(callers.len() + 1);
+        names.push(target);
+        names.extend(callers.iter().map(|c| c.function_name.as_str()));
+        names.sort_unstable();
+        names.dedup();
+
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let files = repo_map.function_definition_files(name);
+                let total = files.len();
+                if total <= 1 {
+                    return None;
+                }
+                let candidates: Vec<String> = files.into_iter().take(AMBIGUOUS_CANDIDATE_CAP).collect();
+                Some(json!({
+                    "name": name,
+                    "definition_count": total,
+                    "candidate_files": candidates,
+                    "candidates_truncated": total > AMBIGUOUS_CANDIDATE_CAP
+                }))
+            })
+            .collect()
     }
 
     async fn analyze_impact(&self, input: Value) -> Result<ToolResult> {
         let impact_input: AnalyzeImpactInput =
             serde_json::from_value(input).context("Invalid analyze_impact input")?;
 
-        let (direct_callers, transitive) = {
+        let (direct_callers, transitive, ambiguous_names) = {
             let repo_map = self.repo_map.lock().unwrap();
             // Direct callers = distinct enclosing functions one hop up.
             let direct: std::collections::HashSet<String> = repo_map
@@ -406,21 +452,36 @@ impl LocalAnalysisTools {
                 .filter_map(|c| c.caller_function)
                 .collect();
             let transitive = repo_map.transitive_callers(&impact_input.function_name, 0);
-            (direct.len(), transitive)
+            let ambiguous_names =
+                Self::ambiguous_names_summary(&repo_map, &impact_input.function_name, &transitive);
+            (direct.len(), transitive, ambiguous_names)
         };
 
-        // Aggregate affected files across the whole transitive set.
-        let mut affected_files: Vec<String> = transitive
-            .iter()
-            .map(|c| c.file_path.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        affected_files.sort();
+        // Split the transitive set by resolution: exact callers are confirmed to
+        // reach the target; ambiguous ones are candidates (reached via a
+        // multiply-defined name). Keep them separate so the headline count is not
+        // inflated by unconfirmed links.
+        let ambiguous_functions = transitive.iter().filter(|c| c.ambiguous).count();
+        let transitive_functions = transitive.len() - ambiguous_functions;
 
-        let transitive_functions = transitive.len();
+        // Affected files, split the same way (a file may hold both kinds; it is
+        // "confirmed" affected if any exact caller lives there).
+        let mut confirmed_files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut candidate_only: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for c in &transitive {
+            if c.ambiguous {
+                candidate_only.insert(c.file_path.clone());
+            } else {
+                confirmed_files.insert(c.file_path.clone());
+            }
+        }
+        // A file with an exact caller is confirmed, not candidate-only.
+        candidate_only.retain(|f| !confirmed_files.contains(f));
+        let affected_files: Vec<String> = confirmed_files.iter().cloned().collect();
+        let candidate_files: Vec<String> = candidate_only.iter().cloned().collect();
         let affected_file_count = affected_files.len();
-        let summary = format!(
+
+        let mut summary = format!(
             "Changing `{}` transitively affects {} function{} across {} file{}",
             impact_input.function_name,
             transitive_functions,
@@ -428,14 +489,24 @@ impl LocalAnalysisTools {
             affected_file_count,
             if affected_file_count == 1 { "" } else { "s" }
         );
+        if ambiguous_functions > 0 {
+            summary.push_str(&format!(
+                "; {} additional candidate caller{} via name collisions (see ambiguous_names)",
+                ambiguous_functions,
+                if ambiguous_functions == 1 { "" } else { "s" }
+            ));
+        }
 
         let result = json!({
             "status": "success",
             "function_name": impact_input.function_name,
             "direct_callers": direct_callers,
             "transitive_functions": transitive_functions,
+            "ambiguous_functions": ambiguous_functions,
             "affected_files": affected_files,
             "affected_file_count": affected_file_count,
+            "candidate_files": candidate_files,
+            "ambiguous_names": ambiguous_names,
             "summary": summary
         });
 
@@ -772,6 +843,19 @@ mod tests {
         assert!(tool_names.contains(&&"trace_callers".to_string()));
         assert!(tool_names.contains(&&"analyze_impact".to_string()));
         assert!(tool_names.contains(&&"get_repository_tree".to_string()));
+
+        // The graph tools' descriptions must explain the ambiguity vocabulary so an
+        // agent knows candidate callers are not confirmed (P0-4).
+        let desc_of = |name: &str| {
+            schemas
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.description.to_lowercase())
+                .unwrap()
+        };
+        assert!(desc_of("trace_callers").contains("ambiguous"));
+        assert!(desc_of("trace_callers").contains("candidate"));
+        assert!(desc_of("analyze_impact").contains("candidate"));
     }
 
     #[test]
@@ -1082,6 +1166,93 @@ mod tests {
         let input = json!({ "wrong_field": "value" });
         let result = tools.execute_tool("trace_callers", input).await;
         assert!(result.is_err());
+    }
+
+    // Two files each define `load` with a caller chain into it, so tracing `load`
+    // produces name-ambiguous direct callers (P0-4 tool-shape coverage).
+    fn create_tools_with_collision() -> LocalAnalysisTools {
+        use crate::types::{FunctionCall, FunctionSignature, TreeNode};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |file: &str, caller: &str| {
+                let path = format!("/src/{}.rs", file);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.functions.push(
+                    FunctionSignature::new("load".to_string(), path.clone()).with_location(1, 3),
+                );
+                node.functions.push(
+                    FunctionSignature::new(caller.to_string(), path.clone()).with_location(5, 10),
+                );
+                node.function_calls
+                    .push(FunctionCall::new("load".to_string(), path.clone(), 7));
+                node.content_hash = format!("h_{}", file);
+                node
+            };
+            rm.add_file(mk("a", "caller_a")).unwrap();
+            rm.add_file(mk("b", "caller_b")).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_reports_ambiguity() {
+        let tools = create_tools_with_collision();
+        let result = tools
+            .execute_tool("trace_callers", json!({ "function_name": "load" }))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 2);
+        // Every resolution value is from the closed set, and both direct callers of
+        // the multiply-defined `load` are flagged name_ambiguous.
+        for c in callers {
+            let res = c["resolution"].as_str().unwrap();
+            assert!(res == "exact" || res == "name_ambiguous", "resolution: {res}");
+            assert_eq!(res, "name_ambiguous");
+        }
+
+        let count = result.data["count"].as_u64().unwrap();
+        let exact = result.data["exact_count"].as_u64().unwrap();
+        let ambiguous = result.data["ambiguous_count"].as_u64().unwrap();
+        assert_eq!(exact + ambiguous, count);
+        assert_eq!(ambiguous, 2);
+
+        // ambiguous_names explains the `load` collision with its candidate files.
+        let names = result.data["ambiguous_names"].as_array().unwrap();
+        let load_entry = names
+            .iter()
+            .find(|n| n["name"] == "load")
+            .expect("load listed as ambiguous");
+        assert_eq!(load_entry["definition_count"].as_u64().unwrap(), 2);
+        assert_eq!(load_entry["candidate_files"].as_array().unwrap().len(), 2);
+        assert_eq!(load_entry["candidates_truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_splits_ambiguous_counts() {
+        let tools = create_tools_with_collision();
+        let result = tools
+            .execute_tool("analyze_impact", json!({ "function_name": "load" }))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        // Both callers are candidates, so the confirmed count is 0 and the headline
+        // is not inflated by unconfirmed links.
+        assert_eq!(result.data["transitive_functions"].as_u64().unwrap(), 0);
+        assert_eq!(result.data["ambiguous_functions"].as_u64().unwrap(), 2);
+        assert_eq!(result.data["affected_file_count"].as_u64().unwrap(), 0);
+        assert_eq!(result.data["candidate_files"].as_array().unwrap().len(), 2);
+        assert!(!result.data["ambiguous_names"].as_array().unwrap().is_empty());
+        assert!(
+            result.data["summary"]
+                .as_str()
+                .unwrap()
+                .contains("candidate caller")
+        );
     }
 
     // === Repository Tree Tests ===
