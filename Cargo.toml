@@ -145,6 +145,16 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Optimized but fast-to-build: no LTO, parallel codegen. For local smoke tests
+# and perf checks where you want an optimized binary without the ~40s full-release
+# link+LTO. Full `release` stays the shipped/CI profile.
+#   cargo build --profile release-fast   ->  target/release-fast/loregrep
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+
 [profile.dev]
 opt-level = 0
 debug = true
