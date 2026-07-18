@@ -292,5 +292,65 @@
     },
     "tags": ["rust", "callers", "direct", "collision"],
     "notes": "find_callers is per-call-site (it reports the two literal ingest() call expressions), so the name collision does not affect it — no merging, no ambiguity flag, one entry per real call site."
+  },
+  {
+    "id": "rust-basic/search_structs/apperror-enum-kind",
+    "tool": "search_structs",
+    "params": { "pattern": "AppError" },
+    "extract": "data.results",
+    "match_on": ["name", "kind"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "AppError", "kind": "enum" }
+      ]
+    },
+    "tags": ["rust", "structs", "enum", "kind"],
+    "notes": "Enums are now extracted and classified: search_structs finds AppError and reports kind=enum (previously enums were absent from extract_structs — a silent empty result)."
+  },
+  {
+    "id": "rust-basic/search_structs/summarize-trait-kind",
+    "tool": "search_structs",
+    "params": { "pattern": "Summarize" },
+    "extract": "data.results",
+    "match_on": ["name", "kind"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "Summarize", "kind": "trait" }
+      ]
+    },
+    "tags": ["rust", "structs", "trait", "kind"],
+    "notes": "Traits are extracted and classified kind=trait, distinct from struct/enum."
+  },
+  {
+    "id": "rust-basic/search_functions/load-owner-attribution",
+    "tool": "search_functions",
+    "params": { "pattern": "load" },
+    "extract": "data.results",
+    "match_on": ["name", "owner", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "load", "owner": "Loader", "file_path": "src/loader.rs" }
+      ]
+    },
+    "tags": ["rust", "functions", "owner"],
+    "notes": "Method owner attribution: Loader::load surfaces owner=Loader (the enclosing impl type), where a free function would have owner=null."
+  },
+  {
+    "id": "rust-basic/search_functions/ingest-owner-disambiguation",
+    "tool": "search_functions",
+    "params": { "pattern": "ingest", "owner": "SourceA" },
+    "extract": "data.results",
+    "match_on": ["name", "owner", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "ingest", "owner": "SourceA", "file_path": "src/collision_a.rs" }
+      ]
+    },
+    "tags": ["rust", "functions", "owner", "collision"],
+    "notes": "Same-name-different-owner disambiguation: SourceA::ingest and SourceB::ingest share a name; the owner filter returns only SourceA's, distinguished by owner + file (grep on 'ingest' cannot separate them by owning type)."
   }
 ]
