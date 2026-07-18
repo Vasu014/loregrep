@@ -491,16 +491,17 @@ impl LocalAnalysisTools {
 
         let (direct_callers, transitive, ambiguous_names) = {
             let repo_map = self.repo_map.lock().unwrap();
-            // Direct callers = distinct enclosing functions one hop up.
-            let direct: std::collections::HashSet<String> = repo_map
-                .find_function_callers(&impact_input.function_name)
-                .into_iter()
-                .filter_map(|c| c.caller_function)
-                .collect();
             let transitive = repo_map.transitive_callers(&impact_input.function_name, 0);
+            // Direct callers = the depth-1 entries of the transitive walk. Each
+            // TransitiveCaller is a distinct (file, name) node, so callers that
+            // share a name across files are counted separately (a name-keyed
+            // HashSet<String> would collapse them and understate the blast radius).
+            // This also avoids re-fetching the target's call sites — the depth-1
+            // frontier already computed them.
+            let direct_callers = transitive.iter().filter(|c| c.depth == 1).count();
             let ambiguous_names =
                 Self::ambiguous_names_summary(&repo_map, &impact_input.function_name, &transitive);
-            (direct.len(), transitive, ambiguous_names)
+            (direct_callers, transitive, ambiguous_names)
         };
 
         // Split the transitive set by resolution: exact callers are confirmed to
@@ -1443,6 +1444,41 @@ mod tests {
         assert_eq!(load_entry["definition_count"].as_u64().unwrap(), 2);
         assert_eq!(load_entry["candidate_files"].as_array().unwrap().len(), 2);
         assert_eq!(load_entry["candidates_truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_direct_callers_distinct_by_file() {
+        use crate::types::{FunctionCall, FunctionSignature, TreeNode};
+        // Two DIFFERENT functions both named `flush`, in different files, each
+        // directly calls `save`. direct_callers must be 2 (a name-keyed set would
+        // collapse them to 1 and understate the blast radius).
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |file: &str| {
+                let path = format!("/src/{}.rs", file);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.functions.push(
+                    FunctionSignature::new("flush".to_string(), path.clone()).with_location(1, 10),
+                );
+                node.function_calls
+                    .push(FunctionCall::new("save".to_string(), path.clone(), 5));
+                node.content_hash = format!("h_{}", file);
+                node
+            };
+            rm.add_file(mk("a")).unwrap();
+            rm.add_file(mk("b")).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        let result = tools
+            .execute_tool("analyze_impact", json!({ "function_name": "save" }))
+            .await
+            .unwrap();
+        assert_eq!(result.data["direct_callers"].as_u64().unwrap(), 2);
+        // `save` is not multiply-defined, so both callers are exact, not candidates.
+        assert_eq!(result.data["transitive_functions"].as_u64().unwrap(), 2);
+        assert_eq!(result.data["ambiguous_functions"].as_u64().unwrap(), 0);
     }
 
     #[tokio::test]

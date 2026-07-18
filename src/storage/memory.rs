@@ -517,29 +517,51 @@ impl RepoMap {
             .unwrap_or_default()
     }
 
-    /// Return the file paths of every definition of `function_name`. More than one
-    /// entry means the name is multiply-defined (a name collision): callers
-    /// attributed to it through the name-keyed call graph are candidates, not a
-    /// confirmed single target. Used to explain ambiguity in tool output.
+    /// Return the distinct files that define `function_name`. More than one entry
+    /// means the name is defined in more than one file — a cross-file collision:
+    /// callers attributed to it through the name-keyed call graph are candidates,
+    /// not a confirmed single target. Deduplicated by file, so a file that defines
+    /// the name twice (e.g. a trait method signature plus its impl) counts once
+    /// and is not mistaken for a collision. Used to explain ambiguity in output.
     pub fn function_definition_files(&self, function_name: &str) -> Vec<String> {
+        let mut seen = HashSet::new();
         self.function_index
             .get(function_name)
             .into_iter()
             .flatten()
+            .filter(|&&idx| seen.insert(idx))
             .filter_map(|&idx| self.files.get(idx).map(|f| f.file_path.clone()))
             .collect()
     }
 
+    /// Number of distinct files defining `function_name`. `> 1` is the name-collision
+    /// signal for ambiguity flagging: it counts each file once, so a trait signature
+    /// plus its impl in the same file is not a false collision (the flaw the bare
+    /// `function_index[name].len()` had).
+    pub fn name_definition_file_count(&self, function_name: &str) -> usize {
+        let mut seen = HashSet::new();
+        self.function_index
+            .get(function_name)
+            .into_iter()
+            .flatten()
+            .filter(|&&idx| seen.insert(idx))
+            .count()
+    }
+
     /// The owning type of the function named `name` defined in `file_path`, if any
     /// (Rust `impl` type, Python/TS class). Used to render qualified caller names
-    /// like `Loader::load`. Returns the first match when a file has more than one
-    /// function of that name.
+    /// like `Loader::load`. If a file has more than one function of that name with
+    /// *different* owners (e.g. `Foo::build` and `Bar::build`), the name is
+    /// ambiguous within the file and we return `None` rather than guessing the
+    /// wrong owner — an honest bare name beats a confidently wrong `Foo::build`.
     pub fn function_owner(&self, file_path: &str, name: &str) -> Option<String> {
         let file = self.get_file(file_path)?;
-        file.functions
-            .iter()
-            .find(|f| f.name == name)
-            .and_then(|f| f.owner.clone())
+        let mut matches = file.functions.iter().filter(|f| f.name == name);
+        let first = matches.next()?;
+        if matches.any(|f| f.owner != first.owner) {
+            return None;
+        }
+        first.owner.clone()
     }
 
     /// Render a function's display name as `Owner::name` when it has an owning
@@ -563,12 +585,20 @@ impl RepoMap {
     ///
     /// Caller identity is `(file_path, function_name)`: two functions that share a
     /// name in different files are distinct BFS nodes and never merge. The call
-    /// graph itself is keyed by callee *name*, so when a callee name resolves to
-    /// more than one definition (`function_index[name].len() > 1`) the callers
-    /// reached through it cannot be attributed to a single definition — they are
-    /// flagged `ambiguous` (candidates), not dropped and not silently merged.
-    /// Actually resolving which definition each call targets is deferred to the
-    /// resolved call graph (Phase 3); this keeps the name-keyed view honest.
+    /// graph itself is keyed by callee *name*, so when a callee name is defined in
+    /// more than one file (`name_definition_file_count > 1`) the callers reached
+    /// through it cannot be attributed to a single definition — they are flagged
+    /// `ambiguous` (candidates), not dropped and not silently merged. Actually
+    /// resolving which definition each call targets is deferred to the resolved
+    /// call graph (Phase 3); this keeps the name-keyed view honest.
+    ///
+    /// KNOWN LIMITATION (name-keyed): every definition of the target name is seeded
+    /// as visited so the target is not reported as its own caller (and cycles
+    /// terminate). When the target name is itself multiply-defined, a *collision
+    /// sibling* — a same-named function in another file that genuinely calls the
+    /// target — is therefore not re-reported as a caller. Distinguishing that from
+    /// self-recursion is impossible without resolved edges; Phase 3 fixes it. The
+    /// effect is a rare under-report, never a wrong-direction edge.
     pub fn transitive_callers(
         &self,
         function_name: &str,
@@ -600,12 +630,11 @@ impl RepoMap {
             let mut next_frontier: Vec<(String, String)> = Vec::new();
 
             for (_from_file, callee) in &frontier {
-                // A callee name with >1 definition cannot be attributed to one
-                // function; callers reached through it are candidates.
-                let ambiguous = self
-                    .function_index
-                    .get(callee)
-                    .is_some_and(|defs| defs.len() > 1);
+                // A callee name defined in more than one file cannot be attributed
+                // to one function; callers reached through it are candidates. Uses
+                // distinct-file count so a trait signature + its impl in one file
+                // is not a false collision.
+                let ambiguous = self.name_definition_file_count(callee) > 1;
 
                 for call_site in self.find_function_callers(callee) {
                     // Skip top-level/module-level calls with no enclosing function.
@@ -1780,6 +1809,66 @@ mod tests {
         let owners: Vec<Option<&str>> = result.items.iter().map(|f| f.owner.as_deref()).collect();
         assert!(owners.contains(&None));
         assert!(owners.contains(&Some("Thing")));
+    }
+
+    // A file defining a name twice (trait signature + impl) is ONE definition
+    // file, not a cross-file collision — so it must not be flagged ambiguous.
+    #[test]
+    fn test_name_defined_twice_in_one_file_is_not_a_collision() {
+        let mut repo_map = RepoMap::new();
+        let path = "/test/repo.rs".to_string();
+        let mut node = TreeNode::new(path.clone(), "rust".to_string());
+        node.functions
+            .push(FunctionSignature::new("get".to_string(), path.clone()).with_location(1, 1));
+        node.functions.push(
+            FunctionSignature::new("get".to_string(), path.clone())
+                .with_owner("S")
+                .with_location(3, 5),
+        );
+        node.content_hash = "h".to_string();
+        repo_map.add_file(node).unwrap();
+
+        assert_eq!(repo_map.name_definition_file_count("get"), 1);
+        assert_eq!(
+            repo_map.function_definition_files("get"),
+            vec!["/test/repo.rs"]
+        );
+    }
+
+    // function_owner must not guess when a file has same-named methods with
+    // different owners; it returns None rather than the first (possibly wrong) one.
+    #[test]
+    fn test_function_owner_ambiguous_within_file_returns_none() {
+        let mut repo_map = RepoMap::new();
+        let path = "/test/build.rs".to_string();
+        let mut node = TreeNode::new(path.clone(), "rust".to_string());
+        node.functions.push(
+            FunctionSignature::new("build".to_string(), path.clone())
+                .with_owner("Foo")
+                .with_location(1, 3),
+        );
+        node.functions.push(
+            FunctionSignature::new("build".to_string(), path.clone())
+                .with_owner("Bar")
+                .with_location(5, 7),
+        );
+        node.functions.push(
+            FunctionSignature::new("only".to_string(), path.clone())
+                .with_owner("Foo")
+                .with_location(9, 10),
+        );
+        node.content_hash = "h".to_string();
+        repo_map.add_file(node).unwrap();
+
+        // Conflicting owners for `build` -> don't guess.
+        assert_eq!(repo_map.function_owner(&path, "build"), None);
+        assert_eq!(repo_map.qualified_function_name(&path, "build"), "build");
+        // Unambiguous name still qualifies.
+        assert_eq!(
+            repo_map.function_owner(&path, "only"),
+            Some("Foo".to_string())
+        );
+        assert_eq!(repo_map.qualified_function_name(&path, "only"), "Foo::only");
     }
 
     // P0-1 regression: call_graph must not accumulate stale/duplicate call sites across

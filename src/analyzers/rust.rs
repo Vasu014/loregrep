@@ -376,9 +376,18 @@ impl LanguageAnalyzer for RustAnalyzer {
                         .unwrap_or(false);
                     function_sig.is_static = !has_self;
 
-                    // Record the owning type (the `impl Type` target).
+                    // Record the owning type (the `impl Type` target), stripping
+                    // generic arguments: `impl<T> Repository<T>` -> owner
+                    // "Repository", so the exact-match owner filter and qualified
+                    // display stay consistent with non-generic impls (a raw
+                    // "Repository<T>" would never match a filter for "Repository").
                     if let Some(type_node) = impl_node.child_by_field_name("type") {
-                        if let Ok(owner) = type_node.utf8_text(source.as_bytes()) {
+                        let base_node = if type_node.kind() == "generic_type" {
+                            type_node.child_by_field_name("type").unwrap_or(type_node)
+                        } else {
+                            type_node
+                        };
+                        if let Ok(owner) = base_node.utf8_text(source.as_bytes()) {
                             function_sig.owner = Some(owner.to_string());
                         }
                     }
@@ -630,6 +639,12 @@ impl LanguageAnalyzer for RustAnalyzer {
 
         // Merge each impl-for pair into the matching struct/enum. If no type in this
         // file matches, drop the pair (don't fabricate a StructSignature).
+        //
+        // KNOWN LIMITATION: analyzers are per-file, so `impl Display for Config`
+        // in a different file than `struct Config` is dropped — cross-file
+        // supertype edges are incomplete. Resolving impls against types defined
+        // elsewhere requires a whole-repo pass (the derived graph layer, P2/P4),
+        // which reconciles `impl Trait for Type` globally once all files are indexed.
         for (type_name, trait_name) in impl_pairs {
             if let Some(target) = structs.iter_mut().find(|s| s.name == type_name) {
                 target.supertypes.push(trait_name);
@@ -1354,6 +1369,31 @@ fn helper() {}
 
         let helper = functions.iter().find(|f| f.name == "helper").unwrap();
         assert_eq!(helper.owner, None);
+    }
+
+    #[tokio::test]
+    async fn test_generic_impl_owner_strips_generics() {
+        // owner for `impl<T> Repository<T>` must be the bare "Repository" so the
+        // exact-match owner filter and qualified display work (not "Repository<T>").
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+struct Repository<T> { inner: T }
+
+impl<T> Repository<T> {
+    fn load(&self) {}
+}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let load = analysis
+            .tree_node
+            .functions
+            .iter()
+            .find(|f| f.name == "load")
+            .unwrap();
+        assert_eq!(load.owner, Some("Repository".to_string()));
     }
 
     #[tokio::test]
