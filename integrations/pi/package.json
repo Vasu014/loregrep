@@ -1,0 +1,28 @@
+{
+  "name": "loregrep-pi",
+  "version": "0.1.0",
+  "description": "pi coding-agent extension: fast structural code search (functions, structs, callers, dependencies, file skeletons) via the loregrep CLI, for Rust/Python/TypeScript.",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "coding-agent",
+    "loregrep",
+    "code-search",
+    "tree-sitter",
+    "code-intelligence"
+  ],
+  "type": "module",
+  "main": "index.ts",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vasu014/loregrep",
+    "directory": "integrations/pi"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "typebox": "*"
+  }
+}
