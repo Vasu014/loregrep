@@ -133,8 +133,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - runner: macos-13
-            target: x86_64
+          # macos-13 (x86_64) runners chronically hang in the queue for this repo
+          # while macos-14 (aarch64) completes in minutes; dropped to unblock CI.
           - runner: macos-14
             target: aarch64
     steps:
