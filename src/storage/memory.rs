@@ -24,12 +24,17 @@ pub struct CallSite {
 
 /// A function that transitively calls a target function, discovered by walking
 /// UP the call graph. `depth` is the number of hops from the target (1 = direct
-/// caller).
+/// caller). `ambiguous` is true when this caller was reached by expanding a name
+/// that has more than one definition in the repo — the call graph is name-keyed,
+/// so which of those definitions the caller actually invokes cannot be
+/// determined here; the caller is a *candidate*, not a confirmed link.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransitiveCaller {
     pub function_name: String,
     pub file_path: String,
     pub depth: usize,
+    #[serde(default)]
+    pub ambiguous: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -507,22 +512,35 @@ impl RepoMap {
     /// functions are tracked so cycles terminate. `max_depth == 0` means
     /// unlimited depth.
     ///
-    /// NOTE: traversal is keyed by function NAME. If two functions in different
-    /// files share a name, they are treated as the same node (their callers
-    /// merge). This is an accepted simplification for v1.
+    /// Caller identity is `(file_path, function_name)`: two functions that share a
+    /// name in different files are distinct BFS nodes and never merge. The call
+    /// graph itself is keyed by callee *name*, so when a callee name resolves to
+    /// more than one definition (`function_index[name].len() > 1`) the callers
+    /// reached through it cannot be attributed to a single definition — they are
+    /// flagged `ambiguous` (candidates), not dropped and not silently merged.
+    /// Actually resolving which definition each call targets is deferred to the
+    /// resolved call graph (Phase 3); this keeps the name-keyed view honest.
     pub fn transitive_callers(
         &self,
         function_name: &str,
         max_depth: usize,
     ) -> Vec<TransitiveCaller> {
         let mut results: Vec<TransitiveCaller> = Vec::new();
-        let mut visited: HashSet<String> = HashSet::new();
-        // The target itself is "visited" so a direct self-recursive call does not
-        // re-enqueue it as its own caller.
-        visited.insert(function_name.to_string());
+        // Visited nodes keyed by (file_path, function_name).
+        let mut visited: HashSet<(String, String)> = HashSet::new();
+        // Every definition of the target is "visited" so a self-recursive call
+        // does not re-enqueue the target as its own caller.
+        if let Some(indices) = self.function_index.get(function_name) {
+            for &idx in indices {
+                visited.insert((self.files[idx].file_path.clone(), function_name.to_string()));
+            }
+        }
 
-        // BFS frontier: function names whose callers we still need to expand.
-        let mut frontier: Vec<String> = vec![function_name.to_string()];
+        // BFS frontier of caller names whose callers we still expand. Expansion is
+        // name-keyed (the call graph only knows callee names); the file half of
+        // each node exists for visited-dedup. The target is seeded by name with an
+        // empty file placeholder, which never collides with a real caller node.
+        let mut frontier: Vec<(String, String)> = vec![(String::new(), function_name.to_string())];
         let mut depth: usize = 1;
 
         while !frontier.is_empty() {
@@ -530,9 +548,16 @@ impl RepoMap {
                 break;
             }
 
-            let mut next_frontier: Vec<String> = Vec::new();
+            let mut next_frontier: Vec<(String, String)> = Vec::new();
 
-            for callee in &frontier {
+            for (_from_file, callee) in &frontier {
+                // A callee name with >1 definition cannot be attributed to one
+                // function; callers reached through it are candidates.
+                let ambiguous = self
+                    .function_index
+                    .get(callee)
+                    .is_some_and(|defs| defs.len() > 1);
+
                 for call_site in self.find_function_callers(callee) {
                     // Skip top-level/module-level calls with no enclosing function.
                     let caller = match &call_site.caller_function {
@@ -540,17 +565,19 @@ impl RepoMap {
                         None => continue,
                     };
 
-                    if visited.contains(&caller) {
+                    let key = (call_site.file_path.clone(), caller.clone());
+                    if visited.contains(&key) {
                         continue;
                     }
-                    visited.insert(caller.clone());
+                    visited.insert(key);
 
                     results.push(TransitiveCaller {
                         function_name: caller.clone(),
                         file_path: call_site.file_path.clone(),
                         depth,
+                        ambiguous,
                     });
-                    next_frontier.push(caller);
+                    next_frontier.push((call_site.file_path.clone(), caller));
                 }
             }
 
@@ -562,6 +589,7 @@ impl RepoMap {
             a.depth
                 .cmp(&b.depth)
                 .then_with(|| a.function_name.cmp(&b.function_name))
+                .then_with(|| a.file_path.cmp(&b.file_path))
         });
         results
     }
@@ -1847,6 +1875,60 @@ mod tests {
         // b calls a (depth 1); a calls b but a is the target (visited) -> stop.
         assert_eq!(callers.len(), 1);
         assert_eq!(callers[0].function_name, "b");
+    }
+
+    // P0-3: two functions named `load` in different files, each on its own caller
+    // chain. Tracing `load` cannot attribute the direct callers to one definition
+    // (name-keyed call graph), so both are flagged ambiguous — but the deeper,
+    // uniquely-named callers on each chain resolve exactly and stay disjoint.
+    #[test]
+    fn test_transitive_callers_same_name_flagged_ambiguous() {
+        let mut repo_map = RepoMap::new();
+
+        // Build a file defining `load` plus a two-link caller chain into it.
+        let mk_chain = |file: &str, caller: &str, top: &str| {
+            let path = format!("/test/{}.rs", file);
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.functions
+                .push(FunctionSignature::new("load".to_string(), path.clone()).with_location(1, 3));
+            node.functions
+                .push(FunctionSignature::new(caller.to_string(), path.clone()).with_location(5, 10));
+            node.functions
+                .push(FunctionSignature::new(top.to_string(), path.clone()).with_location(12, 18));
+            // caller() calls load(); top() calls caller().
+            node.function_calls
+                .push(FunctionCall::new("load".to_string(), path.clone(), 7));
+            node.function_calls
+                .push(FunctionCall::new(caller.to_string(), path.clone(), 14));
+            node.content_hash = format!("hash_{}", file);
+            node
+        };
+
+        repo_map.add_file(mk_chain("coll_a", "caller_a", "top_a")).unwrap();
+        repo_map.add_file(mk_chain("coll_b", "caller_b", "top_b")).unwrap();
+
+        let callers = repo_map.transitive_callers("load", 0);
+
+        // Direct callers of `load` (depth 1): both chains cross here and both are
+        // ambiguous, because `load` has two definitions.
+        let direct: Vec<&TransitiveCaller> = callers.iter().filter(|c| c.depth == 1).collect();
+        assert_eq!(direct.len(), 2, "both direct callers present");
+        assert!(
+            direct.iter().all(|c| c.ambiguous),
+            "direct callers of an ambiguous name must be flagged, not exact"
+        );
+        let direct_names: HashSet<&str> = direct.iter().map(|c| c.function_name.as_str()).collect();
+        assert_eq!(direct_names, HashSet::from(["caller_a", "caller_b"]));
+
+        // Deeper callers (depth 2) have unique names, so they resolve exactly and
+        // each stays attributed to its own file — the chains do not cross.
+        let deep: Vec<&TransitiveCaller> = callers.iter().filter(|c| c.depth == 2).collect();
+        assert_eq!(deep.len(), 2);
+        assert!(deep.iter().all(|c| !c.ambiguous), "unique-named callers are exact");
+        let top_a = deep.iter().find(|c| c.function_name == "top_a").unwrap();
+        assert_eq!(top_a.file_path, "/test/coll_a.rs");
+        let top_b = deep.iter().find(|c| c.function_name == "top_b").unwrap();
+        assert_eq!(top_b.file_path, "/test/coll_b.rs");
     }
 
     #[test]
