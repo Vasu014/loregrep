@@ -24,7 +24,7 @@
 //! path (rule 2). This resolver nonetheless implements the full dotted-relative logic
 //! (rule 1) for callers/tests that do carry the dots; we do not extend the analyzer.
 
-use super::{normalize_path, FileSet, ImportTarget};
+use super::{FileSet, ImportTarget, normalize_path};
 use crate::types::ImportStatement;
 
 pub fn resolve_py_import(
@@ -163,10 +163,7 @@ mod tests {
     // `from ..pkg import y` (level 2) → resolved up one package into `pkg/y.py`.
     #[test]
     fn relative_level_two_resolves_up() {
-        let files = vec![
-            py("/repo/proj/sub/mod.py"),
-            py("/repo/proj/pkg/y.py"),
-        ];
+        let files = vec![py("/repo/proj/sub/mod.py"), py("/repo/proj/pkg/y.py")];
         let fs = FileSet::new(&files);
         let statement = imp("..pkg.y", "/repo/proj/sub/mod.py", false);
         assert_eq!(resolve_py_import(&statement, 0, &fs), ImportTarget::File(1));

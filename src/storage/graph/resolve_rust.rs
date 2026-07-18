@@ -16,7 +16,7 @@
 //! normally the imported item and is dropped to get the module path; a `*` or a
 //! `{...}` group names items, so everything before it is the module.
 
-use super::{normalize_path, parent_dir, FileSet, ImportTarget};
+use super::{FileSet, ImportTarget, normalize_path, parent_dir};
 use crate::types::ImportStatement;
 
 pub fn resolve_rust_import(
