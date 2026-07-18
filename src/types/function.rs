@@ -43,6 +43,12 @@ pub struct FunctionSignature {
     pub start_line: u32,
     pub end_line: u32,
     pub generics: Vec<String>,
+    /// The enclosing type of a method: the Rust `impl` type, the Python/TS class.
+    /// `None` for free functions. Enables qualified display (`Loader::load`) and
+    /// same-name-different-owner disambiguation. Serde default keeps old caches
+    /// readable.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl FunctionSignature {
@@ -60,11 +66,18 @@ impl FunctionSignature {
             start_line: 0,
             end_line: 0,
             generics: Vec::new(),
+            owner: None,
         }
     }
 
     pub fn with_parameters(mut self, parameters: Vec<Parameter>) -> Self {
         self.parameters = parameters;
+        self
+    }
+
+    /// Set the enclosing type (impl/class) that owns this method.
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = Some(owner.into());
         self
     }
 
@@ -183,5 +196,42 @@ impl FunctionCall {
         self.is_method_call = true;
         self.receiver_type = Some(receiver_type);
         self
+    }
+}
+
+#[cfg(test)]
+mod p1_1_tests {
+    use super::*;
+
+    #[test]
+    fn function_signature_new_has_no_owner() {
+        assert_eq!(FunctionSignature::new("f".into(), "f.rs".into()).owner, None);
+    }
+
+    #[test]
+    fn with_owner_sets_owner() {
+        let f = FunctionSignature::new("load".into(), "loader.rs".into()).with_owner("Loader");
+        assert_eq!(f.owner.as_deref(), Some("Loader"));
+    }
+
+    #[test]
+    fn old_json_without_owner_deserializes_to_none() {
+        let old = r#"{
+            "name": "parse",
+            "file_path": "src/config.rs",
+            "parameters": [],
+            "return_type": null,
+            "is_public": true,
+            "is_async": false,
+            "is_const": false,
+            "is_static": false,
+            "is_extern": false,
+            "start_line": 1,
+            "end_line": 5,
+            "generics": []
+        }"#;
+        let f: FunctionSignature = serde_json::from_str(old).unwrap();
+        assert_eq!(f.owner, None);
+        assert_eq!(f.name, "parse");
     }
 }
