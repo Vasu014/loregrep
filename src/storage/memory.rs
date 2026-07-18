@@ -1,6 +1,7 @@
 // Placeholder RepoMap - will be enhanced in Phase 2: Task 2.1
 use crate::types::{
     AnalysisError, ExportStatement, FunctionSignature, ImportStatement, StructSignature, TreeNode,
+    TypeKind,
 };
 use anyhow::Context;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
@@ -20,6 +21,21 @@ pub struct CallSite {
     pub column: u32,
     pub function_name: String,
     pub caller_function: Option<String>,
+}
+
+/// A function that transitively calls a target function, discovered by walking
+/// UP the call graph. `depth` is the number of hops from the target (1 = direct
+/// caller). `ambiguous` is true when this caller was reached by expanding a name
+/// that has more than one definition in the repo — the call graph is name-keyed,
+/// so which of those definitions the caller actually invokes cannot be
+/// determined here; the caller is a *candidate*, not a confirmed link.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransitiveCaller {
+    pub function_name: String,
+    pub file_path: String,
+    pub depth: usize,
+    #[serde(default)]
+    pub ambiguous: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -341,9 +357,17 @@ impl RepoMap {
 
         let mut results = Vec::new();
 
-        // Try exact match first
+        // Try exact match first. function_index[pattern] lists a file index once
+        // per definition of that name, so a file defining the name more than once
+        // (e.g. a trait method signature plus its impl) appears multiple times.
+        // Visit each file once — the inner loop already collects every matching
+        // function in it — otherwise results are duplicated.
         if let Some(file_indices) = self.function_index.get(pattern) {
+            let mut seen_files = HashSet::new();
             for &file_idx in file_indices {
+                if !seen_files.insert(file_idx) {
+                    continue;
+                }
                 if let Some(file) = self.files.get(file_idx) {
                     for func in &file.functions {
                         if func.name == pattern {
@@ -406,9 +430,15 @@ impl RepoMap {
         let start_time = std::time::Instant::now();
         let mut results = Vec::new();
 
-        // Try exact match first
+        // Try exact match first. Dedup file indices for the same reason as
+        // find_functions: struct_index lists a file once per definition of the
+        // name, so visiting each file once avoids duplicated results.
         if let Some(file_indices) = self.struct_index.get(pattern) {
+            let mut seen_files = HashSet::new();
             for &file_idx in file_indices {
+                if !seen_files.insert(file_idx) {
+                    continue;
+                }
                 if let Some(file) = self.files.get(file_idx) {
                     for struct_def in &file.structs {
                         if struct_def.name == pattern {
@@ -485,6 +515,161 @@ impl RepoMap {
             .get(function_name)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Return the distinct files that define `function_name`. More than one entry
+    /// means the name is defined in more than one file — a cross-file collision:
+    /// callers attributed to it through the name-keyed call graph are candidates,
+    /// not a confirmed single target. Deduplicated by file, so a file that defines
+    /// the name twice (e.g. a trait method signature plus its impl) counts once
+    /// and is not mistaken for a collision. Used to explain ambiguity in output.
+    pub fn function_definition_files(&self, function_name: &str) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.function_index
+            .get(function_name)
+            .into_iter()
+            .flatten()
+            .filter(|&&idx| seen.insert(idx))
+            .filter_map(|&idx| self.files.get(idx).map(|f| f.file_path.clone()))
+            .collect()
+    }
+
+    /// Number of distinct files defining `function_name`. `> 1` is the name-collision
+    /// signal for ambiguity flagging: it counts each file once, so a trait signature
+    /// plus its impl in the same file is not a false collision (the flaw the bare
+    /// `function_index[name].len()` had).
+    pub fn name_definition_file_count(&self, function_name: &str) -> usize {
+        let mut seen = HashSet::new();
+        self.function_index
+            .get(function_name)
+            .into_iter()
+            .flatten()
+            .filter(|&&idx| seen.insert(idx))
+            .count()
+    }
+
+    /// The owning type of the function named `name` defined in `file_path`, if any
+    /// (Rust `impl` type, Python/TS class). Used to render qualified caller names
+    /// like `Loader::load`. If a file has more than one function of that name with
+    /// *different* owners (e.g. `Foo::build` and `Bar::build`), the name is
+    /// ambiguous within the file and we return `None` rather than guessing the
+    /// wrong owner — an honest bare name beats a confidently wrong `Foo::build`.
+    pub fn function_owner(&self, file_path: &str, name: &str) -> Option<String> {
+        let file = self.get_file(file_path)?;
+        let mut matches = file.functions.iter().filter(|f| f.name == name);
+        let first = matches.next()?;
+        if matches.any(|f| f.owner != first.owner) {
+            return None;
+        }
+        first.owner.clone()
+    }
+
+    /// Render a function's display name as `Owner::name` when it has an owning
+    /// type, else the bare name.
+    pub fn qualified_function_name(&self, file_path: &str, name: &str) -> String {
+        match self.function_owner(file_path, name) {
+            Some(owner) => format!("{owner}::{name}"),
+            None => name.to_string(),
+        }
+    }
+
+    /// Walk UP the call graph to find every function that TRANSITIVELY calls
+    /// `function_name`.
+    ///
+    /// BFS starting from the target: level-1 callers are the distinct enclosing
+    /// functions (`caller_function`) taken from `find_function_callers`; for each
+    /// of those we recurse to find ITS callers, and so on. `depth` records the
+    /// level at which each caller was first reached (1 = direct caller). Visited
+    /// functions are tracked so cycles terminate. `max_depth == 0` means
+    /// unlimited depth.
+    ///
+    /// Caller identity is `(file_path, function_name)`: two functions that share a
+    /// name in different files are distinct BFS nodes and never merge. The call
+    /// graph itself is keyed by callee *name*, so when a callee name is defined in
+    /// more than one file (`name_definition_file_count > 1`) the callers reached
+    /// through it cannot be attributed to a single definition — they are flagged
+    /// `ambiguous` (candidates), not dropped and not silently merged. Actually
+    /// resolving which definition each call targets is deferred to the resolved
+    /// call graph (Phase 3); this keeps the name-keyed view honest.
+    ///
+    /// KNOWN LIMITATION (name-keyed): every definition of the target name is seeded
+    /// as visited so the target is not reported as its own caller (and cycles
+    /// terminate). When the target name is itself multiply-defined, a *collision
+    /// sibling* — a same-named function in another file that genuinely calls the
+    /// target — is therefore not re-reported as a caller. Distinguishing that from
+    /// self-recursion is impossible without resolved edges; Phase 3 fixes it. The
+    /// effect is a rare under-report, never a wrong-direction edge.
+    pub fn transitive_callers(
+        &self,
+        function_name: &str,
+        max_depth: usize,
+    ) -> Vec<TransitiveCaller> {
+        let mut results: Vec<TransitiveCaller> = Vec::new();
+        // Visited nodes keyed by (file_path, function_name).
+        let mut visited: HashSet<(String, String)> = HashSet::new();
+        // Every definition of the target is "visited" so a self-recursive call
+        // does not re-enqueue the target as its own caller.
+        if let Some(indices) = self.function_index.get(function_name) {
+            for &idx in indices {
+                visited.insert((self.files[idx].file_path.clone(), function_name.to_string()));
+            }
+        }
+
+        // BFS frontier of caller names whose callers we still expand. Expansion is
+        // name-keyed (the call graph only knows callee names); the file half of
+        // each node exists for visited-dedup. The target is seeded by name with an
+        // empty file placeholder, which never collides with a real caller node.
+        let mut frontier: Vec<(String, String)> = vec![(String::new(), function_name.to_string())];
+        let mut depth: usize = 1;
+
+        while !frontier.is_empty() {
+            if max_depth != 0 && depth > max_depth {
+                break;
+            }
+
+            let mut next_frontier: Vec<(String, String)> = Vec::new();
+
+            for (_from_file, callee) in &frontier {
+                // A callee name defined in more than one file cannot be attributed
+                // to one function; callers reached through it are candidates. Uses
+                // distinct-file count so a trait signature + its impl in one file
+                // is not a false collision.
+                let ambiguous = self.name_definition_file_count(callee) > 1;
+
+                for call_site in self.find_function_callers(callee) {
+                    // Skip top-level/module-level calls with no enclosing function.
+                    let caller = match &call_site.caller_function {
+                        Some(name) => name.clone(),
+                        None => continue,
+                    };
+
+                    let key = (call_site.file_path.clone(), caller.clone());
+                    if visited.contains(&key) {
+                        continue;
+                    }
+                    visited.insert(key);
+
+                    results.push(TransitiveCaller {
+                        function_name: caller.clone(),
+                        file_path: call_site.file_path.clone(),
+                        depth,
+                        ambiguous,
+                    });
+                    next_frontier.push((call_site.file_path.clone(), caller));
+                }
+            }
+
+            frontier = next_frontier;
+            depth += 1;
+        }
+
+        results.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.function_name.cmp(&b.function_name))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+        });
+        results
     }
 
     /// Get repository metadata
@@ -725,7 +910,7 @@ impl RepoMap {
                 name: struct_def.name.clone(),
                 is_public: struct_def.is_public,
                 field_count: struct_def.fields.len(),
-                is_enum: false, // TreeNode doesn't distinguish enums from structs currently
+                is_enum: struct_def.kind == TypeKind::Enum,
                 line_number: struct_def.start_line,
             })
             .collect();
@@ -1079,10 +1264,24 @@ impl RepoMap {
         self.remove_from_import_index(index);
         self.remove_from_export_index(index);
         self.remove_from_language_index(index);
+        // call_graph is keyed by call-site file_path (not numeric file index), so it is
+        // pruned by path here and needs no shift in reindex_after_removal.
+        self.remove_from_call_graph(&file_path);
 
         // Remove from files vector and update remaining indexes
         self.files.remove(index);
         self.reindex_after_removal(index);
+    }
+
+    /// Drop every call site originating in `file_path` from the call graph, removing any
+    /// key whose call-site vector becomes empty. Without this, `add_file` re-adding a path
+    /// appends its call sites a second time (duplicates) and `remove_file` leaves stale ones
+    /// — poisoning `find_function_callers`, `trace_callers`, and `analyze_impact`.
+    fn remove_from_call_graph(&mut self, file_path: &str) {
+        self.call_graph.retain(|_name, sites| {
+            sites.retain(|site| site.file_path != file_path);
+            !sites.is_empty()
+        });
     }
 
     fn update_indexes_for_file(&mut self, index: usize, tree_node: &TreeNode) -> Result<()> {
@@ -1131,12 +1330,23 @@ impl RepoMap {
 
         // Update call graph
         for call in &tree_node.function_calls {
+            // Determine the enclosing function by line-range containment: the
+            // function in this same file whose [start_line, end_line] contains the
+            // call's line_number. If several functions contain it (nested/impl
+            // blocks), pick the INNERMOST one (smallest containing range).
+            let caller_function = tree_node
+                .functions
+                .iter()
+                .filter(|f| f.start_line <= call.line_number && call.line_number <= f.end_line)
+                .min_by_key(|f| f.end_line.saturating_sub(f.start_line))
+                .map(|f| f.name.clone());
+
             let call_site = CallSite {
                 file_path: tree_node.file_path.clone(),
                 line_number: call.line_number,
                 column: call.column,
                 function_name: call.function_name.clone(),
-                caller_function: None, // TODO: Extract caller context
+                caller_function,
             };
 
             self.call_graph
@@ -1570,6 +1780,330 @@ mod tests {
         assert_eq!(callers.len(), 1);
         assert_eq!(callers[0].function_name, "call_test");
         assert_eq!(callers[0].line_number, 42);
+    }
+
+    // A file defining the same name twice (e.g. a trait method signature + its
+    // impl) lists that file twice in function_index; find_functions must not
+    // return the matches multiple times.
+    #[test]
+    fn test_find_functions_no_duplicate_same_file_same_name() {
+        let mut repo_map = RepoMap::new();
+        let path = "/test/dup.rs".to_string();
+        let mut node = TreeNode::new(path.clone(), "rust".to_string());
+        node.functions
+            .push(FunctionSignature::new("ingest".to_string(), path.clone()).with_location(1, 2));
+        node.functions.push(
+            FunctionSignature::new("ingest".to_string(), path.clone())
+                .with_owner("Thing")
+                .with_location(5, 7),
+        );
+        node.content_hash = "h_dup".to_string();
+        repo_map.add_file(node).unwrap();
+
+        let result = repo_map.find_functions("ingest");
+        assert_eq!(
+            result.items.len(),
+            2,
+            "each definition counted exactly once"
+        );
+        let owners: Vec<Option<&str>> = result.items.iter().map(|f| f.owner.as_deref()).collect();
+        assert!(owners.contains(&None));
+        assert!(owners.contains(&Some("Thing")));
+    }
+
+    // A file defining a name twice (trait signature + impl) is ONE definition
+    // file, not a cross-file collision — so it must not be flagged ambiguous.
+    #[test]
+    fn test_name_defined_twice_in_one_file_is_not_a_collision() {
+        let mut repo_map = RepoMap::new();
+        let path = "/test/repo.rs".to_string();
+        let mut node = TreeNode::new(path.clone(), "rust".to_string());
+        node.functions
+            .push(FunctionSignature::new("get".to_string(), path.clone()).with_location(1, 1));
+        node.functions.push(
+            FunctionSignature::new("get".to_string(), path.clone())
+                .with_owner("S")
+                .with_location(3, 5),
+        );
+        node.content_hash = "h".to_string();
+        repo_map.add_file(node).unwrap();
+
+        assert_eq!(repo_map.name_definition_file_count("get"), 1);
+        assert_eq!(
+            repo_map.function_definition_files("get"),
+            vec!["/test/repo.rs"]
+        );
+    }
+
+    // function_owner must not guess when a file has same-named methods with
+    // different owners; it returns None rather than the first (possibly wrong) one.
+    #[test]
+    fn test_function_owner_ambiguous_within_file_returns_none() {
+        let mut repo_map = RepoMap::new();
+        let path = "/test/build.rs".to_string();
+        let mut node = TreeNode::new(path.clone(), "rust".to_string());
+        node.functions.push(
+            FunctionSignature::new("build".to_string(), path.clone())
+                .with_owner("Foo")
+                .with_location(1, 3),
+        );
+        node.functions.push(
+            FunctionSignature::new("build".to_string(), path.clone())
+                .with_owner("Bar")
+                .with_location(5, 7),
+        );
+        node.functions.push(
+            FunctionSignature::new("only".to_string(), path.clone())
+                .with_owner("Foo")
+                .with_location(9, 10),
+        );
+        node.content_hash = "h".to_string();
+        repo_map.add_file(node).unwrap();
+
+        // Conflicting owners for `build` -> don't guess.
+        assert_eq!(repo_map.function_owner(&path, "build"), None);
+        assert_eq!(repo_map.qualified_function_name(&path, "build"), "build");
+        // Unambiguous name still qualifies.
+        assert_eq!(
+            repo_map.function_owner(&path, "only"),
+            Some("Foo".to_string())
+        );
+        assert_eq!(repo_map.qualified_function_name(&path, "only"), "Foo::only");
+    }
+
+    // P0-1 regression: call_graph must not accumulate stale/duplicate call sites across
+    // file re-add and removal (previously remove_file_by_index skipped the call_graph).
+    #[test]
+    fn test_call_graph_no_duplicates_on_readd() {
+        let mut repo_map = RepoMap::new();
+        let node = create_test_tree_node("test", "rust");
+
+        repo_map.add_file(node.clone()).unwrap();
+        let before = repo_map.find_function_callers("call_test").len();
+        assert_eq!(before, 1);
+
+        // Re-adding the same file (watch mode / re-scan) must not duplicate call sites.
+        repo_map.add_file(node.clone()).unwrap();
+        let after = repo_map.find_function_callers("call_test").len();
+        assert_eq!(after, before, "re-adding a file duplicated its call sites");
+    }
+
+    #[test]
+    fn test_call_graph_cleared_on_remove() {
+        let mut repo_map = RepoMap::new();
+        let node = create_test_tree_node("test", "rust");
+        let file_path = node.file_path.clone();
+
+        repo_map.add_file(node).unwrap();
+        assert_eq!(repo_map.find_function_callers("call_test").len(), 1);
+
+        repo_map.remove_file(&file_path).unwrap();
+
+        // No CallSite from the removed file may survive.
+        let callers = repo_map.find_function_callers("call_test");
+        assert!(
+            callers.iter().all(|c| c.file_path != file_path),
+            "removed file left stale call sites in the call graph"
+        );
+        assert_eq!(callers.len(), 0);
+    }
+
+    #[test]
+    fn test_call_graph_drops_emptied_keys_on_remove() {
+        let mut repo_map = RepoMap::new();
+        let node = create_test_tree_node("test", "rust");
+        let file_path = node.file_path.clone();
+
+        repo_map.add_file(node).unwrap();
+        repo_map.remove_file(&file_path).unwrap();
+
+        // The only key ("call_test") had all its sites removed, so it must not linger as an
+        // empty Vec keyed in the map.
+        assert!(
+            repo_map.call_graph.values().all(|sites| !sites.is_empty()),
+            "call_graph retained an empty CallSite vector after removal"
+        );
+        assert!(!repo_map.call_graph.contains_key("call_test"));
+    }
+
+    /// Build a TreeNode with an explicitly positioned outer and (nested) inner
+    /// function plus a call, so we can assert enclosing-function resolution.
+    fn tree_node_with_nested_call() -> TreeNode {
+        let mut node = TreeNode::new("/test/nested.rs".to_string(), "rust".to_string());
+
+        // outer spans lines 1..=20, inner is nested inside it spanning 5..=15.
+        node.functions.push(
+            FunctionSignature::new("outer".to_string(), node.file_path.clone())
+                .with_location(1, 20),
+        );
+        node.functions.push(
+            FunctionSignature::new("inner".to_string(), node.file_path.clone())
+                .with_location(5, 15),
+        );
+
+        // A call on line 10 sits inside BOTH outer and inner; innermost = inner.
+        node.function_calls.push(FunctionCall::new(
+            "target".to_string(),
+            node.file_path.clone(),
+            10,
+        ));
+        // A call on line 18 sits inside outer only.
+        node.function_calls.push(FunctionCall::new(
+            "outer_only".to_string(),
+            node.file_path.clone(),
+            18,
+        ));
+        // A call on line 25 is outside every function (module-level).
+        node.function_calls.push(FunctionCall::new(
+            "top_level".to_string(),
+            node.file_path.clone(),
+            25,
+        ));
+
+        node.content_hash = "hash_nested".to_string();
+        node
+    }
+
+    #[test]
+    fn test_caller_function_populated_for_nested_call() {
+        let mut repo_map = RepoMap::new();
+        repo_map.add_file(tree_node_with_nested_call()).unwrap();
+
+        // Innermost enclosing function wins for the nested call.
+        let target_callers = repo_map.find_function_callers("target");
+        assert_eq!(target_callers.len(), 1);
+        assert_eq!(
+            target_callers[0].caller_function,
+            Some("inner".to_string()),
+            "nested call should resolve to the innermost enclosing function"
+        );
+
+        // A call inside only the outer function resolves to outer.
+        let outer_callers = repo_map.find_function_callers("outer_only");
+        assert_eq!(outer_callers[0].caller_function, Some("outer".to_string()));
+
+        // A module-level call has no enclosing function.
+        let top_callers = repo_map.find_function_callers("top_level");
+        assert_eq!(top_callers[0].caller_function, None);
+    }
+
+    #[test]
+    fn test_transitive_callers_multi_level() {
+        // Build a chain across files: a -> b -> c -> parse_config
+        // Each function calls the next; we assert BFS depth + cycle safety.
+        let mut repo_map = RepoMap::new();
+
+        let mut mk = |fname: &str, calls: &str, line: u32| {
+            let path = format!("/test/{}.rs", fname);
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.functions
+                .push(FunctionSignature::new(fname.to_string(), path.clone()).with_location(1, 10));
+            node.function_calls
+                .push(FunctionCall::new(calls.to_string(), path.clone(), line));
+            node.content_hash = format!("hash_{}", fname);
+            node
+        };
+
+        repo_map.add_file(mk("a", "b", 5)).unwrap();
+        repo_map.add_file(mk("b", "c", 5)).unwrap();
+        repo_map.add_file(mk("c", "parse_config", 5)).unwrap();
+
+        let callers = repo_map.transitive_callers("parse_config", 0);
+        let names: Vec<(&str, usize)> = callers
+            .iter()
+            .map(|c| (c.function_name.as_str(), c.depth))
+            .collect();
+        assert_eq!(names, vec![("c", 1), ("b", 2), ("a", 3)]);
+
+        // max_depth limits the walk.
+        let shallow = repo_map.transitive_callers("parse_config", 1);
+        assert_eq!(shallow.len(), 1);
+        assert_eq!(shallow[0].function_name, "c");
+    }
+
+    #[test]
+    fn test_transitive_callers_cycle_safe() {
+        // a -> b -> a (cycle). Traversal must terminate.
+        let mut repo_map = RepoMap::new();
+        let mut mk = |fname: &str, calls: &str| {
+            let path = format!("/test/{}.rs", fname);
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.functions
+                .push(FunctionSignature::new(fname.to_string(), path.clone()).with_location(1, 10));
+            node.function_calls
+                .push(FunctionCall::new(calls.to_string(), path.clone(), 5));
+            node.content_hash = format!("hash_{}", fname);
+            node
+        };
+        repo_map.add_file(mk("a", "b")).unwrap();
+        repo_map.add_file(mk("b", "a")).unwrap();
+
+        let callers = repo_map.transitive_callers("a", 0);
+        // b calls a (depth 1); a calls b but a is the target (visited) -> stop.
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].function_name, "b");
+    }
+
+    // P0-3: two functions named `load` in different files, each on its own caller
+    // chain. Tracing `load` cannot attribute the direct callers to one definition
+    // (name-keyed call graph), so both are flagged ambiguous — but the deeper,
+    // uniquely-named callers on each chain resolve exactly and stay disjoint.
+    #[test]
+    fn test_transitive_callers_same_name_flagged_ambiguous() {
+        let mut repo_map = RepoMap::new();
+
+        // Build a file defining `load` plus a two-link caller chain into it.
+        let mk_chain = |file: &str, caller: &str, top: &str| {
+            let path = format!("/test/{}.rs", file);
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.functions
+                .push(FunctionSignature::new("load".to_string(), path.clone()).with_location(1, 3));
+            node.functions.push(
+                FunctionSignature::new(caller.to_string(), path.clone()).with_location(5, 10),
+            );
+            node.functions
+                .push(FunctionSignature::new(top.to_string(), path.clone()).with_location(12, 18));
+            // caller() calls load(); top() calls caller().
+            node.function_calls
+                .push(FunctionCall::new("load".to_string(), path.clone(), 7));
+            node.function_calls
+                .push(FunctionCall::new(caller.to_string(), path.clone(), 14));
+            node.content_hash = format!("hash_{}", file);
+            node
+        };
+
+        repo_map
+            .add_file(mk_chain("coll_a", "caller_a", "top_a"))
+            .unwrap();
+        repo_map
+            .add_file(mk_chain("coll_b", "caller_b", "top_b"))
+            .unwrap();
+
+        let callers = repo_map.transitive_callers("load", 0);
+
+        // Direct callers of `load` (depth 1): both chains cross here and both are
+        // ambiguous, because `load` has two definitions.
+        let direct: Vec<&TransitiveCaller> = callers.iter().filter(|c| c.depth == 1).collect();
+        assert_eq!(direct.len(), 2, "both direct callers present");
+        assert!(
+            direct.iter().all(|c| c.ambiguous),
+            "direct callers of an ambiguous name must be flagged, not exact"
+        );
+        let direct_names: HashSet<&str> = direct.iter().map(|c| c.function_name.as_str()).collect();
+        assert_eq!(direct_names, HashSet::from(["caller_a", "caller_b"]));
+
+        // Deeper callers (depth 2) have unique names, so they resolve exactly and
+        // each stays attributed to its own file — the chains do not cross.
+        let deep: Vec<&TransitiveCaller> = callers.iter().filter(|c| c.depth == 2).collect();
+        assert_eq!(deep.len(), 2);
+        assert!(
+            deep.iter().all(|c| !c.ambiguous),
+            "unique-named callers are exact"
+        );
+        let top_a = deep.iter().find(|c| c.function_name == "top_a").unwrap();
+        assert_eq!(top_a.file_path, "/test/coll_a.rs");
+        let top_b = deep.iter().find(|c| c.function_name == "top_b").unwrap();
+        assert_eq!(top_b.file_path, "/test/coll_b.rs");
     }
 
     #[test]

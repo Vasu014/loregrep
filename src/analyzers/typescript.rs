@@ -1,7 +1,7 @@
 use crate::analyzers::LanguageAnalyzer;
 use crate::types::{
     AnalysisError, ExportStatement, FileAnalysis, FunctionCall, FunctionSignature, ImportStatement,
-    Parameter, PartialAnalysis, Result, StructField, StructSignature, TreeNode,
+    Parameter, PartialAnalysis, Result, StructField, StructSignature, TreeNode, TypeKind,
 };
 use async_trait::async_trait;
 use blake3;
@@ -208,6 +208,86 @@ impl TypeScriptAnalyzer {
             }
         })
     }
+
+    /// Collect the declared supertypes of a type declaration into a flat list of
+    /// raw name strings.
+    ///
+    /// - Classes / abstract classes carry a `class_heritage` child holding an
+    ///   `extends_clause` (its `value` field is the single base class) and/or an
+    ///   `implements_clause` (its named children are the implemented types). A
+    ///   class may have both, e.g. `class C extends Base implements IThing` ->
+    ///   `["Base", "IThing"]`.
+    /// - Interfaces carry an `extends_type_clause` whose named children are the
+    ///   (possibly several) extended interfaces.
+    ///
+    /// Anonymous tokens (`extends`, `implements`, commas) are skipped by only
+    /// walking named children.
+    fn extract_supertypes(&self, node: &Node, source: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                match child.kind() {
+                    // Class / abstract class heritage.
+                    "class_heritage" => {
+                        let mut hc = child.walk();
+                        if hc.goto_first_child() {
+                            loop {
+                                let clause = hc.node();
+                                match clause.kind() {
+                                    "extends_clause" => {
+                                        if let Some(v) = clause.child_by_field_name("value") {
+                                            let t = self.text(&v, source);
+                                            if !t.is_empty() {
+                                                out.push(t);
+                                            }
+                                        }
+                                    }
+                                    "implements_clause" => {
+                                        out.extend(self.named_children_text(&clause, source))
+                                    }
+                                    _ => {}
+                                }
+                                if !hc.goto_next_sibling() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Interface heritage: `interface I extends A, B`.
+                    "extends_type_clause" => out.extend(self.named_children_text(&child, source)),
+                    _ => {}
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Text of every *named* child of `parent` (skipping anonymous tokens such as
+    /// `implements`/`extends` keywords and commas), dropping empties.
+    fn named_children_text(&self, parent: &Node, source: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut c = parent.walk();
+        if c.goto_first_child() {
+            loop {
+                let ch = c.node();
+                if ch.is_named() {
+                    let t = self.text(&ch, source);
+                    if !t.is_empty() {
+                        out.push(t);
+                    }
+                }
+                if !c.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        out
+    }
 }
 
 #[async_trait]
@@ -392,6 +472,23 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             match kind {
                 "method" => {
                     func.is_static = Self::has_token(&sig, "static");
+                    // Owner = the enclosing class name. Walk up to the nearest
+                    // `class_declaration`/`abstract_class_declaration` (a method
+                    // sits inside a `class_body`). Free/module-level functions keep
+                    // `owner == None`.
+                    let mut ancestor = outer.parent();
+                    while let Some(a) = ancestor {
+                        match a.kind() {
+                            "class_declaration" | "abstract_class_declaration" => {
+                                if let Some(n) = a.child_by_field_name("name") {
+                                    func.owner = Some(self.text(&n, source));
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                        ancestor = a.parent();
+                    }
                     // Members are public by default in TypeScript; only
                     // `private`/`protected` reduce visibility.
                     let mut modifier = None;
@@ -483,6 +580,18 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             sig.end_line = node.end_position().row as u32 + 1;
             sig.generics = self.extract_type_params(&node, source);
             sig.is_public = Self::is_exported(&node);
+            // Discriminate the concrete kind from the declaration node itself
+            // (abstract classes are a distinct `abstract_class_declaration` node,
+            // not a modifier on `class_declaration`).
+            sig.kind = match node.kind() {
+                "class_declaration" => TypeKind::Class,
+                "abstract_class_declaration" => TypeKind::AbstractClass,
+                "interface_declaration" => TypeKind::Interface,
+                "type_alias_declaration" => TypeKind::TypeAlias,
+                _ => TypeKind::Struct,
+            };
+            // `extends`/`implements` (class) and `extends` (interface) supertypes.
+            sig.supertypes = self.extract_supertypes(&node, source);
 
             if let Some(body) = node.child_by_field_name("body") {
                 let mut bc = body.walk();
@@ -1282,6 +1391,97 @@ function outer(): void {
             "fallback should capture `cb`, got {:?}",
             names
         );
+    }
+
+    // ---- P1-4: kind / owner / supertypes ----
+
+    #[tokio::test]
+    async fn test_p1_4_kind_discrimination() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = r#"
+interface IThing {}
+class C {}
+type T = string | number;
+"#;
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let structs = &analysis.tree_node.structs;
+        let ithing = structs.iter().find(|s| s.name == "IThing").unwrap();
+        let c = structs.iter().find(|s| s.name == "C").unwrap();
+        let t = structs.iter().find(|s| s.name == "T").unwrap();
+        assert_eq!(ithing.kind, TypeKind::Interface);
+        assert_eq!(c.kind, TypeKind::Class);
+        assert_eq!(t.kind, TypeKind::TypeAlias);
+    }
+
+    #[tokio::test]
+    async fn test_p1_4_abstract_class_kind() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "abstract class A {}";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let a = analysis
+            .tree_node
+            .structs
+            .iter()
+            .find(|s| s.name == "A")
+            .unwrap();
+        assert_eq!(a.kind, TypeKind::AbstractClass);
+    }
+
+    #[tokio::test]
+    async fn test_p1_4_class_extends_and_implements_supertypes() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "class C extends Base implements IThing {}";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let c = analysis
+            .tree_node
+            .structs
+            .iter()
+            .find(|s| s.name == "C")
+            .unwrap();
+        assert_eq!(c.kind, TypeKind::Class);
+        assert!(
+            c.supertypes.contains(&"Base".to_string()),
+            "supertypes should contain Base, got {:?}",
+            c.supertypes
+        );
+        assert!(
+            c.supertypes.contains(&"IThing".to_string()),
+            "supertypes should contain IThing, got {:?}",
+            c.supertypes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_p1_4_interface_extends_multiple() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "interface I extends A, B {}";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let i = analysis
+            .tree_node
+            .structs
+            .iter()
+            .find(|s| s.name == "I")
+            .unwrap();
+        assert_eq!(i.kind, TypeKind::Interface);
+        assert!(i.supertypes.contains(&"A".to_string()));
+        assert!(i.supertypes.contains(&"B".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_p1_4_method_owner_and_free_function_none() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = r#"
+class C {
+    m(): void {}
+}
+function f() {}
+"#;
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let funcs = &analysis.tree_node.functions;
+        let m = funcs.iter().find(|x| x.name == "m").unwrap();
+        let f = funcs.iter().find(|x| x.name == "f").unwrap();
+        assert_eq!(m.owner.as_deref(), Some("C"));
+        assert_eq!(f.owner, None);
     }
 
     #[tokio::test]

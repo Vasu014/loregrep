@@ -1,7 +1,7 @@
 use crate::analyzers::LanguageAnalyzer;
 use crate::types::{
     AnalysisError, ExportStatement, FileAnalysis, FunctionCall, FunctionSignature, ImportStatement,
-    Parameter, PartialAnalysis, Result, StructField, StructSignature, TreeNode,
+    Parameter, PartialAnalysis, Result, StructField, StructSignature, TreeNode, TypeKind,
 };
 use async_trait::async_trait;
 use blake3;
@@ -183,6 +183,27 @@ impl PythonAnalyzer {
         }
 
         (is_method, is_static, is_class_method)
+    }
+
+    /// Find the name of the nearest enclosing `class_definition`, if any.
+    /// Walks the ancestor chain from a `function_definition` node and reads the
+    /// `name` field (an `identifier`) of the first `class_definition` found.
+    /// Returns `None` for module-level (free) functions.
+    fn enclosing_class_name(&self, function_node: &Node, source: &str) -> Option<String> {
+        let mut current = function_node.parent();
+        while let Some(node) = current {
+            if node.kind() == "class_definition" {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = self.safe_utf8_text(&name_node, source);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+                return None;
+            }
+            current = node.parent();
+        }
+        None
     }
 
     /// Calculate content hash for caching
@@ -457,6 +478,8 @@ impl LanguageAnalyzer for PythonAnalyzer {
                     function_sig.is_static = is_static_method;
                     // In Python, methods are "public" unless they start with underscore
                     function_sig.is_public = !function_sig.name.starts_with('_');
+                    // Record the enclosing class as the method's owner.
+                    function_sig.owner = self.enclosing_class_name(&node, source);
                 } else {
                     // Module-level function
                     function_sig.is_public = !function_sig.name.starts_with('_');
@@ -502,6 +525,8 @@ impl LanguageAnalyzer for PythonAnalyzer {
 
         while let Some(query_match) = matches.next() {
             let mut class_sig = StructSignature::new(String::new(), file_path.to_string());
+            // Every Python `class_definition` is a class.
+            class_sig.kind = TypeKind::Class;
 
             for capture in query_match.captures {
                 let capture_name = query.capture_names()[capture.index as usize];
@@ -510,8 +535,20 @@ impl LanguageAnalyzer for PythonAnalyzer {
                 match capture_name {
                     "name" => class_sig.name = text.to_string(),
                     "inheritance" => {
-                        // Extract base classes - simplified for now
-                        class_sig.generics.push(format!("inherits: {}", text));
+                        // The `superclasses` field is an `argument_list` of the base
+                        // classes, e.g. `(Base)` or `(A, B)`. Collect each base as a
+                        // supertype. Named children skip the parentheses and commas;
+                        // keyword arguments like `metaclass=...` are ignored.
+                        let mut child_cursor = capture.node.walk();
+                        for child in capture.node.named_children(&mut child_cursor) {
+                            if child.kind() == "keyword_argument" {
+                                continue;
+                            }
+                            let base = self.safe_utf8_text(&child, source);
+                            if !base.is_empty() {
+                                class_sig.supertypes.push(base);
+                            }
+                        }
                     }
                     "body" => {
                         // Extract class attributes/methods as "fields"
@@ -1267,5 +1304,86 @@ if __name__ == "__main__":
             .find(|f| f.name == "_internal_process")
             .unwrap();
         assert!(!internal_method.is_public); // Private method
+    }
+
+    // P1-3: Python class owner + superclass supertypes + kind=Class
+
+    #[tokio::test]
+    async fn test_method_owner_is_enclosing_class() {
+        let analyzer = PythonAnalyzer::new().expect("Failed to create PythonAnalyzer");
+
+        let code = r#"
+class Foo(Base):
+    def m(self):
+        pass
+        "#;
+
+        let analysis = analyzer
+            .analyze_file(code, "test.py")
+            .await
+            .expect("Analysis failed");
+        let functions = &analysis.tree_node.functions;
+
+        let m = functions.iter().find(|f| f.name == "m").unwrap();
+        assert_eq!(m.owner, Some("Foo".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_class_kind_and_single_supertype() {
+        let analyzer = PythonAnalyzer::new().expect("Failed to create PythonAnalyzer");
+
+        let code = r#"
+class Foo(Base):
+    pass
+        "#;
+
+        let analysis = analyzer
+            .analyze_file(code, "test.py")
+            .await
+            .expect("Analysis failed");
+        let classes = &analysis.tree_node.structs;
+
+        let foo = classes.iter().find(|c| c.name == "Foo").unwrap();
+        assert_eq!(foo.kind, TypeKind::Class);
+        assert_eq!(foo.supertypes, vec!["Base".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_supertypes() {
+        let analyzer = PythonAnalyzer::new().expect("Failed to create PythonAnalyzer");
+
+        let code = r#"
+class Multi(A, B):
+    pass
+        "#;
+
+        let analysis = analyzer
+            .analyze_file(code, "test.py")
+            .await
+            .expect("Analysis failed");
+        let classes = &analysis.tree_node.structs;
+
+        let multi = classes.iter().find(|c| c.name == "Multi").unwrap();
+        assert_eq!(multi.kind, TypeKind::Class);
+        assert_eq!(multi.supertypes, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_module_level_function_has_no_owner() {
+        let analyzer = PythonAnalyzer::new().expect("Failed to create PythonAnalyzer");
+
+        let code = r#"
+def top():
+    pass
+        "#;
+
+        let analysis = analyzer
+            .analyze_file(code, "test.py")
+            .await
+            .expect("Analysis failed");
+        let functions = &analysis.tree_node.functions;
+
+        let top = functions.iter().find(|f| f.name == "top").unwrap();
+        assert_eq!(top.owner, None);
     }
 }

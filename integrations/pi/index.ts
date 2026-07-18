@@ -37,9 +37,9 @@ export default function (pi: ExtensionAPI) {
           { signal },
         );
         // stdout is pure JSON; on failure loregrep exits non-zero and explains on stderr.
-        if (result.exitCode !== 0) {
+        if (result.code !== 0) {
           return {
-            content: [{ type: "text", text: result.stderr || result.stdout || `loregrep exited ${result.exitCode}` }],
+            content: [{ type: "text", text: result.stderr || result.stdout || `loregrep exited ${result.code}` }],
             isError: true,
           };
         }

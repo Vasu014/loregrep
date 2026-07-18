@@ -88,12 +88,13 @@
     "expect": {
       "mode": "exact_set",
       "items": [
-        { "file_path": "src/main.rs", "line_number": 18 },
-        { "file_path": "src/loader.rs", "line_number": 17 }
+        { "file_path": "src/main.rs", "line_number": 21 },
+        { "file_path": "src/loader.rs", "line_number": 17 },
+        { "file_path": "src/pipeline_c.rs", "line_number": 9 }
       ]
     },
     "tags": ["rust", "callers", "cross-file", "trap"],
-    "notes": "Core value claim. Two REAL call sites: a free call in main (main.rs:18) and a method call in Loader::load (loader.rs:17). The commented-out call in cache.rs, the `use config::parse_config` import (main.rs:13), the doc example, the comment mention and the string-literal mention in config.rs must NOT appear."
+    "notes": "Core value claim. Three REAL DIRECT call sites: a free call in main (main.rs:21), a method call in Loader::load (loader.rs:17), and the final chain stage chain_c (pipeline_c.rs:9). The commented-out call in cache.rs, the `use config::parse_config` import (main.rs:16), the doc example, the comment mention and the string-literal mention in config.rs must NOT appear."
   },
   {
     "id": "rust-basic/find_callers/save-trap",
@@ -104,11 +105,11 @@
     "expect": {
       "mode": "exact_set",
       "items": [
-        { "file_path": "src/main.rs", "line_number": 29 }
+        { "file_path": "src/main.rs", "line_number": 32 }
       ]
     },
     "tags": ["rust", "callers", "trap"],
-    "notes": "Trap case: `save` has exactly one real call site (main.rs:29). The doc-example mention, the comment mention and the string-literal mention in fs_utils.rs must NOT be returned."
+    "notes": "Trap case: `save` has exactly one real call site (main.rs:32). The doc-example mention, the comment mention and the string-literal mention in fs_utils.rs must NOT be returned."
   },
   {
     "id": "rust-basic/get_repository_tree/languages",
@@ -142,9 +143,214 @@
     "extract": "data.metadata.total_files",
     "expect": {
       "mode": "exact_set",
-      "items": [8]
+      "items": [13]
     },
-    "tags": ["rust", "tree", "known-failure", "file-count"],
-    "notes": "KNOWN FAILURE. The fixture has 8 .rs files (and the tree contains 8 distinct file nodes), but metadata.total_files / file_count reports 16 (exactly doubled). See known_failures.json."
+    "tags": ["rust", "tree", "file-count"],
+    "notes": "13 .rs files: the 11 original plus collision_a.rs and collision_b.rs (added for the same-name ingest collision cases). metadata.total_files must equal the distinct file count exactly (the earlier double-count bug is fixed)."
+  },
+  {
+    "id": "rust-basic/trace_callers/parse_config-transitive",
+    "tool": "trace_callers",
+    "params": { "function_name": "parse_config" },
+    "extract": "data.callers",
+    "match_on": ["function_name", "file_path", "depth"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "function_name": "chain_c", "file_path": "src/pipeline_c.rs", "depth": 1 },
+        { "function_name": "load", "file_path": "src/loader.rs", "depth": 1 },
+        { "function_name": "main", "file_path": "src/main.rs", "depth": 1 },
+        { "function_name": "chain_b", "file_path": "src/pipeline_b.rs", "depth": 2 },
+        { "function_name": "chain_a", "file_path": "src/pipeline_a.rs", "depth": 3 }
+      ]
+    },
+    "tags": ["rust", "callers", "transitive", "graph-impossible"],
+    "notes": "grep-impossible: the FULL upstream call chain of parse_config. Direct callers (depth 1) are chain_c, Loader::load, and main; walking up, chain_b (depth 2) calls chain_c and chain_a (depth 3) calls chain_b. This multi-file chain (chain_a -> chain_b -> chain_c -> parse_config) exercises BFS depth tracking that a one-hop text search cannot reconstruct."
+  },
+  {
+    "id": "rust-basic/trace_callers/parse_config-max-depth",
+    "tool": "trace_callers",
+    "params": { "function_name": "parse_config", "max_depth": 1 },
+    "extract": "data.callers",
+    "match_on": ["function_name", "depth"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "function_name": "chain_c", "depth": 1 },
+        { "function_name": "load", "depth": 1 },
+        { "function_name": "main", "depth": 1 }
+      ]
+    },
+    "tags": ["rust", "callers", "transitive", "max-depth"],
+    "notes": "max_depth=1 limits the walk to DIRECT callers only, so chain_b (depth 2) and chain_a (depth 3) are excluded."
+  },
+  {
+    "id": "rust-basic/analyze_impact/parse_config-transitive-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "parse_config" },
+    "extract": "data.transitive_functions",
+    "expect": {
+      "mode": "exact_set",
+      "items": [5]
+    },
+    "tags": ["rust", "impact", "graph-impossible"],
+    "notes": "grep-impossible blast radius: 5 distinct functions transitively depend on parse_config (main, load, chain_a, chain_b, chain_c)."
+  },
+  {
+    "id": "rust-basic/analyze_impact/parse_config-direct-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "parse_config" },
+    "extract": "data.direct_callers",
+    "expect": {
+      "mode": "exact_set",
+      "items": [3]
+    },
+    "tags": ["rust", "impact", "direct"],
+    "notes": "3 distinct direct (one-hop) caller functions: main, Loader::load, chain_c."
+  },
+  {
+    "id": "rust-basic/analyze_impact/parse_config-file-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "parse_config" },
+    "extract": "data.affected_file_count",
+    "expect": {
+      "mode": "exact_set",
+      "items": [5]
+    },
+    "tags": ["rust", "impact", "files"],
+    "notes": "Changing parse_config touches 5 files transitively: main.rs, loader.rs, pipeline_a.rs, pipeline_b.rs, pipeline_c.rs."
+  },
+  {
+    "id": "rust-basic/trace_callers/ingest-name-ambiguous",
+    "tool": "trace_callers",
+    "params": { "function_name": "ingest" },
+    "extract": "data.callers",
+    "match_on": ["function_name", "file_path", "depth", "resolution"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "function_name": "feed_a", "file_path": "src/collision_a.rs", "depth": 1, "resolution": "name_ambiguous" },
+        { "function_name": "feed_b", "file_path": "src/collision_b.rs", "depth": 1, "resolution": "name_ambiguous" },
+        { "function_name": "drive_a", "file_path": "src/collision_a.rs", "depth": 2, "resolution": "exact" },
+        { "function_name": "drive_b", "file_path": "src/collision_b.rs", "depth": 2, "resolution": "exact" }
+      ]
+    },
+    "tags": ["rust", "callers", "transitive", "ambiguity", "collision"],
+    "notes": "SourceA::ingest and SourceB::ingest collide by name. Direct callers feed_a/feed_b cannot be attributed to one definition (name-keyed call graph) so both are flagged resolution=name_ambiguous, NEVER merged into one node. Their unique-named upstreams drive_a/drive_b resolve exact and stay disjoint (feed_a->drive_a in collision_a.rs only, feed_b->drive_b in collision_b.rs only). In P3 the typed receivers let this flip: feed_a/feed_b become resolution=resolved (one-line gold edit here)."
+  },
+  {
+    "id": "rust-basic/trace_callers/ingest-ambiguous-names-summary",
+    "tool": "trace_callers",
+    "params": { "function_name": "ingest" },
+    "extract": "data.ambiguous_names",
+    "match_on": ["name", "definition_count", "candidates_truncated"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "ingest", "definition_count": 2, "candidates_truncated": false }
+      ]
+    },
+    "tags": ["rust", "callers", "ambiguity", "collision"],
+    "notes": "The ambiguous_names summary names the collision (ingest, 2 definitions) so an agent can see WHY callers are candidates. candidate_files order is not asserted (name-index iteration order is not stable)."
+  },
+  {
+    "id": "rust-basic/analyze_impact/ingest-exact-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "ingest" },
+    "extract": "data.transitive_functions",
+    "expect": {
+      "mode": "exact_set",
+      "items": [2]
+    },
+    "tags": ["rust", "impact", "ambiguity", "collision"],
+    "notes": "transitive_functions counts ONLY exact callers (drive_a, drive_b) — the headline blast radius is not inflated by the two name-ambiguous candidates."
+  },
+  {
+    "id": "rust-basic/analyze_impact/ingest-ambiguous-count",
+    "tool": "analyze_impact",
+    "params": { "function_name": "ingest" },
+    "extract": "data.ambiguous_functions",
+    "expect": {
+      "mode": "exact_set",
+      "items": [2]
+    },
+    "tags": ["rust", "impact", "ambiguity", "collision"],
+    "notes": "The two candidate callers (feed_a, feed_b) reached via the ingest collision are reported separately as ambiguous_functions, never dropped and never counted as confirmed."
+  },
+  {
+    "id": "rust-basic/find_callers/ingest-per-callsite",
+    "tool": "find_callers",
+    "params": { "function_name": "ingest" },
+    "extract": "data.callers",
+    "match_on": ["caller_function", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "caller_function": "feed_a", "file_path": "src/collision_a.rs" },
+        { "caller_function": "feed_b", "file_path": "src/collision_b.rs" }
+      ]
+    },
+    "tags": ["rust", "callers", "direct", "collision"],
+    "notes": "find_callers is per-call-site (it reports the two literal ingest() call expressions), so the name collision does not affect it — no merging, no ambiguity flag, one entry per real call site."
+  },
+  {
+    "id": "rust-basic/search_structs/apperror-enum-kind",
+    "tool": "search_structs",
+    "params": { "pattern": "AppError" },
+    "extract": "data.results",
+    "match_on": ["name", "kind"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "AppError", "kind": "enum" }
+      ]
+    },
+    "tags": ["rust", "structs", "enum", "kind"],
+    "notes": "Enums are now extracted and classified: search_structs finds AppError and reports kind=enum (previously enums were absent from extract_structs — a silent empty result)."
+  },
+  {
+    "id": "rust-basic/search_structs/summarize-trait-kind",
+    "tool": "search_structs",
+    "params": { "pattern": "Summarize" },
+    "extract": "data.results",
+    "match_on": ["name", "kind"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "Summarize", "kind": "trait" }
+      ]
+    },
+    "tags": ["rust", "structs", "trait", "kind"],
+    "notes": "Traits are extracted and classified kind=trait, distinct from struct/enum."
+  },
+  {
+    "id": "rust-basic/search_functions/load-owner-attribution",
+    "tool": "search_functions",
+    "params": { "pattern": "load" },
+    "extract": "data.results",
+    "match_on": ["name", "owner", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "load", "owner": "Loader", "file_path": "src/loader.rs" }
+      ]
+    },
+    "tags": ["rust", "functions", "owner"],
+    "notes": "Method owner attribution: Loader::load surfaces owner=Loader (the enclosing impl type), where a free function would have owner=null."
+  },
+  {
+    "id": "rust-basic/search_functions/ingest-owner-disambiguation",
+    "tool": "search_functions",
+    "params": { "pattern": "ingest", "owner": "SourceA" },
+    "extract": "data.results",
+    "match_on": ["name", "owner", "file_path"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "name": "ingest", "owner": "SourceA", "file_path": "src/collision_a.rs" }
+      ]
+    },
+    "tags": ["rust", "functions", "owner", "collision"],
+    "notes": "Same-name-different-owner disambiguation: SourceA::ingest and SourceB::ingest share a name; the owner filter returns only SourceA's, distinguished by owner + file (grep on 'ingest' cannot separate them by owning type)."
   }
 ]

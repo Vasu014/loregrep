@@ -13,3 +13,15 @@ impl fmt::Display for AppError {
         write!(f, "app error")
     }
 }
+
+/// A trait, so search_structs can distinguish `kind: trait` from struct/enum
+/// (P1-6 eval coverage). Implemented for AppError below.
+pub trait Summarize {
+    fn summarize(&self) -> String;
+}
+
+impl Summarize for AppError {
+    fn summarize(&self) -> String {
+        String::from("summary")
+    }
+}

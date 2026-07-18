@@ -1,4 +1,4 @@
-use crate::{analyzers::registry::RegistryHandle, storage::memory::RepoMap};
+use crate::{analyzers::registry::RegistryHandle, storage::memory::RepoMap, types::TypeKind};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,7 +24,7 @@ impl LocalAnalysisTools {
         vec![
             ToolSchema {
                 name: "search_functions".to_string(),
-                description: "Look up functions by name or regex and return their structured signature: parameters, return type, visibility, async/const/static flags, and the definition's file path and line range.".to_string(),
+                description: "Look up functions by name or regex and return their structured signature: parameters, return type, visibility, async/const/static flags, the owning type (impl/class) if it is a method, and the definition's file path and line range.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -40,6 +40,10 @@ impl LocalAnalysisTools {
                         "language": {
                             "type": "string",
                             "description": "Filter by programming language (optional)"
+                        },
+                        "owner": {
+                            "type": "string",
+                            "description": "Filter to methods whose owning type (impl block / class) has this exact name (optional)"
                         }
                     },
                     "required": ["pattern"]
@@ -47,13 +51,13 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "search_structs".to_string(),
-                description: "Look up structs, classes, and interfaces by name or regex and return their fields, generics, visibility, and definition location.".to_string(),
+                description: "Look up named types — structs, enums, traits, classes, abstract classes, interfaces, and type aliases — by name or regex and return their fields, generics, visibility, declared supertypes (supertraits / base classes / extends+implements), the `kind` of each, and definition location.".to_string(),
                 input_schema: json!({
-                    "type": "object", 
+                    "type": "object",
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Name or regex pattern to match struct/class names"
+                            "description": "Name or regex pattern to match type names"
                         },
                         "limit": {
                             "type": "integer",
@@ -63,6 +67,11 @@ impl LocalAnalysisTools {
                         "language": {
                             "type": "string",
                             "description": "Filter by programming language (optional)"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["struct", "enum", "trait", "class", "abstract_class", "interface", "type_alias"],
+                            "description": "Filter to a single kind of type (optional)"
                         }
                     },
                     "required": ["pattern"]
@@ -103,7 +112,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "find_callers".to_string(),
-                description: "Return the direct call sites of a function across the repository, each with file path and line, resolved from the parsed call graph — call expressions only (not comments, string literals, imports, or the definition).".to_string(),
+                description: "Return the direct call sites of a function across the repository, each with file path and line, resolved from the parsed call graph — call expressions only (not comments, string literals, imports, or the definition). For the full transitive upstream chain, see trace_callers.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -139,6 +148,39 @@ impl LocalAnalysisTools {
                     }
                 })
             },
+            ToolSchema {
+                name: "trace_callers".to_string(),
+                description: "Return the transitive (upstream) callers of a function — every function that reaches the target through the call graph, across files, each with its depth. Where find_callers returns one hop, this walks the graph to the full upstream chain. Depth is bounded by max_depth (0 = unlimited). Each caller carries a `resolution`: \"exact\" (single-definition, confirmed) or \"name_ambiguous\" (reached via a name with more than one definition, so it is a candidate — the specific target is unresolved). `exact_count`/`ambiguous_count` split the total, and `ambiguous_names` lists the colliding names with their candidate definition files.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "function_name": {
+                            "type": "string",
+                            "description": "Name of the function whose transitive callers to trace"
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Maximum number of hops to walk up the call graph (0 = unlimited)",
+                            "default": 0
+                        }
+                    },
+                    "required": ["function_name"]
+                }),
+            },
+            ToolSchema {
+                name: "analyze_impact".to_string(),
+                description: "Return the change blast radius of a function: every function and file that transitively depends on it, resolved through the call graph. `transitive_functions` and `affected_files` count only exact (confirmed) callers; `ambiguous_functions` and `candidate_files` hold candidates reached via multiply-defined names, and `ambiguous_names` explains each collision — so the headline impact is never inflated by unconfirmed links.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "function_name": {
+                            "type": "string",
+                            "description": "Name of the function whose change impact to compute"
+                        }
+                    },
+                    "required": ["function_name"]
+                }),
+            },
         ]
     }
 
@@ -149,6 +191,8 @@ impl LocalAnalysisTools {
             "analyze_file" => self.analyze_file(input).await,
             "get_dependencies" => self.get_dependencies(input).await,
             "find_callers" => self.find_callers(input).await,
+            "trace_callers" => self.trace_callers(input).await,
+            "analyze_impact" => self.analyze_impact(input).await,
             "get_repository_tree" => self.get_repository_tree(input).await,
             _ => Ok(ToolResult::error(format!("Unknown tool: {}", tool_name))),
         }
@@ -166,6 +210,7 @@ impl LocalAnalysisTools {
         // FunctionSignature does not carry the language directly. A filter for a
         // language absent from the repo therefore yields an empty set.
         let language_filter = search_input.language.as_deref();
+        let owner_filter = search_input.owner.as_deref();
         let limited_results: Vec<_> = results
             .items
             .into_iter()
@@ -174,6 +219,11 @@ impl LocalAnalysisTools {
                     .get_file(&func.file_path)
                     .map(|node| node.language.eq_ignore_ascii_case(lang))
                     .unwrap_or(false),
+                None => true,
+            })
+            // Optional owner filter: keep only methods of the named type.
+            .filter(|func| match owner_filter {
+                Some(owner) => func.owner.as_deref() == Some(owner),
                 None => true,
             })
             .take(search_input.limit.unwrap_or(20))
@@ -197,6 +247,11 @@ impl LocalAnalysisTools {
         let results = repo_map.find_structs(&search_input.pattern);
         // Apply the optional language filter (see search_functions above).
         let language_filter = search_input.language.as_deref();
+        // Parse the optional kind filter once. An unrecognized kind string yields
+        // Some(None) -> matches nothing (honest: the requested kind does not exist),
+        // versus None -> no kind filter at all.
+        let kind_filter: Option<Option<TypeKind>> =
+            search_input.kind.as_deref().map(parse_type_kind);
         let limited_results: Vec<_> = results
             .items
             .into_iter()
@@ -205,6 +260,11 @@ impl LocalAnalysisTools {
                     .get_file(&struct_def.file_path)
                     .map(|node| node.language.eq_ignore_ascii_case(lang))
                     .unwrap_or(false),
+                None => true,
+            })
+            // Optional kind filter: keep only types whose kind matches.
+            .filter(|struct_def| match &kind_filter {
+                Some(parsed) => *parsed == Some(struct_def.kind),
                 None => true,
             })
             .take(search_input.limit.unwrap_or(20))
@@ -304,21 +364,199 @@ impl LocalAnalysisTools {
         let callers_input: FindCallersInput =
             serde_json::from_value(input).context("Invalid find_callers input")?;
 
-        let callers = self
-            .repo_map
-            .lock()
-            .unwrap()
-            .find_function_callers(&callers_input.function_name);
-        let limited_callers: Vec<_> = callers
-            .into_iter()
-            .take(callers_input.limit.unwrap_or(50))
-            .collect();
+        let callers_json: Vec<Value> = {
+            let repo_map = self.repo_map.lock().unwrap();
+            repo_map
+                .find_function_callers(&callers_input.function_name)
+                .into_iter()
+                .take(callers_input.limit.unwrap_or(50))
+                .map(|cs| {
+                    // Preserve every CallSite field, then add an owner-qualified
+                    // display for the enclosing caller (e.g. "Loader::load").
+                    let mut v = serde_json::to_value(&cs).unwrap_or_else(|_| json!({}));
+                    let caller_display = cs
+                        .caller_function
+                        .as_deref()
+                        .map(|name| repo_map.qualified_function_name(&cs.file_path, name));
+                    v["caller_display"] = json!(caller_display);
+                    v
+                })
+                .collect()
+        };
 
         let result = json!({
             "status": "success",
             "function_name": callers_input.function_name,
-            "callers": limited_callers,
-            "count": limited_callers.len()
+            "callers": callers_json,
+            "count": callers_json.len()
+        });
+
+        Ok(ToolResult::success(result))
+    }
+
+    async fn trace_callers(&self, input: Value) -> Result<ToolResult> {
+        let trace_input: TraceCallersInput =
+            serde_json::from_value(input).context("Invalid trace_callers input")?;
+
+        let max_depth = trace_input.max_depth.unwrap_or(0);
+        let (callers_json, callers_len, ambiguous_names) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            let callers = repo_map.transitive_callers(&trace_input.function_name, max_depth);
+            let ambiguous_names =
+                Self::ambiguous_names_summary(&repo_map, &trace_input.function_name, &callers);
+            let callers_json: Vec<Value> = callers
+                .iter()
+                .map(|c| {
+                    json!({
+                        "function_name": c.function_name,
+                        // Owner-qualified display (e.g. "Loader::load") when the
+                        // caller is a method; bare name otherwise.
+                        "display_name": repo_map.qualified_function_name(&c.file_path, &c.function_name),
+                        "file_path": c.file_path,
+                        "depth": c.depth,
+                        // "name_ambiguous": reached by expanding a name with >1
+                        // definition, so which definition it calls is unresolved — a
+                        // candidate, not a confirmed caller. "exact": single-definition.
+                        "resolution": if c.ambiguous { "name_ambiguous" } else { "exact" }
+                    })
+                })
+                .collect();
+            (callers_json, callers.len(), ambiguous_names)
+        };
+
+        let max_depth_reached = callers_json
+            .iter()
+            .filter_map(|c| c["depth"].as_u64())
+            .max()
+            .unwrap_or(0);
+        let ambiguous_count = callers_json
+            .iter()
+            .filter(|c| c["resolution"] == "name_ambiguous")
+            .count();
+
+        let result = json!({
+            "status": "success",
+            "function_name": trace_input.function_name,
+            "callers": callers_json,
+            "count": callers_len,
+            "exact_count": callers_len - ambiguous_count,
+            "ambiguous_count": ambiguous_count,
+            "max_depth_reached": max_depth_reached,
+            "ambiguous_names": ambiguous_names
+        });
+
+        Ok(ToolResult::success(result))
+    }
+
+    /// Build the `ambiguous_names` summary: for every name in the traced chain
+    /// (the target plus each caller) that has more than one definition, report the
+    /// name, its definition count, and up to `AMBIGUOUS_CANDIDATE_CAP` candidate
+    /// files. These are the collisions that make some callers candidates rather
+    /// than confirmed links. Empty when the chain has no name collisions.
+    fn ambiguous_names_summary(
+        repo_map: &RepoMap,
+        target: &str,
+        callers: &[crate::storage::memory::TransitiveCaller],
+    ) -> Vec<Value> {
+        const AMBIGUOUS_CANDIDATE_CAP: usize = 5;
+        let mut names: Vec<&str> = Vec::with_capacity(callers.len() + 1);
+        names.push(target);
+        names.extend(callers.iter().map(|c| c.function_name.as_str()));
+        names.sort_unstable();
+        names.dedup();
+
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let files = repo_map.function_definition_files(name);
+                let total = files.len();
+                if total <= 1 {
+                    return None;
+                }
+                let candidates: Vec<String> =
+                    files.into_iter().take(AMBIGUOUS_CANDIDATE_CAP).collect();
+                Some(json!({
+                    "name": name,
+                    "definition_count": total,
+                    "candidate_files": candidates,
+                    "candidates_truncated": total > AMBIGUOUS_CANDIDATE_CAP
+                }))
+            })
+            .collect()
+    }
+
+    async fn analyze_impact(&self, input: Value) -> Result<ToolResult> {
+        let impact_input: AnalyzeImpactInput =
+            serde_json::from_value(input).context("Invalid analyze_impact input")?;
+
+        let (direct_callers, transitive, ambiguous_names) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            let transitive = repo_map.transitive_callers(&impact_input.function_name, 0);
+            // Direct callers = the depth-1 entries of the transitive walk. Each
+            // TransitiveCaller is a distinct (file, name) node, so callers that
+            // share a name across files are counted separately (a name-keyed
+            // HashSet<String> would collapse them and understate the blast radius).
+            // This also avoids re-fetching the target's call sites — the depth-1
+            // frontier already computed them.
+            let direct_callers = transitive.iter().filter(|c| c.depth == 1).count();
+            let ambiguous_names =
+                Self::ambiguous_names_summary(&repo_map, &impact_input.function_name, &transitive);
+            (direct_callers, transitive, ambiguous_names)
+        };
+
+        // Split the transitive set by resolution: exact callers are confirmed to
+        // reach the target; ambiguous ones are candidates (reached via a
+        // multiply-defined name). Keep them separate so the headline count is not
+        // inflated by unconfirmed links.
+        let ambiguous_functions = transitive.iter().filter(|c| c.ambiguous).count();
+        let transitive_functions = transitive.len() - ambiguous_functions;
+
+        // Affected files, split the same way (a file may hold both kinds; it is
+        // "confirmed" affected if any exact caller lives there).
+        let mut confirmed_files: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut candidate_only: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for c in &transitive {
+            if c.ambiguous {
+                candidate_only.insert(c.file_path.clone());
+            } else {
+                confirmed_files.insert(c.file_path.clone());
+            }
+        }
+        // A file with an exact caller is confirmed, not candidate-only.
+        candidate_only.retain(|f| !confirmed_files.contains(f));
+        let affected_files: Vec<String> = confirmed_files.iter().cloned().collect();
+        let candidate_files: Vec<String> = candidate_only.iter().cloned().collect();
+        let affected_file_count = affected_files.len();
+
+        let mut summary = format!(
+            "Changing `{}` transitively affects {} function{} across {} file{}",
+            impact_input.function_name,
+            transitive_functions,
+            if transitive_functions == 1 { "" } else { "s" },
+            affected_file_count,
+            if affected_file_count == 1 { "" } else { "s" }
+        );
+        if ambiguous_functions > 0 {
+            summary.push_str(&format!(
+                "; {} additional candidate caller{} via name collisions (see ambiguous_names)",
+                ambiguous_functions,
+                if ambiguous_functions == 1 { "" } else { "s" }
+            ));
+        }
+
+        let result = json!({
+            "status": "success",
+            "function_name": impact_input.function_name,
+            "direct_callers": direct_callers,
+            "transitive_functions": transitive_functions,
+            "ambiguous_functions": ambiguous_functions,
+            "affected_files": affected_files,
+            "affected_file_count": affected_file_count,
+            "candidate_files": candidate_files,
+            "ambiguous_names": ambiguous_names,
+            "summary": summary
         });
 
         Ok(ToolResult::success(result))
@@ -560,12 +798,35 @@ impl ToolResult {
     }
 }
 
+/// Parse a `kind` filter string (case-insensitive, `_`/space/`-` insensitive) into
+/// a `TypeKind`. Returns `None` for an unrecognized string so callers can treat it
+/// as "matches nothing" rather than silently ignoring the filter.
+fn parse_type_kind(s: &str) -> Option<TypeKind> {
+    let normalized: String = s
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-' | ' '))
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    match normalized.as_str() {
+        "struct" => Some(TypeKind::Struct),
+        "enum" => Some(TypeKind::Enum),
+        "trait" => Some(TypeKind::Trait),
+        "class" => Some(TypeKind::Class),
+        "abstractclass" => Some(TypeKind::AbstractClass),
+        "interface" => Some(TypeKind::Interface),
+        "typealias" => Some(TypeKind::TypeAlias),
+        _ => None,
+    }
+}
+
 // Input types for tool functions
 #[derive(Debug, Deserialize)]
 struct SearchFunctionsInput {
     pattern: String,
     limit: Option<usize>,
     language: Option<String>,
+    /// Keep only methods whose owning type (impl/class) equals this name.
+    owner: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -573,6 +834,9 @@ struct SearchStructsInput {
     pattern: String,
     limit: Option<usize>,
     language: Option<String>,
+    /// Keep only types of this kind (struct/enum/trait/class/abstract_class/
+    /// interface/type_alias).
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -590,6 +854,17 @@ struct GetDependenciesInput {
 struct FindCallersInput {
     function_name: String,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceCallersInput {
+    function_name: String,
+    max_depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnalyzeImpactInput {
+    function_name: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -632,7 +907,7 @@ mod tests {
         let tools = create_mock_tools();
         let schemas = tools.get_tool_schemas();
 
-        assert_eq!(schemas.len(), 6, "Should have exactly 6 tool schemas");
+        assert_eq!(schemas.len(), 8, "Should have exactly 8 tool schemas");
 
         let tool_names: Vec<_> = schemas.iter().map(|s| &s.name).collect();
         assert!(tool_names.contains(&&"search_functions".to_string()));
@@ -640,7 +915,22 @@ mod tests {
         assert!(tool_names.contains(&&"analyze_file".to_string()));
         assert!(tool_names.contains(&&"get_dependencies".to_string()));
         assert!(tool_names.contains(&&"find_callers".to_string()));
+        assert!(tool_names.contains(&&"trace_callers".to_string()));
+        assert!(tool_names.contains(&&"analyze_impact".to_string()));
         assert!(tool_names.contains(&&"get_repository_tree".to_string()));
+
+        // The graph tools' descriptions must explain the ambiguity vocabulary so an
+        // agent knows candidate callers are not confirmed (P0-4).
+        let desc_of = |name: &str| {
+            schemas
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.description.to_lowercase())
+                .unwrap()
+        };
+        assert!(desc_of("trace_callers").contains("ambiguous"));
+        assert!(desc_of("trace_callers").contains("candidate"));
+        assert!(desc_of("analyze_impact").contains("candidate"));
     }
 
     #[test]
@@ -871,6 +1161,355 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // === Trace Callers / Analyze Impact Tests ===
+
+    // Build tools whose repo_map contains a multi-level chain a -> b -> c -> leaf
+    // across separate files, so graph traversal has something to walk.
+    fn create_tools_with_chain() -> LocalAnalysisTools {
+        use crate::types::{FunctionCall, FunctionSignature, TreeNode};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |fname: &str, calls: &str| {
+                let path = format!("/src/{}.rs", fname);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.functions.push(
+                    FunctionSignature::new(fname.to_string(), path.clone()).with_location(1, 10),
+                );
+                node.function_calls
+                    .push(FunctionCall::new(calls.to_string(), path.clone(), 5));
+                node.content_hash = format!("h_{}", fname);
+                node
+            };
+            rm.add_file(mk("a", "b")).unwrap();
+            rm.add_file(mk("b", "c")).unwrap();
+            rm.add_file(mk("c", "leaf")).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_tool() {
+        let tools = create_tools_with_chain();
+        let input = json!({ "function_name": "leaf" });
+
+        let result = tools.execute_tool("trace_callers", input).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.data["function_name"], "leaf");
+        // c (depth 1), b (depth 2), a (depth 3)
+        assert_eq!(result.data["count"].as_u64().unwrap(), 3);
+        assert_eq!(result.data["max_depth_reached"].as_u64().unwrap(), 3);
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers[0]["function_name"], "c");
+        assert_eq!(callers[0]["depth"].as_u64().unwrap(), 1);
+        assert_eq!(callers[2]["function_name"], "a");
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_max_depth() {
+        let tools = create_tools_with_chain();
+        let input = json!({ "function_name": "leaf", "max_depth": 1 });
+
+        let result = tools.execute_tool("trace_callers", input).await.unwrap();
+        assert_eq!(result.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(result.data["callers"][0]["function_name"], "c");
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_tool() {
+        let tools = create_tools_with_chain();
+        let input = json!({ "function_name": "leaf" });
+
+        let result = tools.execute_tool("analyze_impact", input).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.data["direct_callers"].as_u64().unwrap(), 1);
+        assert_eq!(result.data["transitive_functions"].as_u64().unwrap(), 3);
+        assert_eq!(result.data["affected_file_count"].as_u64().unwrap(), 3);
+        let files = result.data["affected_files"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(
+            result.data["summary"]
+                .as_str()
+                .unwrap()
+                .contains("transitively affects 3 functions across 3 files")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_invalid_input() {
+        let tools = create_mock_tools();
+        let input = json!({ "wrong_field": "value" });
+        let result = tools.execute_tool("trace_callers", input).await;
+        assert!(result.is_err());
+    }
+
+    // Two files each define `load` with a caller chain into it, so tracing `load`
+    // produces name-ambiguous direct callers (P0-4 tool-shape coverage).
+    fn create_tools_with_collision() -> LocalAnalysisTools {
+        use crate::types::{FunctionCall, FunctionSignature, TreeNode};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |file: &str, caller: &str| {
+                let path = format!("/src/{}.rs", file);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.functions.push(
+                    FunctionSignature::new("load".to_string(), path.clone()).with_location(1, 3),
+                );
+                node.functions.push(
+                    FunctionSignature::new(caller.to_string(), path.clone()).with_location(5, 10),
+                );
+                node.function_calls
+                    .push(FunctionCall::new("load".to_string(), path.clone(), 7));
+                node.content_hash = format!("h_{}", file);
+                node
+            };
+            rm.add_file(mk("a", "caller_a")).unwrap();
+            rm.add_file(mk("b", "caller_b")).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    // A repo with a struct + enum and an owned method `Loader::load` that calls
+    // parse_config, plus a free function. Exercises the P1-5 surfacing: kind/owner
+    // filters and owner-qualified caller display.
+    fn create_tools_with_owned_types() -> LocalAnalysisTools {
+        use crate::types::{FunctionCall, FunctionSignature, StructSignature, TreeNode, TypeKind};
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let path = "/src/loader.rs".to_string();
+            let mut node = TreeNode::new(path.clone(), "rust".to_string());
+            node.structs.push(
+                StructSignature::new("Config".to_string(), path.clone())
+                    .with_kind(TypeKind::Struct),
+            );
+            node.structs.push(
+                StructSignature::new("ConfigError".to_string(), path.clone())
+                    .with_kind(TypeKind::Enum),
+            );
+            node.functions.push(
+                FunctionSignature::new("load".to_string(), path.clone())
+                    .with_owner("Loader")
+                    .with_location(1, 10),
+            );
+            node.functions.push(
+                FunctionSignature::new("helper".to_string(), path.clone()).with_location(12, 15),
+            );
+            // load() calls parse_config() at line 5 (inside load's span).
+            node.function_calls.push(FunctionCall::new(
+                "parse_config".to_string(),
+                path.clone(),
+                5,
+            ));
+            node.content_hash = "h_loader".to_string();
+            rm.add_file(node).unwrap();
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    #[tokio::test]
+    async fn test_search_structs_kind_filter() {
+        let tools = create_tools_with_owned_types();
+
+        // The task's acceptance: search_structs {pattern: "ConfigError", kind: "enum"}
+        // returns the enum, with its kind surfaced.
+        let result = tools
+            .execute_tool(
+                "search_structs",
+                json!({ "pattern": "ConfigError", "kind": "enum" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(result.data["results"][0]["name"], "ConfigError");
+        assert_eq!(result.data["results"][0]["kind"], "enum");
+
+        // The same pattern with the wrong kind excludes it (not silently ignored).
+        let as_struct = tools
+            .execute_tool(
+                "search_structs",
+                json!({ "pattern": "ConfigError", "kind": "struct" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(as_struct.data["count"].as_u64().unwrap(), 0);
+
+        // An unrecognized kind matches nothing rather than ignoring the filter.
+        let bogus = tools
+            .execute_tool(
+                "search_structs",
+                json!({ "pattern": "ConfigError", "kind": "widget" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bogus.data["count"].as_u64().unwrap(), 0);
+
+        // Struct search without a kind filter still surfaces the struct's kind.
+        let plain = tools
+            .execute_tool("search_structs", json!({ "pattern": "Config" }))
+            .await
+            .unwrap();
+        assert_eq!(plain.data["results"][0]["name"], "Config");
+        assert_eq!(plain.data["results"][0]["kind"], "struct");
+    }
+
+    #[tokio::test]
+    async fn test_search_functions_owner_filter() {
+        let tools = create_tools_with_owned_types();
+
+        let owned = tools
+            .execute_tool(
+                "search_functions",
+                json!({ "pattern": "load", "owner": "Loader" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owned.data["count"].as_u64().unwrap(), 1);
+        assert_eq!(owned.data["results"][0]["name"], "load");
+        assert_eq!(owned.data["results"][0]["owner"], "Loader");
+
+        // A non-matching owner yields nothing.
+        let none = tools
+            .execute_tool(
+                "search_functions",
+                json!({ "pattern": "load", "owner": "Nope" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(none.data["count"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_shows_owner_qualified_display() {
+        let tools = create_tools_with_owned_types();
+        let result = tools
+            .execute_tool("trace_callers", json!({ "function_name": "parse_config" }))
+            .await
+            .unwrap();
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["function_name"], "load");
+        // The owning type is rendered into display_name.
+        assert_eq!(callers[0]["display_name"], "Loader::load");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_caller_display_qualified() {
+        let tools = create_tools_with_owned_types();
+        let result = tools
+            .execute_tool("find_callers", json!({ "function_name": "parse_config" }))
+            .await
+            .unwrap();
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["caller_function"], "load");
+        assert_eq!(callers[0]["caller_display"], "Loader::load");
+    }
+
+    #[tokio::test]
+    async fn test_trace_callers_reports_ambiguity() {
+        let tools = create_tools_with_collision();
+        let result = tools
+            .execute_tool("trace_callers", json!({ "function_name": "load" }))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        let callers = result.data["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 2);
+        // Every resolution value is from the closed set, and both direct callers of
+        // the multiply-defined `load` are flagged name_ambiguous.
+        for c in callers {
+            let res = c["resolution"].as_str().unwrap();
+            assert!(
+                res == "exact" || res == "name_ambiguous",
+                "resolution: {res}"
+            );
+            assert_eq!(res, "name_ambiguous");
+        }
+
+        let count = result.data["count"].as_u64().unwrap();
+        let exact = result.data["exact_count"].as_u64().unwrap();
+        let ambiguous = result.data["ambiguous_count"].as_u64().unwrap();
+        assert_eq!(exact + ambiguous, count);
+        assert_eq!(ambiguous, 2);
+
+        // ambiguous_names explains the `load` collision with its candidate files.
+        let names = result.data["ambiguous_names"].as_array().unwrap();
+        let load_entry = names
+            .iter()
+            .find(|n| n["name"] == "load")
+            .expect("load listed as ambiguous");
+        assert_eq!(load_entry["definition_count"].as_u64().unwrap(), 2);
+        assert_eq!(load_entry["candidate_files"].as_array().unwrap().len(), 2);
+        assert_eq!(load_entry["candidates_truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_direct_callers_distinct_by_file() {
+        use crate::types::{FunctionCall, FunctionSignature, TreeNode};
+        // Two DIFFERENT functions both named `flush`, in different files, each
+        // directly calls `save`. direct_callers must be 2 (a name-keyed set would
+        // collapse them to 1 and understate the blast radius).
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            let mut mk = |file: &str| {
+                let path = format!("/src/{}.rs", file);
+                let mut node = TreeNode::new(path.clone(), "rust".to_string());
+                node.functions.push(
+                    FunctionSignature::new("flush".to_string(), path.clone()).with_location(1, 10),
+                );
+                node.function_calls
+                    .push(FunctionCall::new("save".to_string(), path.clone(), 5));
+                node.content_hash = format!("h_{}", file);
+                node
+            };
+            rm.add_file(mk("a")).unwrap();
+            rm.add_file(mk("b")).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        let result = tools
+            .execute_tool("analyze_impact", json!({ "function_name": "save" }))
+            .await
+            .unwrap();
+        assert_eq!(result.data["direct_callers"].as_u64().unwrap(), 2);
+        // `save` is not multiply-defined, so both callers are exact, not candidates.
+        assert_eq!(result.data["transitive_functions"].as_u64().unwrap(), 2);
+        assert_eq!(result.data["ambiguous_functions"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_splits_ambiguous_counts() {
+        let tools = create_tools_with_collision();
+        let result = tools
+            .execute_tool("analyze_impact", json!({ "function_name": "load" }))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        // Both callers are candidates, so the confirmed count is 0 and the headline
+        // is not inflated by unconfirmed links.
+        assert_eq!(result.data["transitive_functions"].as_u64().unwrap(), 0);
+        assert_eq!(result.data["ambiguous_functions"].as_u64().unwrap(), 2);
+        assert_eq!(result.data["affected_file_count"].as_u64().unwrap(), 0);
+        assert_eq!(result.data["candidate_files"].as_array().unwrap().len(), 2);
+        assert!(
+            !result.data["ambiguous_names"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            result.data["summary"]
+                .as_str()
+                .unwrap()
+                .contains("candidate caller")
+        );
+    }
+
     // === Repository Tree Tests ===
 
     #[tokio::test]
@@ -1087,6 +1726,8 @@ mod tests {
             "analyze_file",
             "get_dependencies",
             "find_callers",
+            "trace_callers",
+            "analyze_impact",
             "get_repository_tree",
         ];
 
@@ -1097,6 +1738,8 @@ mod tests {
                 "analyze_file" => json!({"file_path": "/test.rs"}),
                 "get_dependencies" => json!({"file_path": "/test.rs"}),
                 "find_callers" => json!({"function_name": "test"}),
+                "trace_callers" => json!({"function_name": "test"}),
+                "analyze_impact" => json!({"function_name": "test"}),
                 "get_repository_tree" => json!({}),
                 _ => json!({}),
             };

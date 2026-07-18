@@ -1,7 +1,7 @@
 use crate::analyzers::LanguageAnalyzer;
 use crate::types::{
     AnalysisError, ExportStatement, FileAnalysis, FunctionCall, FunctionSignature, ImportStatement,
-    Parameter, PartialAnalysis, Result, StructField, StructSignature, TreeNode,
+    Parameter, PartialAnalysis, Result, StructField, StructSignature, TreeNode, TypeKind,
 };
 use async_trait::async_trait;
 use blake3;
@@ -358,19 +358,16 @@ impl LanguageAnalyzer for RustAnalyzer {
             // Check for static functions (associated functions in impl blocks).
             // In tree-sitter-rust, methods live under `impl_item` -> `declaration_list`,
             // so the direct parent of a method's `function_item` is `declaration_list`.
+            // The enclosing `impl_item` also carries the type this method belongs to,
+            // under the `type:` field (the `Type` in `impl Type` / `impl Trait for Type`),
+            // which becomes the method's `owner`.
             if let Some(node) = function_node {
-                let in_impl_block = node
+                let impl_item = node
                     .parent()
-                    .map(|parent| {
-                        parent.kind() == "declaration_list"
-                            && parent
-                                .parent()
-                                .map(|gp| gp.kind() == "impl_item")
-                                .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
+                    .filter(|p| p.kind() == "declaration_list")
+                    .and_then(|parent| parent.parent().filter(|gp| gp.kind() == "impl_item"));
 
-                if in_impl_block {
+                if let Some(impl_node) = impl_item {
                     // A method without a `self` receiver is an associated (static) function.
                     let has_self = function_sig
                         .parameters
@@ -378,6 +375,22 @@ impl LanguageAnalyzer for RustAnalyzer {
                         .map(|p| p.name == "self")
                         .unwrap_or(false);
                     function_sig.is_static = !has_self;
+
+                    // Record the owning type (the `impl Type` target), stripping
+                    // generic arguments: `impl<T> Repository<T>` -> owner
+                    // "Repository", so the exact-match owner filter and qualified
+                    // display stay consistent with non-generic impls (a raw
+                    // "Repository<T>" would never match a filter for "Repository").
+                    if let Some(type_node) = impl_node.child_by_field_name("type") {
+                        let base_node = if type_node.kind() == "generic_type" {
+                            type_node.child_by_field_name("type").unwrap_or(type_node)
+                        } else {
+                            type_node
+                        };
+                        if let Ok(owner) = base_node.utf8_text(source.as_bytes()) {
+                            function_sig.owner = Some(owner.to_string());
+                        }
+                    }
                 }
             }
 
@@ -423,6 +436,7 @@ impl LanguageAnalyzer for RustAnalyzer {
 
         while let Some(query_match) = matches.next() {
             let mut struct_sig = StructSignature::new(String::new(), file_path.to_string());
+            struct_sig.kind = TypeKind::Struct;
 
             for capture in query_match.captures {
                 let capture_name = query.capture_names()[capture.index as usize];
@@ -497,6 +511,143 @@ impl LanguageAnalyzer for RustAnalyzer {
 
             if !struct_sig.name.is_empty() {
                 structs.push(struct_sig);
+            }
+        }
+
+        // ---- Enums and traits ----
+        // `enum_item` -> a `StructSignature` with `kind: Enum`.
+        // `trait_item` -> a `StructSignature` with `kind: Trait`; its supertraits
+        // live under the `bounds:` field (a `trait_bounds` node whose direct
+        // `type_identifier` children are the named supertraits, e.g. the `Bar`/`Baz`
+        // in `trait Foo: Bar + Baz`).
+        let enum_trait_query_str = r#"
+            (enum_item
+              (visibility_modifier)? @enum_visibility
+              name: (type_identifier) @enum_name
+              (type_parameters)? @enum_generics
+            ) @enum
+
+            (trait_item
+              (visibility_modifier)? @trait_visibility
+              name: (type_identifier) @trait_name
+              (type_parameters)? @trait_generics
+              bounds: (trait_bounds)? @trait_bounds
+            ) @trait
+        "#;
+
+        let enum_trait_query = Query::new(&self.language, enum_trait_query_str).map_err(|e| {
+            AnalysisError::QueryError {
+                message: format!("{:?}", e),
+            }
+        })?;
+
+        let mut et_cursor = QueryCursor::new();
+        let mut et_matches =
+            et_cursor.matches(&enum_trait_query, tree.root_node(), source.as_bytes());
+
+        while let Some(query_match) = et_matches.next() {
+            let mut sig = StructSignature::new(String::new(), file_path.to_string());
+
+            for capture in query_match.captures {
+                let capture_name = enum_trait_query.capture_names()[capture.index as usize];
+                let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
+
+                match capture_name {
+                    "enum_name" | "trait_name" => sig.name = text.to_string(),
+                    "enum_visibility" | "trait_visibility" => sig.is_public = text.contains("pub"),
+                    "enum_generics" | "trait_generics" => {
+                        sig.generics = self.extract_generics(&capture.node, source);
+                    }
+                    "trait_bounds" => {
+                        // Collect each named supertrait (`type_identifier`) in the bound list.
+                        let mut bound_cursor = capture.node.walk();
+                        if bound_cursor.goto_first_child() {
+                            loop {
+                                let bound = bound_cursor.node();
+                                if bound.kind() == "type_identifier" {
+                                    if let Ok(name) = bound.utf8_text(source.as_bytes()) {
+                                        sig.supertypes.push(name.to_string());
+                                    }
+                                }
+                                if !bound_cursor.goto_next_sibling() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    "enum" => {
+                        sig.kind = TypeKind::Enum;
+                        let start_point = capture.node.start_position();
+                        let end_point = capture.node.end_position();
+                        sig.start_line = start_point.row as u32 + 1;
+                        sig.end_line = end_point.row as u32 + 1;
+                    }
+                    "trait" => {
+                        sig.kind = TypeKind::Trait;
+                        let start_point = capture.node.start_position();
+                        let end_point = capture.node.end_position();
+                        sig.start_line = start_point.row as u32 + 1;
+                        sig.end_line = end_point.row as u32 + 1;
+                    }
+                    _ => {}
+                }
+            }
+
+            if !sig.name.is_empty() {
+                structs.push(sig);
+            }
+        }
+
+        // ---- `impl Trait for Type` supertypes ----
+        // structs/enums and impl blocks are separate tree-sitter nodes, so collect the
+        // (Type, Trait) pairs here and merge them into the matching type's `supertypes`
+        // afterwards. A trait impl has both a `trait:` and a `type:` field; an inherent
+        // `impl Type` has only `type:` and is ignored.
+        let impl_query_str = r#"
+            (impl_item
+              trait: (_) @impl_trait
+              type: (_) @impl_type
+            )
+        "#;
+
+        let impl_query =
+            Query::new(&self.language, impl_query_str).map_err(|e| AnalysisError::QueryError {
+                message: format!("{:?}", e),
+            })?;
+
+        let mut impl_cursor = QueryCursor::new();
+        let mut impl_matches =
+            impl_cursor.matches(&impl_query, tree.root_node(), source.as_bytes());
+
+        let mut impl_pairs: Vec<(String, String)> = Vec::new();
+        while let Some(query_match) = impl_matches.next() {
+            let mut trait_name = String::new();
+            let mut type_name = String::new();
+            for capture in query_match.captures {
+                let capture_name = impl_query.capture_names()[capture.index as usize];
+                let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
+                match capture_name {
+                    "impl_trait" => trait_name = text.to_string(),
+                    "impl_type" => type_name = text.to_string(),
+                    _ => {}
+                }
+            }
+            if !trait_name.is_empty() && !type_name.is_empty() {
+                impl_pairs.push((type_name, trait_name));
+            }
+        }
+
+        // Merge each impl-for pair into the matching struct/enum. If no type in this
+        // file matches, drop the pair (don't fabricate a StructSignature).
+        //
+        // KNOWN LIMITATION: analyzers are per-file, so `impl Display for Config`
+        // in a different file than `struct Config` is dropped — cross-file
+        // supertype edges are incomplete. Resolving impls against types defined
+        // elsewhere requires a whole-repo pass (the derived graph layer, P2/P4),
+        // which reconciles `impl Trait for Type` globally once all files are indexed.
+        for (type_name, trait_name) in impl_pairs {
+            if let Some(target) = structs.iter_mut().find(|s| s.name == type_name) {
+                target.supertypes.push(trait_name);
             }
         }
 
@@ -1131,6 +1282,157 @@ pub async fn another_function(param: &str) -> Result<(), Error> {
 
         assert!(function_names.contains(&&"valid_function".to_string()));
         assert!(function_names.contains(&&"another_function".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_extract_enum_kind() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+pub enum ConfigError {
+    Missing,
+    Invalid(String),
+}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let structs = &analysis.tree_node.structs;
+
+        let e = structs
+            .iter()
+            .find(|s| s.name == "ConfigError")
+            .expect("ConfigError not found");
+        assert_eq!(e.kind, TypeKind::Enum);
+        assert!(e.is_public);
+    }
+
+    #[tokio::test]
+    async fn test_extract_trait_kind_and_supertraits() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+trait Greet {
+    fn hi(&self);
+}
+
+trait Fancy: Display + Debug {
+    fn show(&self);
+}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let structs = &analysis.tree_node.structs;
+
+        let greet = structs
+            .iter()
+            .find(|s| s.name == "Greet")
+            .expect("Greet not found");
+        assert_eq!(greet.kind, TypeKind::Trait);
+        assert!(greet.supertypes.is_empty());
+
+        let fancy = structs
+            .iter()
+            .find(|s| s.name == "Fancy")
+            .expect("Fancy not found");
+        assert_eq!(fancy.kind, TypeKind::Trait);
+        assert!(fancy.supertypes.contains(&"Display".to_string()));
+        assert!(fancy.supertypes.contains(&"Debug".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_method_owner_and_free_function() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+struct Loader;
+
+impl Loader {
+    fn load(&self) {}
+    fn build() -> Self { Loader }
+}
+
+fn helper() {}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let functions = &analysis.tree_node.functions;
+
+        let load = functions.iter().find(|f| f.name == "load").unwrap();
+        assert_eq!(load.owner, Some("Loader".to_string()));
+
+        let build = functions.iter().find(|f| f.name == "build").unwrap();
+        assert_eq!(build.owner, Some("Loader".to_string()));
+        assert!(build.is_static);
+
+        let helper = functions.iter().find(|f| f.name == "helper").unwrap();
+        assert_eq!(helper.owner, None);
+    }
+
+    #[tokio::test]
+    async fn test_generic_impl_owner_strips_generics() {
+        // owner for `impl<T> Repository<T>` must be the bare "Repository" so the
+        // exact-match owner filter and qualified display work (not "Repository<T>").
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+struct Repository<T> { inner: T }
+
+impl<T> Repository<T> {
+    fn load(&self) {}
+}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let load = analysis
+            .tree_node
+            .functions
+            .iter()
+            .find(|f| f.name == "load")
+            .unwrap();
+        assert_eq!(load.owner, Some("Repository".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_impl_for_adds_supertype() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+struct Config {
+    x: i32,
+}
+
+impl Display for Config {}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let structs = &analysis.tree_node.structs;
+
+        let config = structs
+            .iter()
+            .find(|s| s.name == "Config")
+            .expect("Config not found");
+        assert_eq!(config.kind, TypeKind::Struct);
+        assert!(config.supertypes.contains(&"Display".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_impl_for_missing_type_dropped() {
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        // `Ghost` has no struct/enum definition in this file; the pair should be dropped.
+        let code = r#"
+impl Display for Ghost {}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let structs = &analysis.tree_node.structs;
+        assert!(structs.iter().all(|s| s.name != "Ghost"));
     }
 
     #[test]
