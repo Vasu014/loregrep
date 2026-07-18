@@ -24,13 +24,13 @@ impl LocalAnalysisTools {
         vec![
             ToolSchema {
                 name: "search_functions".to_string(),
-                description: "Search for functions by name pattern or regex across the analyzed codebase".to_string(),
+                description: "Look up functions from the code graph by name or regex and get their STRUCTURED signature — parameters, return type, visibility, async, and exact definition line. Returns real definitions, not text matches, so unlike grep it skips comments, string literals, and call sites.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Search pattern or regex to match function names"
+                            "description": "Name or regex pattern to match function names"
                         },
                         "limit": {
                             "type": "integer",
@@ -47,13 +47,13 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "search_structs".to_string(),
-                description: "Search for structs/classes by name pattern across the analyzed codebase".to_string(),
+                description: "Look up structs/classes/interfaces from the code graph by name or regex, with their fields, generics, and definition line. Real type definitions, not text matches — no comment or string-literal noise.".to_string(),
                 input_schema: json!({
                     "type": "object", 
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Search pattern or regex to match struct/class names"
+                            "description": "Name or regex pattern to match struct/class names"
                         },
                         "limit": {
                             "type": "integer",
@@ -70,7 +70,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "analyze_file".to_string(),
-                description: "Analyze a specific file to extract its functions, structs, imports, and other code elements".to_string(),
+                description: "Get a file's structural skeleton — its functions, structs, imports, exports, and calls with signatures and line numbers — without reading the whole file into context.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -89,7 +89,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "get_dependencies".to_string(),
-                description: "Get import/export dependencies for a file or analyze dependency relationships".to_string(),
+                description: "Get a file's import/export edges from the dependency graph — what it depends on and what it exposes — without reading the file.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -103,7 +103,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "find_callers".to_string(),
-                description: "Find all locations where a specific function is called across the codebase".to_string(),
+                description: "Find the EXACT call sites of a function across the repo, with file:line, from the call graph. Returns only real calls — excludes comments, string literals, imports, and the function's own definition, which a text search (grep) would wrongly include. Use this instead of grep for 'who calls X'.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -122,7 +122,7 @@ impl LocalAnalysisTools {
             },
             ToolSchema {
                 name: "get_repository_tree".to_string(),
-                description: "Get complete repository information including hierarchical directory structure, file details, statistics, and metadata. Use include_file_details=false and max_depth=1 for overview-style information, or full defaults for comprehensive repository analysis.".to_string(),
+                description: "Get a structural map of the repository — directories, files, and per-file symbol skeletons — for fast orientation without reading files. Use include_file_details=false and max_depth=1 for an overview, or full defaults for a comprehensive map.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
