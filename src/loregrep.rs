@@ -205,8 +205,15 @@ impl LoreGrep {
             || path.join("tsconfig.json").exists()
             || Self::has_ts_js_files(path)
         {
-            // Note: Analyzers not yet implemented, but detection is ready
-            if path.join("tsconfig.json").exists() {
+            // Treat the project as TypeScript whenever a tsconfig.json is present
+            // OR any .ts/.tsx source file exists. A TS project without a
+            // tsconfig.json (common for tooling that infers config) must still be
+            // detected as "typescript" so that configure_patterns_for_languages
+            // keeps .ts/.tsx in the include globs and the registered TypeScript
+            // analyzer actually indexes them. Detecting only "javascript" here
+            // would overwrite the include patterns with JS-only globs and silently
+            // drop every .ts/.tsx file.
+            if path.join("tsconfig.json").exists() || Self::has_ts_files(path) {
                 languages.push("typescript".to_string());
             }
             languages.push("javascript".to_string());
@@ -258,6 +265,36 @@ impl LoreGrep {
                             .extension()
                             .and_then(|ext| ext.to_str())
                             .map_or(false, |ext| js_extensions.contains(&ext))
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Quick scan for TypeScript (.ts/.tsx) files in common locations.
+    ///
+    /// Distinct from [`has_ts_js_files`](Self::has_ts_js_files): this only looks
+    /// for TypeScript sources so that a project with `.ts`/`.tsx` files is
+    /// labeled "typescript" (and keeps its `.ts`/`.tsx` include globs) even when
+    /// no `tsconfig.json` is present.
+    fn has_ts_files<P: AsRef<std::path::Path>>(path: P) -> bool {
+        let common_dirs = ["src", "lib", "app", ".", "components", "pages"];
+        let ts_extensions = ["ts", "tsx"];
+
+        common_dirs.iter().any(|dir| {
+            let dir_path = path.as_ref().join(dir);
+            if let Ok(mut entries) = std::fs::read_dir(dir_path) {
+                entries.any(|entry| {
+                    if let Ok(entry) = entry {
+                        entry
+                            .path()
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .map_or(false, |ext| ts_extensions.contains(&ext))
                     } else {
                         false
                     }
@@ -1365,6 +1402,51 @@ mod tests {
             langs.contains(&"typescript".to_string()),
             "typescript analyzer should be registered, got {:?}",
             langs
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_discover_typescript_without_tsconfig_indexes_ts_files() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // A TypeScript project WITHOUT a tsconfig.json: package.json plus a .ts
+        // source file. Previously this was labeled only "javascript", which
+        // overwrote the include patterns with JS-only globs and dropped the .ts
+        // file even though the TS analyzer was registered. auto_discover must now
+        // detect "typescript" (from the .ts file) and index it.
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("package.json"), "{}").unwrap();
+        fs::write(
+            temp_dir.path().join("index.ts"),
+            "export function greet(name: string): string { return `hi ${name}`; }\n",
+        )
+        .unwrap();
+
+        let mut loregrep = LoreGrep::auto_discover(temp_dir.path()).unwrap();
+
+        // The TypeScript analyzer must be registered.
+        let langs = loregrep.language_registry.list_supported_languages();
+        assert!(
+            langs.contains(&"typescript".to_string()),
+            "typescript analyzer should be registered, got {:?}",
+            langs
+        );
+
+        // Scanning must index the .ts file.
+        let result = loregrep
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.files_scanned, 1,
+            "the .ts file should be indexed, files_scanned={}",
+            result.files_scanned
+        );
+        assert!(
+            result.languages.contains(&"typescript".to_string()),
+            "scan should report typescript, got {:?}",
+            result.languages
         );
     }
 

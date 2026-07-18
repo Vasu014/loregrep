@@ -1,12 +1,1 @@
-[
-  {
-    "id": "rust-basic/search_functions/language-filter-noop",
-    "reason": "language param parsed but never applied in ai_tools.rs: SearchFunctionsInput/SearchStructsInput deserialize `language`, but search_functions/search_structs call repo_map.find_functions(pattern) / find_structs(pattern) which never filter by language. A python filter over an all-Rust repo therefore returns Rust matches instead of an empty set.",
-    "issue": "TODO: file issue — apply the language filter (or drop the param) in ai_tools.rs search_functions/search_structs"
-  },
-  {
-    "id": "rust-basic/get_repository_tree/file-count",
-    "reason": "get_repository_tree reports metadata.total_files / repository_tree.file_count = 16 for a fixture with 8 .rs files (the tree itself contains 8 distinct, non-duplicated file nodes). The aggregated file count is exactly doubled while total_lines is not, pointing at a double-count in the file_count aggregation (build_repository_tree_if_needed / DirectoryNode.file_count roll-up in storage/memory.rs).",
-    "issue": "TODO: file issue — repository tree file_count aggregation double-counts files"
-  }
-]
+[]

@@ -657,11 +657,13 @@ impl RepoMap {
                 .to_string_lossy()
                 .to_string();
 
-            // Update directory statistics
+            // Seed a directory node for this file's parent directory, but do NOT
+            // accumulate file_count / total_lines here. The authoritative roll-up
+            // (both files-in-directory and nested-directory totals) is computed
+            // once in `build_directory_hierarchy`. Counting here as well would
+            // double-count every file. Only the language set is pre-populated,
+            // which is idempotent (a HashSet) and harmless to merge again later.
             if let Some(dir_node) = directory_map.get_mut(&dir_path) {
-                dir_node.file_count += 1;
-                dir_node.total_lines +=
-                    (tree_node.functions.len() + tree_node.structs.len()) as u32; // Estimated lines
                 dir_node.languages.insert(tree_node.language.clone());
             } else {
                 let mut languages = HashSet::new();
@@ -673,8 +675,8 @@ impl RepoMap {
                         name: dir_name,
                         path: dir_path,
                         children: Vec::new(),
-                        file_count: 1,
-                        total_lines: (tree_node.functions.len() + tree_node.structs.len()) as u32, // Estimated lines
+                        file_count: 0,
+                        total_lines: 0,
                         languages,
                     },
                 );
