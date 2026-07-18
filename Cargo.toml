@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Vasu014/loregrep"
 keywords = ["code-indexing", "tree-sitter", "parsing", "coding-assistant", "repository-analysis"]
 categories = ["development-tools", "parsing", "data-structures"]
-readme = "README-rust.md"
+readme = "README.md"
 homepage = "https://github.com/Vasu014/loregrep"
 exclude = [
     "test-repos/",
