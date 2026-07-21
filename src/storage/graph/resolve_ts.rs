@@ -25,17 +25,32 @@ pub fn resolve_ts_import(
     let spec = &import.module_path;
 
     // Relative specifier: resolve as a file path against the importer's directory.
-    if spec.starts_with("./") || spec.starts_with("../") {
+    // `.` and `..` are relative too (barrel-file imports of a directory index).
+    if is_relative(spec) {
         let dir = files.dir_of(from_file).unwrap_or_default();
         // `join_normalized` (used inside `probe`) collapses a leading `./`, so we
         // can pass these candidates verbatim.
-        let candidates = [
+        let mut candidates = vec![
             format!("{spec}.ts"),
             format!("{spec}.tsx"),
             format!("{spec}/index.ts"),
             format!("{spec}/index.tsx"),
             spec.clone(),
         ];
+        // Under `moduleResolution: node16/nodenext` the source spells the EMITTED
+        // extension (`./util.js`) while the file on disk is `./util.ts`, so probe
+        // the TypeScript source for a JS-flavoured extension too.
+        if let Some(stem) = js_extension_stem(spec) {
+            candidates.splice(
+                0..0,
+                [
+                    format!("{stem}.ts"),
+                    format!("{stem}.tsx"),
+                    format!("{stem}.mts"),
+                    format!("{stem}.cts"),
+                ],
+            );
+        }
         for cand in &candidates {
             if let Some(idx) = files.probe(&dir, cand) {
                 return ImportTarget::File(idx);
@@ -51,6 +66,20 @@ pub fn resolve_ts_import(
 
     // Any other bare specifier: an external dependency.
     ImportTarget::External(spec.clone())
+}
+
+/// A relative specifier: `./x`, `../a/b`, or a bare `.` / `..` (the importer's own
+/// or parent directory, resolved through its index file).
+fn is_relative(spec: &str) -> bool {
+    spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../")
+}
+
+/// For a specifier written with a JavaScript output extension, the stem to probe
+/// TypeScript sources against (`./util.js` → `./util`).
+fn js_extension_stem(spec: &str) -> Option<&str> {
+    [".js", ".jsx", ".mjs", ".cjs"]
+        .iter()
+        .find_map(|ext| spec.strip_suffix(ext))
 }
 
 #[cfg(test)]
@@ -160,6 +189,40 @@ mod tests {
             resolve(&files, 0, "./missing", false),
             ImportTarget::Unresolved("./missing".to_string())
         );
+    }
+
+    #[test]
+    fn nodenext_js_extension_maps_to_the_ts_source() {
+        // Under moduleResolution node16/nodenext the source spells `./util.js`
+        // while the file on disk is `./util.ts`.
+        let files = vec![ts_file("src/app.ts"), ts_file("src/util.ts")];
+        assert_eq!(
+            resolve(&files, 0, "./util.js", false),
+            ImportTarget::File(1)
+        );
+    }
+
+    #[test]
+    fn explicit_js_extension_still_prefers_a_real_js_sibling() {
+        // A genuinely-present `.js` file is matched verbatim rather than skipped.
+        let files = vec![ts_file("src/app.ts"), ts_file("src/util.js")];
+        assert_eq!(
+            resolve(&files, 0, "./util.js", false),
+            ImportTarget::File(1)
+        );
+    }
+
+    #[test]
+    fn bare_dot_resolves_to_the_directory_index() {
+        // `import { x } from "."` — the importer's own directory index.
+        let files = vec![ts_file("src/pkg/a.ts"), ts_file("src/pkg/index.ts")];
+        assert_eq!(resolve(&files, 0, ".", false), ImportTarget::File(1));
+    }
+
+    #[test]
+    fn bare_double_dot_resolves_to_the_parent_index() {
+        let files = vec![ts_file("src/pkg/a.ts"), ts_file("src/index.ts")];
+        assert_eq!(resolve(&files, 0, "..", false), ImportTarget::File(1));
     }
 
     #[test]

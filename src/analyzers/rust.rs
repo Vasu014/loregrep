@@ -156,6 +156,34 @@ impl RustAnalyzer {
     fn calculate_content_hash(&self, content: &str) -> String {
         blake3::hash(content.as_bytes()).to_hex().to_string()
     }
+
+    /// Every child module this file declares — `mod x;` and `mod x { … }`, public
+    /// or private. `extract_exports` only sees `pub mod`, but the import resolver
+    /// needs all of them: a bare `use x::Item;` is an in-repo path exactly when the
+    /// importing file declares `mod x;`, and an external crate otherwise.
+    fn extract_declared_modules(&self, tree: &Tree, source: &str) -> Result<Vec<String>> {
+        let query =
+            Query::new(&self.language, "(mod_item name: (identifier) @name)").map_err(|e| {
+                AnalysisError::QueryError {
+                    message: format!("{:?}", e),
+                }
+            })?;
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        let mut modules = Vec::new();
+        while let Some(query_match) = matches.next() {
+            for capture in query_match.captures {
+                if let Ok(name) = capture.node.utf8_text(source.as_bytes()) {
+                    let name = name.to_string();
+                    if !modules.contains(&name) {
+                        modules.push(name);
+                    }
+                }
+            }
+        }
+        Ok(modules)
+    }
 }
 
 #[async_trait]
@@ -218,6 +246,11 @@ impl LanguageAnalyzer for RustAnalyzer {
         match self.extract_function_calls(&tree, content, file_path) {
             Ok(function_calls) => tree_node.function_calls = function_calls,
             Err(e) => tree_node.add_error(format!("Function call extraction failed: {}", e)),
+        }
+
+        match self.extract_declared_modules(&tree, content) {
+            Ok(modules) => tree_node.declared_modules = modules,
+            Err(e) => tree_node.add_error(format!("Module declaration extraction failed: {}", e)),
         }
 
         let duration = start_time.elapsed().as_millis() as u64;

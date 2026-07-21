@@ -41,6 +41,15 @@ pub fn resolve_py_import(
         resolve_relative(module_path, from_file, files)
             .map(ImportTarget::File)
             .unwrap_or_else(|| ImportTarget::Unresolved(import.module_path.clone()))
+    } else if !module_path.contains('.') && !import.is_external {
+        // A single-segment in-repo specifier is (per the NOTE above) most often a
+        // relative import the analyzer stripped the dots from — the segment is the
+        // imported NAME, not a module path. Matching that name against the whole
+        // repo would happily pick some unrelated `<name>.py`, so probe only the
+        // importer's own package and stay honest otherwise.
+        resolve_relative(&format!(".{module_path}"), from_file, files)
+            .map(ImportTarget::File)
+            .unwrap_or_else(|| ImportTarget::Unresolved(import.module_path.clone()))
     } else {
         resolve_absolute(module_path, files)
     }
@@ -78,16 +87,30 @@ fn resolve_relative(module_path: &str, from_file: usize, files: &FileSet) -> Opt
 /// Rule 2: absolute dotted import. Suffix-match the scanned set; classify External
 /// when nothing matches (terminal dependency) and Unresolved when ambiguous.
 fn resolve_absolute(module_path: &str, files: &FileSet) -> ImportTarget {
-    let seg_path: String = module_path
-        .split('.')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
-
-    if seg_path.is_empty() {
+    let segs: Vec<&str> = module_path.split('.').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
         return ImportTarget::External(module_path.to_string());
     }
 
+    // `from pkg.mod import Symbol` reaches us as `pkg.mod.Symbol` (the analyzer
+    // folds the imported name into the path), so the full path matches no file.
+    // Try it first, then drop trailing segments — the first prefix that matches a
+    // scanned file is the module. Stop before the single-segment case: a lone name
+    // is too weak a needle to match repo-wide (that is the ambiguity the caller
+    // routes away from).
+    let mut n = segs.len();
+    while n >= 2 {
+        match match_dotted(&segs[..n], module_path, files) {
+            ImportTarget::External(_) => n -= 1,
+            hit => return hit,
+        }
+    }
+    match_dotted(&segs[..1], module_path, files)
+}
+
+/// Suffix-match one dotted-path interpretation against the scanned set.
+fn match_dotted(segs: &[&str], module_path: &str, files: &FileSet) -> ImportTarget {
+    let seg_path = segs.join("/");
     let module_suffix = format!("{seg_path}.py");
     let package_suffix = format!("{seg_path}/__init__.py");
 
@@ -207,6 +230,54 @@ mod tests {
             resolve_py_import(&statement, 2, &fs),
             ImportTarget::Unresolved("pkg.mod".to_string())
         );
+    }
+
+    // `from pkg.mod import Symbol` reaches the resolver as `pkg.mod.Symbol` (the
+    // analyzer folds the name in); the trailing symbol must be trimmed off.
+    #[test]
+    fn trailing_symbol_segment_is_trimmed_to_the_module() {
+        let files = vec![py("/repo/pkg/mod_a.py"), py("/repo/pkg/mod_b.py")];
+        let fs = FileSet::new(&files);
+        let statement = imp("pkg.mod_b.helper", "/repo/pkg/mod_a.py", false);
+        assert_eq!(resolve_py_import(&statement, 0, &fs), ImportTarget::File(1));
+    }
+
+    // …but trimming must not turn a genuine stdlib import into a repo file.
+    #[test]
+    fn trimming_does_not_invent_a_file_for_stdlib() {
+        let files = vec![py("/repo/app.py")];
+        let fs = FileSet::new(&files);
+        let statement = imp("typing.List", "/repo/app.py", true);
+        assert_eq!(
+            resolve_py_import(&statement, 0, &fs),
+            ImportTarget::External("typing.List".to_string())
+        );
+    }
+
+    // A dot-stripped relative import (`from .mod_b import helper` → `helper`) must
+    // never be matched repo-wide: that picks an unrelated same-named file.
+    #[test]
+    fn dot_stripped_relative_never_matches_an_unrelated_file() {
+        let files = vec![
+            py("/repo/pkg/mod_a.py"),
+            py("/repo/pkg/mod_b.py"),
+            py("/repo/other/helper.py"),
+        ];
+        let fs = FileSet::new(&files);
+        let statement = imp("helper", "/repo/pkg/mod_a.py", false);
+        assert_eq!(
+            resolve_py_import(&statement, 0, &fs),
+            ImportTarget::Unresolved("helper".to_string())
+        );
+    }
+
+    // The same shape DOES resolve when the name really is a sibling module.
+    #[test]
+    fn dot_stripped_relative_resolves_against_own_package() {
+        let files = vec![py("/repo/pkg/mod_a.py"), py("/repo/pkg/sibling.py")];
+        let fs = FileSet::new(&files);
+        let statement = imp("sibling", "/repo/pkg/mod_a.py", false);
+        assert_eq!(resolve_py_import(&statement, 0, &fs), ImportTarget::File(1));
     }
 
     // Suffix matching is whole-segment: `pkg/mod.py` must not match `mypkg/mod.py`.

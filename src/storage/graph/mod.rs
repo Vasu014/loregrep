@@ -80,6 +80,9 @@ impl ModuleGraph {
                 }
             }
         }
+        // A cycle through `idx` walks back to it; the contract excludes the file
+        // itself, so a file is never reported as its own importer.
+        seen.remove(&idx);
         let mut out: Vec<usize> = seen.into_iter().collect();
         out.sort_unstable();
         out
@@ -216,6 +219,14 @@ impl<'a> FileSet<'a> {
         self.files.get(idx).map(|f| f.file_path.as_str())
     }
 
+    /// True if file `idx` declares `mod <name>;` — the Rust resolver's evidence
+    /// that a bare `use <name>::…` is in-repo rather than an external crate.
+    pub fn declares_module(&self, idx: usize, name: &str) -> bool {
+        self.files
+            .get(idx)
+            .is_some_and(|f| f.declared_modules.iter().any(|m| m == name))
+    }
+
     /// The directory portion of file `idx`'s path (normalized, no trailing slash).
     pub fn dir_of(&self, idx: usize) -> Option<String> {
         self.path(idx).map(|p| parent_dir(&normalize_path(p)))
@@ -251,6 +262,53 @@ fn dispatch_resolve(import: &ImportStatement, from_file: usize, files: &FileSet)
     }
 }
 
+/// Split a Rust brace group into one import per member, so a statement naming
+/// several modules (`use crate::{config, storage};`) yields an edge for each.
+/// Everything else — other languages, nested groups, no group — passes through
+/// unchanged, and the caller collapses expansions that resolve to the same target.
+fn expand_import(language: Option<&str>, import: &ImportStatement) -> Vec<ImportStatement> {
+    let single = || vec![import.clone()];
+    if language != Some("rust") {
+        return single();
+    }
+    let raw = import.module_path.trim();
+    let (open, close) = match (raw.find('{'), raw.rfind('}')) {
+        (Some(o), Some(c)) if c > o => (o, c),
+        _ => return single(),
+    };
+    let inner = &raw[open + 1..close];
+    // Nested groups (`use a::{b::{c, d}, e};`) are rare; don't half-parse them.
+    if inner.contains('{') {
+        return single();
+    }
+    let base = raw[..open].trim_end_matches(':').trim();
+    if base.is_empty() {
+        return single();
+    }
+
+    let members: Vec<ImportStatement> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && *m != "*")
+        .map(|m| {
+            let mut expanded = import.clone();
+            // `use a::{self, X};` — `self` names the base module itself.
+            expanded.module_path = if m == "self" {
+                base.to_string()
+            } else {
+                format!("{base}::{m}")
+            };
+            expanded
+        })
+        .collect();
+
+    if members.is_empty() {
+        single()
+    } else {
+        members
+    }
+}
+
 /// The injectable core: resolve every file's imports via `resolve`, then derive
 /// reverse adjacency from the forward edges. Reverse is rebuilt from scratch, so a
 /// replaced file leaves no stale reverse edges (rebuild-all by construction).
@@ -262,13 +320,23 @@ where
     let mut forward: Vec<Vec<ResolvedImport>> = Vec::with_capacity(files.len());
 
     for (i, file) in files.iter().enumerate() {
-        let mut edges = Vec::with_capacity(file.imports.len());
+        let mut edges: Vec<ResolvedImport> = Vec::with_capacity(file.imports.len());
         for import in &file.imports {
-            edges.push(ResolvedImport {
-                module_path: import.module_path.clone(),
-                target: resolve(import, i, &fs),
-                line_number: import.line_number,
-            });
+            // A Rust brace group can name several distinct modules
+            // (`use crate::{config, storage};`), so one statement can carry more
+            // than one edge. Each expansion keeps the ORIGINAL specifier as its
+            // `module_path`, and expansions that land on the same target collapse
+            // below — so the common `use crate::a::{X, Y};` stays a single entry.
+            for member in expand_import(fs.language(i), import) {
+                let edge = ResolvedImport {
+                    module_path: import.module_path.clone(),
+                    target: resolve(&member, i, &fs),
+                    line_number: import.line_number,
+                };
+                if !edges.contains(&edge) {
+                    edges.push(edge);
+                }
+            }
         }
         forward.push(edges);
     }
@@ -455,10 +523,54 @@ mod tests {
             file("c.x", "stub", &["./a"]),
         ];
         let g = build_with(&files, stub);
-        // Everyone transitively imports c (a via b, b directly, c via the cycle).
+        // a (via b) and b (directly) import c. The cycle walks back to c itself,
+        // which must NOT be reported as its own importer.
         let mut ti = g.transitive_importers(2);
         ti.sort_unstable();
-        assert_eq!(ti, vec![0, 1, 2]);
+        assert_eq!(ti, vec![0, 1]);
+    }
+
+    #[test]
+    fn rust_brace_group_under_the_root_yields_one_edge_per_module() {
+        // `use crate::{config, storage};` names two modules — both edges must land.
+        let files = vec![
+            file("/repo/src/main.rs", "rust", &["crate::{config, storage}"]),
+            file("/repo/src/config.rs", "rust", &[]),
+            file("/repo/src/storage.rs", "rust", &[]),
+        ];
+        let g = build_module_graph(&files);
+        assert_eq!(g.imports(0).len(), 2);
+        assert_eq!(g.importers(1), &[0]);
+        assert_eq!(g.importers(2), &[0]);
+        // The raw specifier is preserved on every expansion.
+        assert!(
+            g.imports(0)
+                .iter()
+                .all(|i| i.module_path == "crate::{config, storage}")
+        );
+    }
+
+    #[test]
+    fn rust_item_group_stays_a_single_edge() {
+        // `use crate::a::{X, Y};` names ITEMS of one module — the expansions
+        // resolve to the same file and collapse back to one entry.
+        let files = vec![
+            file("/repo/src/main.rs", "rust", &["crate::a::{X, Y}"]),
+            file("/repo/src/a.rs", "rust", &[]),
+        ];
+        let g = build_module_graph(&files);
+        assert_eq!(g.imports(0).len(), 1);
+        assert_eq!(g.imports(0)[0].target, ImportTarget::File(1));
+    }
+
+    #[test]
+    fn rust_group_with_self_member_resolves_the_base_module() {
+        let files = vec![
+            file("/repo/src/main.rs", "rust", &["crate::a::{self, X}"]),
+            file("/repo/src/a.rs", "rust", &[]),
+        ];
+        let g = build_module_graph(&files);
+        assert_eq!(g.imports(0)[0].target, ImportTarget::File(1));
     }
 
     #[test]

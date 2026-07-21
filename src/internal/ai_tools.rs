@@ -385,25 +385,39 @@ impl LocalAnalysisTools {
         let deps_input: GetDependenciesInput =
             serde_json::from_value(input).context("Invalid get_dependencies input")?;
 
-        let (dependencies, resolved) = {
+        let found = {
             let repo_map = self.repo_map.lock().unwrap();
-            // Unchanged raw module-path strings (shape is in shipped gold cases).
-            let dependencies = repo_map.get_file_dependencies(&deps_input.file_path);
-            // Additive: each import's resolution status + target file, from the
-            // module graph. Order matches `dependencies` (both iterate file.imports).
-            let resolved = match repo_map.file_index_of(&deps_input.file_path) {
-                Some(idx) => {
-                    let graph = repo_map.module_graph();
+            // Resolve the path the same tolerant way `find_importers` does, so the
+            // same argument string cannot succeed there and come back empty here.
+            repo_map
+                .resolve_file_index(&deps_input.file_path)
+                .map(|idx| {
                     let files = repo_map.get_all_files();
-                    graph
+                    // Unchanged raw module-path strings (shape is in shipped gold).
+                    let dependencies: Vec<String> = files
+                        .get(idx)
+                        .map(|f| f.imports.iter().map(|i| i.module_path.clone()).collect())
+                        .unwrap_or_default();
+                    // Additive: each import's resolution status + target file, from
+                    // the module graph.
+                    let resolved: Vec<Value> = repo_map
+                        .module_graph()
                         .imports(idx)
                         .iter()
                         .map(|imp| resolved_import_json(imp, files))
-                        .collect()
-                }
-                None => Vec::new(),
-            };
-            (dependencies, resolved)
+                        .collect();
+                    (dependencies, resolved)
+                })
+        };
+
+        let (dependencies, resolved) = match found {
+            Some(pair) => pair,
+            None => {
+                return Ok(ToolResult::error(format!(
+                    "file not found in the index: {}",
+                    deps_input.file_path
+                )));
+            }
         };
 
         let result = json!({
@@ -465,9 +479,19 @@ impl LocalAnalysisTools {
             let graph = repo_map.module_graph();
             let files = repo_map.get_all_files();
 
+            // `scope` is documented as a path prefix, so match on whole path
+            // segments — `core` must not pull in `hardcore/`.
+            let scope_norm = scope.map(crate::storage::graph::normalize_path);
             let in_scope = |idx: usize| -> bool {
-                match (scope, files.get(idx)) {
-                    (Some(prefix), Some(f)) => f.file_path.contains(prefix),
+                match (scope_norm.as_deref(), files.get(idx)) {
+                    (Some(prefix), Some(f)) => {
+                        let path = crate::storage::graph::normalize_path(&f.file_path);
+                        path == prefix
+                            || path.starts_with(&format!("{prefix}/"))
+                            // A repo-relative scope against stored absolute paths.
+                            || path.contains(&format!("/{prefix}/"))
+                            || path.ends_with(&format!("/{prefix}"))
+                    }
                     (None, _) => true,
                     _ => false,
                 }
@@ -1276,17 +1300,16 @@ mod tests {
     // === Get Dependencies Tests ===
 
     #[tokio::test]
-    async fn test_get_dependencies_tool() {
+    async fn test_get_dependencies_unknown_file_errors() {
+        // An empty index cannot answer for `src/main.rs`; saying so beats returning
+        // a successful "no dependencies", which reads as "this file imports nothing".
         let tools = create_mock_tools();
         let input = json!({
             "file_path": "src/main.rs"
         });
 
         let result = tools.execute_tool("get_dependencies", input).await.unwrap();
-        assert!(result.success);
-        assert_eq!(result.data["status"], "success");
-        assert_eq!(result.data["file_path"], "src/main.rs");
-        assert!(result.data.get("dependencies").is_some());
+        assert!(!result.success);
     }
 
     #[tokio::test]
@@ -1963,6 +1986,48 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_get_dependencies_accepts_the_same_paths_as_find_importers() {
+        // A repo-relative path resolves for find_importers, so it must resolve here
+        // too — otherwise the agent gets a successful, empty, WRONG answer.
+        let tools = create_tools_with_import_chain();
+        let result = tools
+            .execute_tool("get_dependencies", json!({ "file_path": "src/a.rs" }))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.data["dependencies"][0], "crate::b");
+        assert_eq!(result.data["resolved"][0]["status"], "file");
+    }
+
+    #[tokio::test]
+    async fn test_dependency_graph_scope_matches_whole_path_segments() {
+        // `core` must not drag in `hardcore/` — scope is a path prefix, not a
+        // substring.
+        use crate::types::TreeNode;
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            for path in ["/repo/core/a.rs", "/repo/hardcore/b.rs"] {
+                let mut node = TreeNode::new(path.to_string(), "rust".to_string());
+                node.content_hash = format!("h_{path}");
+                rm.add_file(node).unwrap();
+            }
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({ "scope": "core" }))
+            .await
+            .unwrap();
+        let files: Vec<&str> = result.data["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(files, vec!["/repo/core/a.rs"]);
     }
 
     #[tokio::test]
