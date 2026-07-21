@@ -1,0 +1,31 @@
+[
+  {
+    "id": "ts-basic/get_dependencies/app-resolved-status",
+    "tool": "get_dependencies",
+    "params": { "file_path": "src/app.ts" },
+    "extract": "data.resolved",
+    "match_on": ["module_path", "status"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "module_path": "./util", "status": "file" },
+        { "module_path": "react", "status": "external" },
+        { "module_path": "@app/thing", "status": "unresolved" }
+      ]
+    },
+    "tags": ["typescript", "dependencies", "imports", "resolution"],
+    "notes": "TS import resolution: a relative specifier (./util) probes to a scanned file; a bare specifier (react) is an external dependency; an @-prefixed specifier (@app/thing) is a potential tsconfig path alias and is reported UNRESOLVED (v1 does not resolve aliases; the status makes the gap explicit rather than guessing)."
+  },
+  {
+    "id": "ts-basic/get_dependency_graph/import-cycle",
+    "tool": "get_dependency_graph",
+    "params": {},
+    "extract": "data.cycle_count",
+    "expect": {
+      "mode": "exact_set",
+      "items": [1]
+    },
+    "tags": ["typescript", "dependency-graph", "cycle"],
+    "notes": "app -> util -> core -> app is an import cycle; the dependency graph reports exactly one cyclic group (a strongly-connected component). Grep cannot detect an import cycle."
+  }
+]

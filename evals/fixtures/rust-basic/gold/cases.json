@@ -352,5 +352,47 @@
     },
     "tags": ["rust", "functions", "owner", "collision"],
     "notes": "Same-name-different-owner disambiguation: SourceA::ingest and SourceB::ingest share a name; the owner filter returns only SourceA's, distinguished by owner + file (grep on 'ingest' cannot separate them by owning type)."
+  },
+  {
+    "id": "rust-basic/get_dependencies/main-resolved-status",
+    "tool": "get_dependencies",
+    "params": { "file_path": "src/main.rs" },
+    "extract": "data.resolved",
+    "match_on": ["module_path", "status"],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        { "module_path": "std::collections::HashMap", "status": "external" },
+        { "module_path": "std::process", "status": "external" },
+        { "module_path": "config::parse_config", "status": "file" },
+        { "module_path": "loader::Loader", "status": "file" }
+      ]
+    },
+    "tags": ["rust", "dependencies", "imports", "resolution"],
+    "notes": "Import resolution status: std::* map to external (terminal), while config::parse_config and loader::Loader resolve to in-repo files. target_file is asserted via find_importers below (not here — it is an absolute path the runner does not relativize)."
+  },
+  {
+    "id": "rust-basic/find_importers/config-direct-count",
+    "tool": "find_importers",
+    "params": { "file": "src/config.rs" },
+    "extract": "data.count",
+    "expect": {
+      "mode": "exact_set",
+      "items": [3]
+    },
+    "tags": ["rust", "importers", "reverse-deps"],
+    "notes": "Direct importers of config.rs: main.rs, loader.rs, pipeline_c.rs (each has a use of config::parse_config). Reverse dependency lookup grep can't do through the `crate::config` vs `config` path forms."
+  },
+  {
+    "id": "rust-basic/find_importers/config-transitive-count",
+    "tool": "find_importers",
+    "params": { "file": "src/config.rs", "transitive": true },
+    "extract": "data.count",
+    "expect": {
+      "mode": "exact_set",
+      "items": [5]
+    },
+    "tags": ["rust", "importers", "reverse-deps", "transitive"],
+    "notes": "Transitive importer closure of config.rs: the 3 direct importers plus pipeline_b.rs and pipeline_a.rs, which reach config transitively through the pipeline_a -> pipeline_b -> pipeline_c chain. Grep-impossible."
   }
 ]

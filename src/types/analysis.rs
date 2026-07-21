@@ -12,6 +12,12 @@ pub struct TreeNode {
     pub functions: Vec<FunctionSignature>,
     pub structs: Vec<StructSignature>,
     pub function_calls: Vec<FunctionCall>,
+    /// Child modules this file declares (Rust `mod x;`, public or private). The
+    /// import resolver needs them to tell an in-repo module path from an external
+    /// crate: `use config::…` is in-repo only where `mod config;` is declared.
+    /// Defaulted on load so caches written before this field stay readable.
+    #[serde(default)]
+    pub declared_modules: Vec<String>,
     pub content_hash: String,
     pub last_modified: std::time::SystemTime,
     pub parse_errors: Vec<String>,
@@ -27,6 +33,7 @@ impl TreeNode {
             functions: Vec::new(),
             structs: Vec::new(),
             function_calls: Vec::new(),
+            declared_modules: Vec::new(),
             content_hash: String::new(),
             last_modified: std::time::SystemTime::now(),
             parse_errors: Vec::new(),

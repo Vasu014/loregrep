@@ -1,0 +1,60 @@
+[
+  {
+    "id": "py-basic/get_dependencies/main-resolved-status",
+    "tool": "get_dependencies",
+    "params": {
+      "file_path": "src/main.py"
+    },
+    "extract": "data.resolved",
+    "match_on": [
+      "module_path",
+      "status"
+    ],
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        {
+          "module_path": "os",
+          "status": "external"
+        },
+        {
+          "module_path": "pkg.mod_a",
+          "status": "file"
+        },
+        {
+          "module_path": "pkg.mod_b.b",
+          "status": "file"
+        }
+      ]
+    },
+    "tags": [
+      "python",
+      "dependencies",
+      "imports",
+      "resolution"
+    ],
+    "notes": "Python import resolution: a stdlib import (os) with no scanned match is external; absolute dotted imports resolve to the scanned package file. `from pkg.mod_b import b` reaches the resolver as `pkg.mod_b.b` (the analyzer folds the imported name into the path), so the trailing symbol segment is trimmed until a module matches. NOTE: relative imports (from . import x) still arrive without their dot level (analyzer limitation) and resolve against the importing file's own package only \u2014 never repo-wide \u2014 so a miss is Unresolved, never a wrong file."
+  },
+  {
+    "id": "py-basic/find_importers/mod_b-transitive-count",
+    "tool": "find_importers",
+    "params": {
+      "file": "src/pkg/mod_b.py",
+      "transitive": true
+    },
+    "extract": "data.count",
+    "expect": {
+      "mode": "exact_set",
+      "items": [
+        2
+      ]
+    },
+    "tags": [
+      "python",
+      "importers",
+      "reverse-deps",
+      "transitive"
+    ],
+    "notes": "Transitive importers of pkg/mod_b.py: mod_a.py imports it (from pkg import mod_b), and main.py imports mod_a, so both are in the reverse closure."
+  }
+]

@@ -1,4 +1,5 @@
 // Placeholder RepoMap - will be enhanced in Phase 2: Task 2.1
+use crate::storage::graph::{ModuleGraph, build_module_graph};
 use crate::types::{
     AnalysisError, ExportStatement, FunctionSignature, ImportStatement, StructSignature, TreeNode,
     TypeKind,
@@ -181,6 +182,10 @@ pub struct RepoMap {
     // Repository tree structure (uses RwLock for interior mutability)
     repository_tree: RwLock<Option<RepositoryTree>>,
 
+    // Derived module graph (resolved cross-file imports). Rebuilt lazily from the
+    // files after any change — never patched per file (see storage::graph).
+    module_graph: RwLock<Option<ModuleGraph>>,
+
     // Fast indexes
     file_index: HashMap<String, usize>, // file_path -> index
     function_index: HashMap<String, Vec<usize>>, // function_name -> file indices
@@ -211,6 +216,8 @@ impl Clone for RepoMap {
         Self {
             files: self.files.clone(),
             repository_tree: RwLock::new(repository_tree_clone),
+            // Derived; let the clone rebuild it on demand rather than deep-copying.
+            module_graph: RwLock::new(None),
             file_index: self.file_index.clone(),
             function_index: self.function_index.clone(),
             struct_index: self.struct_index.clone(),
@@ -237,6 +244,7 @@ impl RepoMap {
         Self {
             files: Vec::new(),
             repository_tree: RwLock::new(None),
+            module_graph: RwLock::new(None),
             file_index: HashMap::new(),
             function_index: HashMap::new(),
             struct_index: HashMap::new(),
@@ -295,6 +303,8 @@ impl RepoMap {
 
         // Invalidate repository tree - will be rebuilt when next accessed
         self.repository_tree.write().unwrap().take();
+        // The module graph is derived from the files too; invalidate it in lockstep.
+        self.module_graph.write().unwrap().take();
 
         Ok(())
     }
@@ -308,6 +318,8 @@ impl RepoMap {
 
             // Invalidate repository tree - will be rebuilt when next accessed
             self.repository_tree.write().unwrap().take();
+            // The module graph is derived from the files too; invalidate it in lockstep.
+            self.module_graph.write().unwrap().take();
 
             Ok(true)
         } else {
@@ -325,6 +337,58 @@ impl RepoMap {
     /// Get all files
     pub fn get_all_files(&self) -> &[TreeNode] {
         &self.files
+    }
+
+    /// Ensure the derived module graph is built (rebuild-all from the current
+    /// files). Cheap no-op when already fresh; invalidated wholesale on any file
+    /// change, so this is the single rebuild point — no per-file patching.
+    pub fn build_module_graph_if_needed(&self) {
+        if self.module_graph.read().unwrap().is_some() {
+            return;
+        }
+        let graph = build_module_graph(&self.files);
+        *self.module_graph.write().unwrap() = Some(graph);
+    }
+
+    /// A clone of the current module graph, building it first if stale. Cloned
+    /// (not borrowed) because it lives behind interior-mutability; callers that
+    /// need many queries should clone once and reuse.
+    pub fn module_graph(&self) -> ModuleGraph {
+        self.build_module_graph_if_needed();
+        self.module_graph
+            .read()
+            .unwrap()
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// Map a file path to its index in the current file set (module-graph indices
+    /// are positions in `get_all_files`).
+    pub fn file_index_of(&self, file_path: &str) -> Option<usize> {
+        self.file_index.get(file_path).copied()
+    }
+
+    /// Resolve a file argument to an index, tolerant of how an agent phrases the
+    /// path: an exact match on the stored (absolute) path first, else a unique
+    /// whole-segment suffix match (so a repo-relative `src/config.rs` finds
+    /// `/abs/.../src/config.rs`). Ambiguous suffix → `None` (never guess).
+    pub fn resolve_file_index(&self, file_path: &str) -> Option<usize> {
+        if let Some(idx) = self.file_index_of(file_path) {
+            return Some(idx);
+        }
+        let norm = crate::storage::graph::normalize_path(file_path);
+        let needle = format!("/{norm}");
+        let mut hit = None;
+        for (i, f) in self.files.iter().enumerate() {
+            let np = crate::storage::graph::normalize_path(&f.file_path);
+            if np == norm || np.ends_with(&needle) {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(i);
+            }
+        }
+        hit
     }
 
     /// Get files by language
@@ -1231,6 +1295,8 @@ impl RepoMap {
     /// Force rebuild of repository tree (useful when files are added/removed)
     pub fn rebuild_repository_tree(&mut self) -> Result<()> {
         self.repository_tree.write().unwrap().take();
+        // The module graph is derived from the files too; invalidate it in lockstep.
+        self.module_graph.write().unwrap().take();
         self.build_repository_tree()
     }
 
@@ -1768,6 +1834,34 @@ mod tests {
         let dependencies = repo_map.get_file_dependencies(&file_path);
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0], "crate::test");
+    }
+
+    // P2-1: the derived module graph is wired into RepoMap — built lazily from the
+    // files and rebuilt wholesale (not patched) when files change.
+    #[test]
+    fn test_module_graph_builds_and_rebuilds_on_change() {
+        let mut repo_map = RepoMap::new();
+        repo_map
+            .add_file(create_test_tree_node("a", "rust"))
+            .unwrap();
+        repo_map
+            .add_file(create_test_tree_node("b", "rust"))
+            .unwrap();
+
+        let g = repo_map.module_graph();
+        assert_eq!(g.forward.len(), 2, "one forward-edge list per file");
+        // Each test node carries one import; it is retained (resolved later by P2-4).
+        assert_eq!(g.imports(0).len(), 1);
+
+        // Adding a file invalidates and rebuilds the graph to the new file set.
+        repo_map
+            .add_file(create_test_tree_node("c", "rust"))
+            .unwrap();
+        assert_eq!(repo_map.module_graph().forward.len(), 3);
+
+        // Removing a file rebuilds again — no stale entries for the gone file.
+        repo_map.remove_file("/test/c.rs").unwrap();
+        assert_eq!(repo_map.module_graph().forward.len(), 2);
     }
 
     #[test]

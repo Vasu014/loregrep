@@ -48,7 +48,10 @@ jobs:
       # with gold answer sets and fails on any non-documented regression. Also
       # catches stdout-purity / exit-code regressions that break agents.
       - name: Retrieval eval (Layer 1)
-        run: python3 evals/retrieval/run.py
+        run: |
+          python3 evals/retrieval/run.py --fixture rust-basic
+          python3 evals/retrieval/run.py --fixture ts-basic
+          python3 evals/retrieval/run.py --fixture py-basic
 
       # Clippy is currently INFORMATIONAL (continue-on-error) — the codebase has a
       # backlog of warnings, much of it in code slated for removal/rewrite in the
