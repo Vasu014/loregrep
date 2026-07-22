@@ -30,11 +30,21 @@ pub fn resolve_ts_import(
         let dir = files.dir_of(from_file).unwrap_or_default();
         // `join_normalized` (used inside `probe`) collapses a leading `./`, so we
         // can pass these candidates verbatim.
+        // TypeScript sources first (a `.ts` beside a compiled `.js` is the source
+        // of truth), then JavaScript, then the specifier verbatim.
         let mut candidates = vec![
             format!("{spec}.ts"),
             format!("{spec}.tsx"),
             format!("{spec}/index.ts"),
             format!("{spec}/index.tsx"),
+            format!("{spec}.js"),
+            format!("{spec}.jsx"),
+            format!("{spec}.mjs"),
+            format!("{spec}.cjs"),
+            format!("{spec}/index.js"),
+            format!("{spec}/index.jsx"),
+            format!("{spec}/index.mjs"),
+            format!("{spec}/index.cjs"),
             spec.clone(),
         ];
         // Under `moduleResolution: node16/nodenext` the source spells the EMITTED

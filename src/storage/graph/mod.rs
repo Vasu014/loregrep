@@ -257,7 +257,11 @@ fn dispatch_resolve(import: &ImportStatement, from_file: usize, files: &FileSet)
     match files.language(from_file) {
         Some("rust") => resolve_rust_import(import, from_file, files),
         Some("python") => resolve_py_import(import, from_file, files),
-        Some("typescript") | Some("tsx") => resolve_ts_import(import, from_file, files),
+        // JavaScript is analyzed by the TypeScript analyzer and its specifiers
+        // follow the same resolution rules.
+        Some("typescript") | Some("tsx") | Some("javascript") | Some("jsx") => {
+            resolve_ts_import(import, from_file, files)
+        }
         _ => ImportTarget::Unresolved(import.module_path.clone()),
     }
 }
