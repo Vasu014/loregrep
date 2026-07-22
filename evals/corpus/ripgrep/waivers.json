@@ -1,0 +1,192 @@
+{
+  "schema": "loregrep-eval-waivers/1",
+  "repo": "ripgrep",
+  "$comment": [
+    "Per-symbol triage of every scorer false positive, verified individually",
+    "against source. Each entry cites the cfg evidence that justifies it.",
+    "HOST-DEPENDENT: this index was produced by rust-analyzer on macOS/aarch64,",
+    "so items gated for other platforms are absent from the golden while loregrep,",
+    "which parses syntax rather than compiling, sees all of them. Regenerating the",
+    "index on Linux WILL make some of these stale - that is the ratchet working,",
+    "not a failure. Re-triage rather than deleting wholesale.",
+    "Entries are only for symbols in files the ORACLE DID index. When an entire file is outside the indexer's projects, the scorer's structural `outside_oracle_scope` guard classifies it \u2014 that is a better statement than a per-symbol waiver, so such entries were removed here rather than kept (they surfaced automatically as STALE when the guard landed)."
+  ],
+  "waivers": [
+    {
+      "at": "crates/core/flags/config.rs:164",
+      "name": "error",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(unix))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn error() {"
+    },
+    {
+      "at": "crates/globset/src/pathutil.rs:67",
+      "name": "normalize_path",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(unix))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn normalize_path(mut path: Cow<[u8]>) -> Cow<[u8"
+    },
+    {
+      "at": "crates/ignore/src/pathutil.rs:104",
+      "name": "is_file_name",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(unix))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn is_file_name<P: AsRef<Path>>(path: P) -> bool "
+    },
+    {
+      "at": "crates/ignore/src/pathutil.rs:138",
+      "name": "file_name",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(unix))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn file_name<'a, P: AsRef<Path> + ?Sized>("
+    },
+    {
+      "at": "crates/ignore/src/pathutil.rs:28",
+      "name": "is_hidden",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn is_hidden(dent: &DirEntry) -> bool {"
+    },
+    {
+      "at": "crates/ignore/src/pathutil.rs:51",
+      "name": "is_hidden",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(any(unix, windows)))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn is_hidden(dent: &DirEntry) -> bool {"
+    },
+    {
+      "at": "crates/ignore/src/pathutil.rs:82",
+      "name": "strip_prefix",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(unix))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn strip_prefix<'a, P: AsRef<Path> + ?Sized>("
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:2101",
+      "name": "device_num",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn device_num<P: AsRef<Path>>(path: P) -> io::Result<u64> {"
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:2109",
+      "name": "device_num",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(any(unix, windows)))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn device_num<P: AsRef<Path>>(_: P) -> io::Result<u64> {"
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:2495",
+      "name": "same_file_system",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(target_os = \"linux\")], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn same_file_system() {"
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:2525",
+      "name": "no_read_permissions",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(target_os = \"linux\")], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn no_read_permissions() {"
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:288",
+      "name": "metadata_internal",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn metadata_internal(&self) -> Result<fs::Metadata, Error> {"
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:338",
+      "name": "from_entry_os",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn from_entry_os("
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:376",
+      "name": "from_entry_os",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(any(windows, unix)))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn from_entry_os("
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:388",
+      "name": "from_path",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn from_path("
+    },
+    {
+      "at": "crates/ignore/src/walk.rs:426",
+      "name": "from_path",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(any(windows, unix)))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn from_path("
+    },
+    {
+      "at": "crates/printer/src/hyperlink/mod.rs:1097",
+      "name": "convert_to_hyperlink_path",
+      "kind": "function",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn convert_to_hyperlink_path() {"
+    },
+    {
+      "at": "crates/printer/src/hyperlink/mod.rs:768",
+      "name": "from_path",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn from_path(original_path: &Path) -> Option<Hype"
+    },
+    {
+      "at": "crates/printer/src/hyperlink/mod.rs:881",
+      "name": "from_path",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(any(windows, unix)))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub(crate) fn from_path(original_path: &Path) -> Option<Hype"
+    },
+    {
+      "at": "crates/printer/src/jsont.rs:193",
+      "name": "from_path",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(not(unix))], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: fn from_path(path: &Path) -> Data<'_> {"
+    },
+    {
+      "at": "tests/util.rs:210",
+      "name": "link_dir",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub fn link_dir<S: AsRef<Path>, T: AsRef<Path>>(&self, src: "
+    },
+    {
+      "at": "tests/util.rs:233",
+      "name": "link_file",
+      "kind": "method",
+      "class": "oracle-cfg-inactive-branch",
+      "verdict": "oracle-artifact",
+      "why": "Gated by #[cfg(windows)], which is not the platform this index was built on (macOS/aarch64), so rust-analyzer did not index it. The definition is real and loregrep reports it correctly: pub fn link_file<S: AsRef<Path>, T: AsRef<Path>>("
+    }
+  ]
+}

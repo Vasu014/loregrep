@@ -1,0 +1,9 @@
+# Third-party indexer binaries and their archives are downloaded, not vendored.
+# The pinned versions live in evals/corpus/corpus.lock; package.json /
+# package-lock.json pin the npm side and ARE tracked.
+scip
+*.tar.gz
+*.tar.gz.sha256
+LICENSE
+node_modules/
+sample/

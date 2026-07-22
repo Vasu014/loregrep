@@ -97,8 +97,11 @@ loregrep exec-tool search_functions --params '{"pattern":"auth","limit":20}' --p
 }
 ```
 
-The index is cached under `.loregrep/`, so repeated calls are instant; editing a source file
-invalidates the cache automatically.
+The index is cached in your user cache directory (`~/Library/Caches/…` on macOS,
+`$XDG_CACHE_HOME` on Linux), keyed by the repository's canonical path — never inside the
+repository being analyzed, so querying a tree never modifies it. Repeated calls are instant;
+editing a source file invalidates the cache automatically. Set `LOREGREP_CACHE_PATH` to
+relocate it, or `LOREGREP_CACHE_ENABLED=false` to disable caching entirely.
 
 ### 2. Inside your coding agent (skill / extension)
 

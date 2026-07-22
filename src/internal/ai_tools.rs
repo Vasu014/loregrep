@@ -1,7 +1,7 @@
 use crate::{
     analyzers::registry::RegistryHandle,
     storage::graph::{ImportTarget, ResolvedImport},
-    storage::memory::RepoMap,
+    storage::memory::{FileLookup, RepoMap},
     types::TreeNode,
     types::TypeKind,
 };
@@ -11,6 +11,110 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 use crate::core::types::ToolSchema;
+
+/// How many candidates an ambiguity error lists before it truncates. Enough to
+/// pick from, few enough not to bury the message.
+const MAX_AMBIGUOUS_CANDIDATES: usize = 10;
+
+/// Normalize a path for prefix comparison: forward slashes, `.` and `..`
+/// collapsed, no leading `./`, no trailing `/`. `"."` becomes `""` — the empty
+/// string is "the root itself", not a path.
+fn norm_path(path: &str) -> String {
+    crate::storage::graph::normalize_path(path)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// True when `path` is `prefix` or lives under it, counting WHOLE SEGMENTS.
+///
+/// The distinction is the whole point: a substring test makes `src` match
+/// `evals/fixtures/ts-basic/src/app.ts`, and `core` match `hardcore/`.
+fn path_under_prefix(path: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+/// The set of prefixes, in stored-path vocabulary, that a caller-supplied
+/// `scope` may legitimately mean.
+///
+/// `scope` arrives in whichever vocabulary the caller has: repo-relative (as a
+/// human types it) or absolute (as `get_repository_tree` emits it), while the
+/// index may store either. Each candidate is produced by anchoring `scope` at a
+/// KNOWN ROOT — never by looking for it somewhere in the middle of a path, which
+/// is how the previous `path.contains("/{scope}/")` fallback swept in every
+/// nested `*/src/*` in the tree.
+fn scope_prefix_candidates(anchors: &[String], scope: &str) -> Vec<String> {
+    let scope_norm = norm_path(scope);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |p: String| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    for anchor in anchors {
+        if anchor.is_empty() {
+            continue;
+        }
+        if let Some(rest) = scope_norm.strip_prefix(&format!("{anchor}/")) {
+            // An absolute scope against relatively-stored paths.
+            push(rest.to_string());
+        } else if !scope_norm.starts_with('/') {
+            // A repo-relative scope against absolutely-stored paths.
+            push(format!("{anchor}/{scope_norm}"));
+        }
+    }
+    // The scope exactly as given, for an index stored in the same vocabulary.
+    push(scope_norm);
+    out
+}
+
+/// The roots a scope may be anchored at, most authoritative first.
+fn scope_anchors(repo_map: &RepoMap) -> Vec<String> {
+    let mut anchors: Vec<String> = Vec::new();
+    let mut push = |p: String| {
+        if !p.is_empty() && !anchors.contains(&p) {
+            anchors.push(p);
+        }
+    };
+    if let Some(root) = repo_map.scan_root() {
+        if let Ok(canonical) = std::fs::canonicalize(root) {
+            push(norm_path(&canonical.to_string_lossy()));
+        }
+        push(norm_path(root));
+    }
+    // Last resort for an index with no recorded scan root (an old cache): the
+    // common prefix of the indexed paths. A guess, so it never gates containment
+    // — only the vocabulary a scope is read in.
+    push(norm_path(&repo_map.common_root_path()));
+    anchors
+}
+
+/// Render an ambiguous index lookup so the agent can aim its retry.
+///
+/// "not found" for a path that is in the index several times is a lie that costs
+/// the agent the query and teaches it the wrong thing about the repository.
+fn ambiguous_path_error(input: &str, candidates: &[String]) -> String {
+    let shown: Vec<&str> = candidates
+        .iter()
+        .take(MAX_AMBIGUOUS_CANDIDATES)
+        .map(|s| s.as_str())
+        .collect();
+    let more = candidates.len().saturating_sub(shown.len());
+    let tail = if more > 0 {
+        format!(" (and {more} more)")
+    } else {
+        String::new()
+    };
+    format!(
+        "ambiguous path: {input:?} matches {} files in the index: {}{}. \
+         Re-run with one of these paths exactly.",
+        candidates.len(),
+        shown.join(", "),
+        tail
+    )
+}
 
 #[derive(Clone)]
 pub struct LocalAnalysisTools {
@@ -223,6 +327,35 @@ impl LocalAnalysisTools {
     }
 
     pub async fn execute_tool(&self, tool_name: &str, input: Value) -> Result<ToolResult> {
+        let result = self.dispatch_tool(tool_name, input).await;
+        // Every path in every response is ROOT-RELATIVE — stable across machines
+        // and cheaper in tokens than an absolute path — so every response must
+        // also say what root it is relative to, or a caller that needs to reach
+        // the filesystem has no way to absolutize. Stamped here, once, because a
+        // per-handler convention is exactly what let the vocabularies drift.
+        result.map(|r| self.stamp_analysis_root(r))
+    }
+
+    /// Attach `analysis_root` (the canonical absolute root) to a tool result.
+    fn stamp_analysis_root(&self, mut result: ToolResult) -> ToolResult {
+        let root = self
+            .repo_map
+            .lock()
+            .ok()
+            .and_then(|m| m.scan_root().map(str::to_string));
+        if let Value::Object(map) = &mut result.data {
+            map.insert(
+                "analysis_root".to_string(),
+                match root {
+                    Some(r) => Value::String(r),
+                    None => Value::Null,
+                },
+            );
+        }
+        result
+    }
+
+    async fn dispatch_tool(&self, tool_name: &str, input: Value) -> Result<ToolResult> {
         match tool_name {
             "search_functions" => self.search_functions(input).await,
             "search_structs" => self.search_structs(input).await,
@@ -324,33 +457,112 @@ impl LocalAnalysisTools {
         let analyze_input: AnalyzeFileInput =
             serde_json::from_value(input).context("Invalid analyze_file input")?;
 
+        // Resolve the parameter before touching the filesystem.
+        //
+        // Two failures lived here. The path was read RELATIVE TO THE PROCESS CWD,
+        // so a path any sibling tool accepted (they resolve through the index)
+        // failed here whenever the caller stood somewhere else — the tool's own
+        // output was invalid input to itself. And there was no containment check
+        // at all, so an absolute path or a `../../..` traversal read any file on
+        // disk and, with include_content, returned its contents: a file-read
+        // primitive wearing a code-analysis label, one prompt injection from
+        // being an exfiltration path.
+        //
+        // Order: the index first (anything in it is in scope by construction and
+        // this preserves the tolerant matching siblings offer), then the analysis
+        // root for files that exist but were not indexed (excluded by patterns,
+        // say). An unknown root refuses rather than falling back to cwd.
+        // `(emitted, on_disk)`: the emitted form is the index's root-relative
+        // vocabulary — the one every other tool speaks — while the on-disk form
+        // is what `read_to_string` needs. Keeping them as one string is what made
+        // the emitted path depend on how the process was invoked.
+        let (emitted_path, disk_path) = {
+            let repo_map = self.repo_map.lock().unwrap();
+            match repo_map.lookup_file_index(&analyze_input.file_path) {
+                FileLookup::Found(idx) => {
+                    let stored = repo_map
+                        .get_all_files()
+                        .get(idx)
+                        .map(|f| f.file_path.clone())
+                        .unwrap_or_else(|| analyze_input.file_path.clone());
+                    let disk = repo_map
+                        .absolute_path(&stored)
+                        .unwrap_or_else(|| std::path::PathBuf::from(&stored));
+                    (stored, disk)
+                }
+                // Several files match: say so, with the candidates. Falling
+                // through to the filesystem here would resolve the caller's
+                // relative string against the root and pick a file it may not
+                // have meant.
+                FileLookup::Ambiguous(indices) => {
+                    let files = repo_map.get_all_files();
+                    let candidates: Vec<String> = indices
+                        .iter()
+                        .filter_map(|&i| files.get(i).map(|f| f.file_path.clone()))
+                        .collect();
+                    return Ok(ToolResult::error(ambiguous_path_error(
+                        &analyze_input.file_path,
+                        &candidates,
+                    )));
+                }
+                FileLookup::NotFound => match repo_map.scan_root() {
+                    Some(root) => {
+                        // Not indexed, but it may still exist under the root
+                        // (excluded by a pattern, say). Containment is enforced
+                        // against the CANONICAL root; the emitted form is then
+                        // relativized back to it so this tool's output remains
+                        // valid input to its siblings.
+                        match crate::internal::paths::resolve_within_root(
+                            std::path::Path::new(root),
+                            &analyze_input.file_path,
+                        ) {
+                            Ok(p) => {
+                                let abs = p.display().to_string();
+                                let rel = repo_map
+                                    .relativize_to_root(&abs)
+                                    .unwrap_or_else(|| abs.clone());
+                                (rel, p)
+                            }
+                            Err(e) => return Ok(ToolResult::error(e.message())),
+                        }
+                    }
+                    None => {
+                        return Ok(ToolResult::error(
+                            crate::internal::paths::PathError::NoRoot {
+                                input: analyze_input.file_path.clone(),
+                            }
+                            .message(),
+                        ));
+                    }
+                },
+            }
+        };
+
         // Resolve the analyzer for this file's language via the registry. If no
         // analyzer is registered for the file's extension, report a clear error
         // instead of silently analyzing it with the wrong language.
-        let analyzer = match self
-            .registry
-            .get_analyzer_for_path(&analyze_input.file_path)
-        {
+        let analyzer = match self.registry.get_analyzer_for_path(&emitted_path) {
             Some(analyzer) => analyzer,
             None => {
                 return Ok(ToolResult::error(format!(
                     "unsupported language for {}",
-                    analyze_input.file_path
+                    emitted_path
                 )));
             }
         };
 
         // Try to read the file and analyze it
-        match tokio::fs::read_to_string(&analyze_input.file_path).await {
+        match tokio::fs::read_to_string(&disk_path).await {
             Ok(content) => {
-                let file_analysis = analyzer
-                    .analyze_file(&content, &analyze_input.file_path)
-                    .await?;
+                let file_analysis = analyzer.analyze_file(&content, &emitted_path).await?;
 
                 let tree_node = &file_analysis.tree_node;
                 let mut result = json!({
                     "status": "success",
-                    "file_path": analyze_input.file_path,
+                    // Echo the RESOLVED path, root-relative: echoing the
+                    // caller's raw string put two vocabularies for one file in a
+                    // single response.
+                    "file_path": emitted_path,
                     // Expose the analysis fields at the top level so consumers
                     // (CLI display, public API callers) can read them directly.
                     "language": tree_node.language,
@@ -389,9 +601,8 @@ impl LocalAnalysisTools {
             let repo_map = self.repo_map.lock().unwrap();
             // Resolve the path the same tolerant way `find_importers` does, so the
             // same argument string cannot succeed there and come back empty here.
-            repo_map
-                .resolve_file_index(&deps_input.file_path)
-                .map(|idx| {
+            match repo_map.lookup_file_index(&deps_input.file_path) {
+                FileLookup::Found(idx) => {
                     let files = repo_map.get_all_files();
                     // Unchanged raw module-path strings (shape is in shipped gold).
                     let dependencies: Vec<String> = files
@@ -406,23 +617,39 @@ impl LocalAnalysisTools {
                         .iter()
                         .map(|imp| resolved_import_json(imp, files))
                         .collect();
-                    (dependencies, resolved)
-                })
-        };
-
-        let (dependencies, resolved) = match found {
-            Some(pair) => pair,
-            None => {
-                return Ok(ToolResult::error(format!(
+                    // Echo the RESOLVED path, in the same vocabulary as the
+                    // `resolved[].target_file` paths below: one response must
+                    // speak one path language, or the caller cannot tell which of
+                    // the two forms its next call should use.
+                    let resolved_path = files
+                        .get(idx)
+                        .map(|f| f.file_path.clone())
+                        .unwrap_or_else(|| deps_input.file_path.clone());
+                    Ok((resolved_path, dependencies, resolved))
+                }
+                FileLookup::Ambiguous(indices) => {
+                    let files = repo_map.get_all_files();
+                    let candidates: Vec<String> = indices
+                        .iter()
+                        .filter_map(|&i| files.get(i).map(|f| f.file_path.clone()))
+                        .collect();
+                    Err(ambiguous_path_error(&deps_input.file_path, &candidates))
+                }
+                FileLookup::NotFound => Err(format!(
                     "file not found in the index: {}",
                     deps_input.file_path
-                )));
+                )),
             }
+        };
+
+        let (resolved_path, dependencies, resolved) = match found {
+            Ok(triple) => triple,
+            Err(message) => return Ok(ToolResult::error(message)),
         };
 
         let result = json!({
             "status": "success",
-            "file_path": deps_input.file_path,
+            "file_path": resolved_path,
             "dependencies": dependencies,
             "resolved": resolved
         });
@@ -435,11 +662,10 @@ impl LocalAnalysisTools {
             serde_json::from_value(input).context("Invalid find_importers input")?;
         let transitive = importers_input.transitive.unwrap_or(false);
 
-        let importers: Option<Vec<String>> = {
+        let found = {
             let repo_map = self.repo_map.lock().unwrap();
-            repo_map
-                .resolve_file_index(&importers_input.file)
-                .map(|idx| {
+            match repo_map.lookup_file_index(&importers_input.file) {
+                FileLookup::Found(idx) => {
                     let graph = repo_map.module_graph();
                     let files = repo_map.get_all_files();
                     let indices = if transitive {
@@ -447,50 +673,89 @@ impl LocalAnalysisTools {
                     } else {
                         graph.importers(idx).to_vec()
                     };
-                    indices
+                    let importers: Vec<String> = indices
                         .into_iter()
                         .filter_map(|i| files.get(i).map(|f| f.file_path.clone()))
-                        .collect()
-                })
+                        .collect();
+                    // Echo the RESOLVED path: echoing the caller's raw string put
+                    // its vocabulary and the index's in one response, so an agent
+                    // could not tell which form `importers` entries were in.
+                    let resolved_path = files
+                        .get(idx)
+                        .map(|f| f.file_path.clone())
+                        .unwrap_or_else(|| importers_input.file.clone());
+                    Ok((resolved_path, importers))
+                }
+                FileLookup::Ambiguous(indices) => {
+                    let files = repo_map.get_all_files();
+                    let candidates: Vec<String> = indices
+                        .iter()
+                        .filter_map(|&i| files.get(i).map(|f| f.file_path.clone()))
+                        .collect();
+                    Err(ambiguous_path_error(&importers_input.file, &candidates))
+                }
+                FileLookup::NotFound => Err(format!(
+                    "file not found in the index: {}",
+                    importers_input.file
+                )),
+            }
         };
 
-        match importers {
-            Some(importers) => Ok(ToolResult::success(json!({
+        match found {
+            Ok((resolved_path, importers)) => Ok(ToolResult::success(json!({
                 "status": "success",
-                "file": importers_input.file,
+                "file": resolved_path,
                 "transitive": transitive,
                 "count": importers.len(),
                 "importers": importers,
             }))),
-            None => Ok(ToolResult::error(format!(
-                "file not found in the index: {}",
-                importers_input.file
-            ))),
+            Err(message) => Ok(ToolResult::error(message)),
         }
     }
 
     async fn get_dependency_graph(&self, input: Value) -> Result<ToolResult> {
         let graph_input: GetDependencyGraphInput =
             serde_json::from_value(input).unwrap_or(GetDependencyGraphInput { scope: None });
-        let scope = graph_input.scope.as_deref();
+        let scope_echo = graph_input.scope.clone();
+        // An all-whitespace scope is not a path. It used to arrive here from
+        // `get_repository_tree`'s phantom `{"name": "", "path": ""}` node and
+        // silently select nothing; say what is wrong with it instead.
+        if matches!(graph_input.scope.as_deref(), Some(s) if s.trim().is_empty()) {
+            return Ok(ToolResult::error(
+                "scope must name a path; it was empty. Omit scope to graph the \
+                 whole repository, or pass a directory as returned by get_repository_tree"
+                    .to_string(),
+            ));
+        }
+        // `.` and `/` normalize to the root itself, which is the whole repository.
+        let scope = graph_input
+            .scope
+            .as_deref()
+            .filter(|s| !norm_path(s).is_empty());
 
-        let (files_in_scope, edges, cycles) = {
+        let (files_in_scope, edges, cycles, scope_prefixes) = {
             let repo_map = self.repo_map.lock().unwrap();
             let graph = repo_map.module_graph();
             let files = repo_map.get_all_files();
 
-            // `scope` is documented as a path prefix, so match on whole path
-            // segments — `core` must not pull in `hardcore/`.
-            let scope_norm = scope.map(crate::storage::graph::normalize_path);
+            // `scope` is documented as a path PREFIX, so it is resolved against
+            // the analysis root and compared segment-wise from the start of the
+            // path.
+            //
+            // The previous implementation added a `path.contains("/{scope}/")`
+            // fallback to cope with a repo-relative scope over absolutely-stored
+            // paths. That matches the segment at ANY depth: `scope: "src"` in this
+            // very repository returned 54 files, every one of them under
+            // `evals/fixtures/*/src/`, with the edges and cycles polluted to
+            // match. The fix is to anchor the scope at a root, not to look for it
+            // in the middle of a path.
+            let scope_prefixes: Option<Vec<String>> =
+                scope.map(|s| scope_prefix_candidates(&scope_anchors(&repo_map), s));
             let in_scope = |idx: usize| -> bool {
-                match (scope_norm.as_deref(), files.get(idx)) {
-                    (Some(prefix), Some(f)) => {
-                        let path = crate::storage::graph::normalize_path(&f.file_path);
-                        path == prefix
-                            || path.starts_with(&format!("{prefix}/"))
-                            // A repo-relative scope against stored absolute paths.
-                            || path.contains(&format!("/{prefix}/"))
-                            || path.ends_with(&format!("/{prefix}"))
+                match (scope_prefixes.as_deref(), files.get(idx)) {
+                    (Some(prefixes), Some(f)) => {
+                        let path = norm_path(&f.file_path);
+                        prefixes.iter().any(|p| path_under_prefix(&path, p))
                     }
                     (None, _) => true,
                     _ => false,
@@ -523,12 +788,36 @@ impl LocalAnalysisTools {
                 })
                 .collect();
 
-            (files_in_scope, edges, cycles)
+            (files_in_scope, edges, cycles, scope_prefixes)
         };
+
+        // A scope that matched nothing is an ERROR, not an empty graph.
+        //
+        // Reporting `{"files":[],"edges":[],"status":"success"}` for a scope the
+        // index has never heard of tells the agent the directory has no
+        // dependencies — a confident, wrong answer it has no reason to
+        // second-guess. Note this is distinct from a scope that matched files
+        // which genuinely import nothing: that still succeeds, with the files
+        // listed.
+        if files_in_scope.is_empty()
+            && let (Some(scope), Some(prefixes)) = (scope, scope_prefixes.as_ref())
+        {
+            let tried = prefixes
+                .iter()
+                .map(|p| format!("{p:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(ToolResult::error(format!(
+                "scope {scope:?} matched no indexed files (resolved to prefix {tried}). \
+                 scope is a path prefix relative to the analysis root; \
+                 hint: pass a directory exactly as returned by get_repository_tree, \
+                 or omit scope for the whole repository"
+            )));
+        }
 
         Ok(ToolResult::success(json!({
             "status": "success",
-            "scope": scope,
+            "scope": scope_echo,
             "files": files_in_scope,
             "edges": edges,
             "cycles": cycles,
@@ -789,6 +1078,8 @@ impl LocalAnalysisTools {
                         "total_files": final_tree_root.file_count,
                         "total_lines": final_tree_root.total_lines,
                         "languages": final_tree_root.languages.iter().collect::<Vec<_>>(),
+                        // Root-relative vocabulary: "." IS the repository root.
+                        // The absolute root travels alongside as `analysis_root`.
                         "root_path": final_tree_root.path,
                         "include_file_details": tree_input.include_file_details.unwrap_or(true),
                         "max_depth": tree_input.max_depth
@@ -1257,6 +1548,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_file_with_nonexistent_file() {
+        // An index with no known analysis root must refuse rather than fall back
+        // to reading relative to the process cwd, and must say why.
         let tools = create_mock_tools();
         let input = json!({
             "file_path": "/nonexistent/file.rs",
@@ -1265,25 +1558,108 @@ mod tests {
 
         let result = tools.execute_tool("analyze_file", input).await.unwrap();
         assert!(!result.success);
-        assert_eq!(result.data["status"], "error");
-        assert!(
-            result.data["error"]
-                .as_str()
-                .unwrap()
-                .contains("Failed to read file")
-        );
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("no analysis root"), "{err}");
+        assert!(err.contains("/nonexistent/file.rs"), "{err}");
     }
 
     #[tokio::test]
-    async fn test_analyze_file_minimal_input() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "file_path": "/nonexistent/file.rs"
-        });
+    async fn test_analyze_file_refuses_paths_outside_the_analysis_root() {
+        // The security property: a code-analysis tool must not be a general
+        // file-read primitive. With include_content this returned the file.
+        use crate::types::TreeNode;
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("inside.rs"), "fn inside() {}").unwrap();
+        let outside_dir = tempfile::TempDir::new().unwrap();
+        let outside = outside_dir.path().join("secret.rs");
+        std::fs::write(&outside, "fn secret() {}").unwrap();
 
-        let result = tools.execute_tool("analyze_file", input).await.unwrap();
-        assert!(!result.success); // Will fail because file doesn't exist
-        assert_eq!(result.data["status"], "error");
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            rm.set_scan_root(dir.path().to_string_lossy().to_string());
+            let mut node = TreeNode::new(
+                dir.path().join("inside.rs").to_string_lossy().to_string(),
+                "rust".to_string(),
+            );
+            node.content_hash = "h".to_string();
+            rm.add_file(node).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        // Absolute path outside the root.
+        let result = tools
+            .execute_tool(
+                "analyze_file",
+                json!({"file_path": outside.to_string_lossy(),
+                       "include_content": true}),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success, "reading outside the root must be refused");
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("outside the analysis root"), "{err}");
+        assert!(
+            !format!("{:?}", result.data).contains("secret"),
+            "file contents must not leak in the failure payload"
+        );
+
+        // Traversal out of the root.
+        let escaped = tools
+            .execute_tool(
+                "analyze_file",
+                json!({"file_path": "../../../../etc/hosts", "include_content": true}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !escaped.success,
+            "traversal out of the root must be refused"
+        );
+
+        // A file inside the root still works.
+        let ok = tools
+            .execute_tool("analyze_file", json!({"file_path": "inside.rs"}))
+            .await
+            .unwrap();
+        assert!(ok.success, "{:?}", ok.error);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_file_resolves_against_the_root_not_the_cwd() {
+        // Composition: a repo-relative path (what siblings accept and what
+        // get_repository_tree emits) must work no matter where the caller stands.
+        use crate::types::TreeNode;
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "fn lib_fn() {}").unwrap();
+
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            rm.set_scan_root(dir.path().to_string_lossy().to_string());
+            let mut node = TreeNode::new(
+                dir.path().join("src/lib.rs").to_string_lossy().to_string(),
+                "rust".to_string(),
+            );
+            node.content_hash = "h".to_string();
+            rm.add_file(node).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        // `src/lib.rs` also exists in this crate, so a cwd-resolving
+        // implementation would pass by accident — assert the echoed path is the
+        // one under the fixture root.
+        let result = tools
+            .execute_tool("analyze_file", json!({"file_path": "src/lib.rs"}))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        let echoed = result.data["file_path"].as_str().unwrap_or_default();
+        assert!(
+            echoed.contains(dir.path().to_string_lossy().trim_start_matches("/private")),
+            "expected the fixture's file, got {echoed}"
+        );
     }
 
     #[tokio::test]
@@ -2030,6 +2406,186 @@ mod tests {
         assert_eq!(files, vec!["/repo/core/a.rs"]);
     }
 
+    /// An index rooted at `/repo` holding a top-level `src/` and a nested
+    /// `a/src/`, with the scan root recorded as a real scan does.
+    fn tools_with_nested_src(files: &[&str]) -> LocalAnalysisTools {
+        use crate::types::TreeNode;
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            for path in files {
+                let mut node = TreeNode::new((*path).to_string(), "rust".to_string());
+                node.content_hash = format!("h_{path}");
+                rm.add_file(node).unwrap();
+            }
+            rm.set_scan_root("/repo");
+        }
+        LocalAnalysisTools::new(repo_map, create_test_registry())
+    }
+
+    fn files_of(result: &ToolResult) -> Vec<String> {
+        result.data["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_dependency_graph_scope_is_a_prefix_not_a_segment_at_any_depth() {
+        // F5. The whole-segment guards the earlier test covers were defeated by a
+        // `path.contains("/{scope}/")` fallback, which matched the segment at ANY
+        // DEPTH: in this repository `scope: "src"` returned 54 files, every one of
+        // them under `evals/fixtures/*/src/`, not one under `./src/`.
+        let tools = tools_with_nested_src(&[
+            "/repo/src/top.rs",
+            "/repo/a/src/nested.rs",
+            "/repo/a/b/src/deeper.rs",
+        ]);
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({ "scope": "src" }))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(files_of(&result), vec!["/repo/src/top.rs"]);
+    }
+
+    #[tokio::test]
+    async fn test_dependency_graph_accepts_an_absolute_scope_and_a_file_scope() {
+        // The absolute form is exactly what get_repository_tree emits, and it used
+        // to match nothing at all. A file is a legitimate (degenerate) prefix too.
+        let tools = tools_with_nested_src(&["/repo/src/top.rs", "/repo/a/src/nested.rs"]);
+
+        let absolute = tools
+            .execute_tool("get_dependency_graph", json!({ "scope": "/repo/src" }))
+            .await
+            .unwrap();
+        assert!(absolute.success, "{:?}", absolute.error);
+        assert_eq!(files_of(&absolute), vec!["/repo/src/top.rs"]);
+
+        let file_scope = tools
+            .execute_tool(
+                "get_dependency_graph",
+                json!({ "scope": "a/src/nested.rs" }),
+            )
+            .await
+            .unwrap();
+        assert!(file_scope.success, "{:?}", file_scope.error);
+        assert_eq!(files_of(&file_scope), vec!["/repo/a/src/nested.rs"]);
+    }
+
+    #[tokio::test]
+    async fn test_dependency_graph_unmatched_scope_is_an_error_naming_the_prefix() {
+        // F6. An empty graph with status "success" told the agent the directory
+        // has no dependencies — a confident wrong answer, not a missing one.
+        let tools = tools_with_nested_src(&["/repo/src/top.rs"]);
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({ "scope": "does/not/exist" }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let message = result.error.unwrap();
+        assert!(message.contains("does/not/exist"), "{message}");
+        // Names the prefix AS RESOLVED, so the retry can be aimed.
+        assert!(message.contains("/repo/does/not/exist"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_dependency_graph_empty_scope_is_rejected() {
+        // F6/F8: the tree's phantom `{"name": "", "path": ""}` node used to feed
+        // straight back in here and select nothing, silently.
+        let tools = tools_with_nested_src(&["/repo/src/top.rs"]);
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({ "scope": "" }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("scope must name a path"));
+    }
+
+    #[tokio::test]
+    async fn test_dependency_graph_scope_with_no_dependencies_still_succeeds() {
+        // The other half of F6: "matched files that import nothing" is a real,
+        // successful answer and must not be conflated with "matched nothing".
+        let tools = tools_with_nested_src(&["/repo/src/top.rs", "/repo/a/src/nested.rs"]);
+        let result = tools
+            .execute_tool("get_dependency_graph", json!({ "scope": "src" }))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(files_of(&result), vec!["/repo/src/top.rs"]);
+        assert!(result.data["edges"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_module_graph_tools_echo_the_resolved_path() {
+        // F7. Echoing the caller's raw string alongside index-form results put two
+        // path vocabularies in one response, so the agent could not tell which
+        // form its next call should use. analyze_file already echoes the resolved
+        // path; these must match it.
+        let tools = create_tools_with_import_chain();
+
+        let importers = tools
+            .execute_tool("find_importers", json!({ "file": "src/c.rs" }))
+            .await
+            .unwrap();
+        assert!(importers.success, "{:?}", importers.error);
+        assert_eq!(importers.data["file"], "/repo/src/c.rs");
+        assert_eq!(importers.data["importers"][0], "/repo/src/b.rs");
+
+        let deps = tools
+            .execute_tool("get_dependencies", json!({ "file_path": "src/a.rs" }))
+            .await
+            .unwrap();
+        assert!(deps.success, "{:?}", deps.error);
+        assert_eq!(deps.data["file_path"], "/repo/src/a.rs");
+        assert_eq!(deps.data["resolved"][0]["target_file"], "/repo/src/b.rs");
+    }
+
+    #[tokio::test]
+    async fn test_ambiguous_path_is_reported_as_ambiguous_not_missing() {
+        // K8. `mod.rs` in a repo with several of them is not absent, and telling
+        // the agent it is teaches it the wrong thing and gives it nothing to
+        // disambiguate with.
+        use crate::types::TreeNode;
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            for path in ["/repo/src/a/mod.rs", "/repo/src/b/mod.rs"] {
+                let mut node = TreeNode::new(path.to_string(), "rust".to_string());
+                node.content_hash = format!("h_{path}");
+                rm.add_file(node).unwrap();
+            }
+            rm.set_scan_root("/repo");
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        for (tool, input) in [
+            ("get_dependencies", json!({ "file_path": "mod.rs" })),
+            ("find_importers", json!({ "file": "mod.rs" })),
+            ("analyze_file", json!({ "file_path": "mod.rs" })),
+        ] {
+            let result = tools.execute_tool(tool, input).await.unwrap();
+            assert!(!result.success, "{tool} unexpectedly succeeded");
+            let message = result.error.unwrap();
+            assert!(message.contains("ambiguous"), "{tool}: {message}");
+            assert!(!message.contains("not found"), "{tool}: {message}");
+            // Both candidates are named, so the retry can pick one.
+            assert!(message.contains("/repo/src/a/mod.rs"), "{tool}: {message}");
+            assert!(message.contains("/repo/src/b/mod.rs"), "{tool}: {message}");
+        }
+    }
+
+    #[test]
+    fn test_ambiguity_error_caps_the_candidate_list() {
+        let candidates: Vec<String> = (0..25).map(|i| format!("/repo/{i}/mod.rs")).collect();
+        let message = ambiguous_path_error("mod.rs", &candidates);
+        assert!(message.contains("matches 25 files"), "{message}");
+        assert!(message.contains("and 15 more"), "{message}");
+        assert!(!message.contains("/repo/20/mod.rs"), "{message}");
+    }
+
     #[tokio::test]
     async fn test_get_dependencies_keeps_raw_and_adds_resolved() {
         let tools = create_tools_with_import_chain();
@@ -2145,6 +2701,88 @@ mod tests {
 
             // Ensure we can serialize the schema (ToolSchema only implements Serialize, not Deserialize)
             let _serialized = serde_json::to_string(&schema).unwrap();
+        }
+    }
+
+    /// K2, at the layer where it bit: `RepoMap::file_index` deduped on the RAW
+    /// path string while `graph::FileSet::by_path` deduped on the NORMALIZED
+    /// one. Two spellings of one file therefore occupied two `file_index` slots
+    /// but ONE graph slot, `find_importers` resolved the argument through the
+    /// former and the edges through the latter, and a file that IS imported came
+    /// back with 0 importers.
+    ///
+    /// Both maps key on `IndexPath` now, so the second spelling replaces the
+    /// first instead of splitting it — the divergent state is unconstructible.
+    #[tokio::test]
+    async fn find_importers_survives_two_spellings_of_one_file() {
+        use crate::types::{ImportStatement, TreeNode};
+
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            rm.set_scan_root("/repo");
+            // The SAME file, added under two spellings — the shape a rescan under
+            // a differently-spelled root used to produce.
+            for spelling in ["./src/config.rs", "src/config.rs"] {
+                let mut node = TreeNode::new(spelling.to_string(), "rust".to_string());
+                node.content_hash = "h".to_string();
+                rm.add_file(node).unwrap();
+            }
+            let mut main = TreeNode::new("src/main.rs".to_string(), "rust".to_string());
+            main.declared_modules.push("config".to_string());
+            main.imports.push(ImportStatement::new(
+                "crate::config".to_string(),
+                "src/main.rs".to_string(),
+            ));
+            rm.add_file(main).unwrap();
+
+            assert_eq!(
+                rm.get_all_files().len(),
+                2,
+                "two spellings of one file must not become two index entries"
+            );
+        }
+
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+        for spelling in ["src/config.rs", "./src/config.rs", "/repo/src/config.rs"] {
+            let result = tools
+                .execute_tool("find_importers", json!({ "file": spelling }))
+                .await
+                .unwrap();
+            assert!(result.success, "{spelling}: {:?}", result.error);
+            assert_eq!(
+                result.data["count"].as_u64().unwrap(),
+                1,
+                "{spelling} reported no importers: {:?}",
+                result.data
+            );
+            // Whatever spelling went IN, one canonical spelling comes OUT.
+            assert_eq!(result.data["file"], "src/config.rs");
+            assert_eq!(result.data["importers"][0], "src/main.rs");
+        }
+    }
+
+    /// Every response that carries paths must also say what root they are
+    /// relative to, or a caller that needs the filesystem cannot absolutize
+    /// them. Stamped centrally, so it cannot be forgotten by a new tool.
+    #[tokio::test]
+    async fn every_tool_response_carries_the_analysis_root() {
+        let tools = tools_with_nested_src(&["/repo/src/a.rs"]);
+        for (tool, params) in [
+            ("search_functions", json!({"pattern": ".*"})),
+            ("search_structs", json!({"pattern": ".*"})),
+            ("get_dependencies", json!({"file_path": "src/a.rs"})),
+            ("find_importers", json!({"file": "src/a.rs"})),
+            ("find_callers", json!({"function_name": "x"})),
+            ("get_repository_tree", json!({})),
+            ("get_dependency_graph", json!({})),
+        ] {
+            let result = tools.execute_tool(tool, params).await.unwrap();
+            assert_eq!(
+                result.data["analysis_root"], "/repo",
+                "{tool} did not carry the analysis root: {:?}",
+                result.data
+            );
         }
     }
 }

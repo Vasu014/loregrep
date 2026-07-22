@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "loregrep-eval-corpus-golden/1",
+  "title": "Corpus definition golden",
+  "description": "Oracle-derived symbol inventory for one pinned repository. Neutral: independent of both loregrep's output shape and SCIP's wire format, so a converter bug cannot be hidden by a matching scorer bug. Definitions only \u2014 edge (call/import) goldens land with P3-7, see evals/EVAL_PLAN.md 4b.6.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repo",
+    "commit",
+    "language",
+    "generator",
+    "symbols"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "repo": {
+      "type": "string",
+      "description": "Corpus repo id, matching its directory under evals/corpus/ (e.g. \"ripgrep\")."
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "The pinned commit the golden was generated from. Must equal the submodule pin; the scorer refuses to run on a mismatch."
+    },
+    "language": {
+      "enum": [
+        "rust",
+        "python",
+        "typescript",
+        "javascript"
+      ]
+    },
+    "generator": {
+      "type": "object",
+      "required": [
+        "indexer",
+        "indexer_version",
+        "scip_cli_version",
+        "converter_version",
+        "generated_at"
+      ],
+      "additionalProperties": false,
+      "description": "Provenance. An indexer version bump is treated like a fixture bump: regenerate and re-triage.",
+      "properties": {
+        "indexer": {
+          "type": "string",
+          "examples": [
+            "rust-analyzer",
+            "scip-python",
+            "scip-typescript"
+          ]
+        },
+        "indexer_version": {
+          "type": "string"
+        },
+        "scip_cli_version": {
+          "type": "string"
+        },
+        "converter_version": {
+          "type": "string"
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "description": "The inclusion decisions this golden was built under. Recorded per-golden so a policy change is a visible diff rather than a silent re-interpretation.",
+      "additionalProperties": false,
+      "properties": {
+        "include_nested_functions": {
+          "type": "boolean"
+        },
+        "include_test_symbols": {
+          "type": "boolean"
+        },
+        "include_generated": {
+          "type": "boolean"
+        },
+        "excluded_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Kinds the oracle can express but the definition-parity contract does not cover (e.g. Rust `mod`, which loregrep models as a file property rather than a searchable symbol). Recorded per-golden so the exclusion is a visible diff, never a silent omission."
+        }
+      }
+    },
+    "symbols": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/symbol"
+      }
+    }
+  },
+  "definitions": {
+    "symbol": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "file",
+        "start_line",
+        "end_line"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Bare identifier as written at the definition site \u2014 NOT a SCIP-mangled or fully-qualified name. This is what a user searches for."
+        },
+        "kind": {
+          "enum": [
+            "function",
+            "method",
+            "class",
+            "struct",
+            "enum",
+            "interface",
+            "trait",
+            "type_alias",
+            "namespace"
+          ],
+          "description": "Neutral kind vocabulary. Per-language SCIP kinds map onto this in the converter; the mapping table lives in evals/corpus/POLICY.md."
+        },
+        "file": {
+          "type": "string",
+          "description": "Repo-relative POSIX path (no leading ./)."
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-indexed, inclusive. Covers the full definition including its body \u2014 see POLICY.md line-span convention."
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Enclosing type for a method; null for a free function or a top-level type."
+        },
+        "visibility": {
+          "enum": [
+            "public",
+            "private",
+            "unknown"
+          ]
+        },
+        "flags": {
+          "type": "array",
+          "description": "Orthogonal attributes that policy may filter on without changing kind.",
+          "items": {
+            "enum": [
+              "test",
+              "async",
+              "generator",
+              "generated",
+              "nested",
+              "ambient",
+              "abstract"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

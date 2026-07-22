@@ -26,7 +26,6 @@ fn test_builder_configuration() {
     let builder = LoreGrep::builder()
         .with_rust_analyzer()
         .max_files(1000)
-        .cache_ttl(300)
         .include_patterns(vec!["**/*.rs".to_string()])
         .exclude_patterns(vec!["**/target/**".to_string()])
         .max_file_size(1024 * 1024)
@@ -583,7 +582,6 @@ fn test_configuration_edge_cases() {
     // Test maximum values
     let builder = LoreGrep::builder()
         .max_files(usize::MAX)
-        .cache_ttl(u64::MAX)
         .max_file_size(u64::MAX)
         .max_depth(u32::MAX);
 
@@ -593,7 +591,6 @@ fn test_configuration_edge_cases() {
     // Test minimum values
     let builder = LoreGrep::builder()
         .max_files(0)
-        .cache_ttl(0)
         .max_file_size(0)
         .max_depth(0);
 

@@ -15,7 +15,9 @@
 //! flag so the graph is honest but coarse.
 
 use crate::types::{ImportStatement, TreeNode};
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 mod resolve_py;
 mod resolve_rust;
@@ -24,6 +26,56 @@ mod resolve_ts;
 pub use resolve_py::resolve_py_import;
 pub use resolve_rust::resolve_rust_import;
 pub use resolve_ts::resolve_ts_import;
+
+/// The one key type for a file in the index: a **normalized, root-relative**
+/// path (forward slashes, no `./`, no `.`/`..` segments).
+///
+/// The inner `String` is private and the only constructor runs
+/// [`normalize_path`], so an un-normalized key is *unconstructible*. That is the
+/// point. `RepoMap::file_index` used to dedup on the raw string the walker
+/// produced while [`FileSet::by_path`] deduped on the normalized form, so two
+/// spellings of one root produced two index entries that collapsed into one
+/// graph slot and `find_importers` answered 0 for a file that was imported (K2).
+/// A convention that every call site remembers to normalize is exactly what
+/// produced that bug; making the invalid representation impossible is the fix.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IndexPath(String);
+
+impl IndexPath {
+    /// The only way to build one: normalize, always.
+    pub fn new(path: &str) -> Self {
+        IndexPath(normalize_path(path))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+// Lets `HashMap<IndexPath, _>` be probed with a `&str` that the caller has
+// already normalized. `Hash` for `IndexPath` delegates to the inner `String`
+// (derived), so the `Borrow` contract holds.
+impl Borrow<str> for IndexPath {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for IndexPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<IndexPath> for String {
+    fn from(p: IndexPath) -> String {
+        p.0
+    }
+}
 
 /// Where a single import points.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +242,7 @@ fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 /// per-file language and directory. Built once per graph build.
 pub struct FileSet<'a> {
     files: &'a [TreeNode],
-    by_path: HashMap<String, usize>,
+    by_path: HashMap<IndexPath, usize>,
 }
 
 impl<'a> FileSet<'a> {
@@ -198,7 +250,7 @@ impl<'a> FileSet<'a> {
         let by_path = files
             .iter()
             .enumerate()
-            .map(|(i, f)| (normalize_path(&f.file_path), i))
+            .map(|(i, f)| (IndexPath::new(&f.file_path), i))
             .collect();
         Self { files, by_path }
     }
@@ -234,7 +286,7 @@ impl<'a> FileSet<'a> {
 
     /// Look up a file by an exact (normalized) path.
     pub fn index_of(&self, path: &str) -> Option<usize> {
-        self.by_path.get(&normalize_path(path)).copied()
+        self.by_path.get(&IndexPath::new(path)).copied()
     }
 
     /// Resolve `rel` (e.g. `./x`, `../a/b`) against `from_dir` and return the file

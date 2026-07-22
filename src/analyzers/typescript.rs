@@ -143,6 +143,32 @@ impl TypeScriptAnalyzer {
         }
     }
 
+    /// Is `node` nested inside a function/method body? Walks ancestors looking
+    /// for a `statement_block` whose parent is a callable. A `namespace X {}`
+    /// body is also a `statement_block`, but its parent is the module node, so
+    /// types declared in a namespace stay addressable and stay indexed.
+    fn is_inside_function_body(node: &Node) -> bool {
+        let mut cur = node.parent();
+        while let Some(n) = cur {
+            if n.kind() == "statement_block"
+                && let Some(p) = n.parent()
+                && matches!(
+                    p.kind(),
+                    "function_declaration"
+                        | "generator_function_declaration"
+                        | "function_expression"
+                        | "generator_function"
+                        | "arrow_function"
+                        | "method_definition"
+                )
+            {
+                return true;
+            }
+            cur = n.parent();
+        }
+        false
+    }
+
     /// Extract generic type parameter names from a node's `type_parameters`
     /// field (e.g. `<T, U>` -> ["T", "U"]).
     fn extract_type_params(&self, node: &Node, source: &str) -> Vec<String> {
@@ -313,6 +339,132 @@ impl TypeScriptAnalyzer {
         }
         out
     }
+
+    /// Byte offsets of the regions the parser could not make sense of.
+    fn error_regions(tree: &Tree) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut cursor = tree.walk();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.is_error() {
+                out.push((node.start_byte(), node.end_byte()));
+                continue;
+            }
+            for child in node.children(&mut cursor) {
+                stack.push(child);
+            }
+        }
+        out
+    }
+
+    /// Does this line start a top-level declaration? Column 0 only: an indented
+    /// `export` is a member, and re-parsing from there would just break again.
+    fn starts_declaration(line: &str) -> bool {
+        [
+            "export ",
+            "declare ",
+            "interface ",
+            "type ",
+            "class ",
+            "abstract ",
+            "enum ",
+            "namespace ",
+            "module ",
+            "function ",
+            "async function ",
+            "const ",
+            "let ",
+            "var ",
+        ]
+        .iter()
+        .any(|kw| line.starts_with(kw))
+    }
+
+    /// Re-parse the damaged tail of a file declaration-by-declaration.
+    ///
+    /// tree-sitter does not stop at a construct it cannot parse — it degenerates.
+    /// Past the first ERROR in hono's `src/types.ts`, later declarations are
+    /// shredded into loose tokens (`identifier`, `<`, `extends`, ERROR) at top
+    /// level instead of `interface_declaration`/`type_alias_declaration`, so every
+    /// query stops matching and ~1,650 lines of real declarations vanish. The
+    /// trigger is tree-sitter-typescript#335 — two anonymous generic call
+    /// signatures separated by a newline rather than a semicolon, which
+    /// TypeScript itself accepts. That issue has been open upstream since
+    /// 2025-06 with no fix, so recovery has to live here.
+    ///
+    /// A grammar gap should cost the declarations it actually covers and nothing
+    /// else, so from the first error onward the source is split at column-0
+    /// declaration boundaries and each chunk parsed on its own: the broken
+    /// construct still fails, everything after it does not.
+    fn recover_error_regions(
+        &self,
+        tree: &Tree,
+        content: &str,
+        file_path: &str,
+    ) -> (Vec<FunctionSignature>, Vec<StructSignature>) {
+        let mut functions = Vec::new();
+        let mut structs = Vec::new();
+        let language = self.language_for_path(file_path).clone();
+
+        let first_error = match Self::error_regions(tree).into_iter().map(|(s, _)| s).min() {
+            Some(offset) => offset,
+            None => return (functions, structs),
+        };
+
+        let mut bounds: Vec<(usize, u32)> = Vec::new();
+        let mut offset = 0usize;
+        let mut line = 0u32;
+        for l in content.split_inclusive('\n') {
+            if offset >= first_error && Self::starts_declaration(l) {
+                bounds.push((offset, line));
+            }
+            offset += l.len();
+            line += 1;
+        }
+        if bounds.is_empty() {
+            return (functions, structs);
+        }
+        bounds.push((content.len(), line));
+
+        for window in bounds.windows(2) {
+            let (from, line_offset) = window[0];
+            let (to, _) = window[1];
+            let Some(chunk) = content.get(from..to) else {
+                continue;
+            };
+            if chunk.trim().is_empty() {
+                continue;
+            }
+            let parsed = std::panic::catch_unwind(|| {
+                let mut parser = Parser::new();
+                match parser.set_language(&language) {
+                    Ok(_) => parser.parse(chunk, None),
+                    Err(_) => None,
+                }
+            });
+            let Ok(Some(subtree)) = parsed else { continue };
+
+            if let Ok(Ok(mut fns)) =
+                std::panic::catch_unwind(|| self.extract_functions(&subtree, chunk, file_path))
+            {
+                for f in &mut fns {
+                    f.start_line += line_offset;
+                    f.end_line += line_offset;
+                }
+                functions.append(&mut fns);
+            }
+            if let Ok(Ok(mut sts)) =
+                std::panic::catch_unwind(|| self.extract_structs(&subtree, chunk, file_path))
+            {
+                for st in &mut sts {
+                    st.start_line += line_offset;
+                    st.end_line += line_offset;
+                }
+                structs.append(&mut sts);
+            }
+        }
+        (functions, structs)
+    }
 }
 
 #[async_trait]
@@ -422,6 +574,36 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             Err(_) => tree_node.add_error("Function call extraction panicked".to_string()),
         }
 
+        // Salvage what an unparseable construct swallowed. Dedup on (name, line):
+        // a recovered chunk re-reports whatever the primary pass already found.
+        if tree.root_node().has_error() {
+            let (fns, sts) = self.recover_error_regions(&tree, content, file_path);
+            for f in fns {
+                if !tree_node
+                    .functions
+                    .iter()
+                    .any(|e| e.name == f.name && e.start_line == f.start_line)
+                {
+                    tree_node.functions.push(f);
+                }
+            }
+            for st in sts {
+                if !tree_node
+                    .structs
+                    .iter()
+                    .any(|e| e.name == st.name && e.start_line == st.start_line)
+                {
+                    tree_node.structs.push(st);
+                }
+            }
+            tree_node
+                .functions
+                .sort_by(|a, b| (a.start_line, &a.name).cmp(&(b.start_line, &b.name)));
+            tree_node
+                .structs
+                .sort_by(|a, b| (a.start_line, &a.name).cmp(&(b.start_line, &b.name)));
+        }
+
         let duration = start_time.elapsed().as_millis() as u64;
         Ok(FileAnalysis::new(tree_node, duration))
     }
@@ -444,6 +626,14 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             (variable_declarator name: (identifier) @name value: (function_expression) @arrow) @arrow_decl
             (variable_declarator name: (identifier) @name value: (generator_function) @arrow) @arrow_decl
             (method_definition name: (property_identifier) @name) @method
+            ; `#private` methods use a distinct identifier node.
+            (method_definition name: (private_property_identifier) @name) @method
+            ; Bodiless declarations: interface members, abstract class methods,
+            ; and ambient `declare function`. All are real, callable API surface —
+            ; hono alone has ~60 across its interfaces and .d.ts adapters.
+            (method_signature name: (property_identifier) @name) @method
+            (abstract_method_signature name: (property_identifier) @name) @method
+            (function_signature name: (identifier) @name) @function
         "#;
 
         let query =
@@ -519,7 +709,12 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                     let mut ancestor = outer.parent();
                     while let Some(a) = ancestor {
                         match a.kind() {
-                            "class_declaration" | "abstract_class_declaration" => {
+                            // Interfaces own their members exactly as classes do;
+                            // without this an interface method surfaces ownerless
+                            // and reads as a free function.
+                            "class_declaration"
+                            | "abstract_class_declaration"
+                            | "interface_declaration" => {
                                 if let Some(n) = a.child_by_field_name("name") {
                                     func.owner = Some(self.text(&n, source));
                                 }
@@ -623,6 +818,17 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                 None => continue,
             };
             if name.is_empty() {
+                continue;
+            }
+            // A type declared inside a function body is a local, exactly like an
+            // arrow bound inside one (see `is_top_level_arrow_decl`): it cannot be
+            // referenced from outside, so surfacing it as a module-level type is
+            // noise. hono's client tests declare `type Actual`/`type Expected`
+            // inside `it(() => { ... })` callbacks ~370 times, which is how this
+            // was found. Declarations inside a `namespace`/`module` block are NOT
+            // affected — their body is a statement_block too, but its parent is
+            // the module node, not a function.
+            if Self::is_inside_function_body(&node) {
                 continue;
             }
 
@@ -1854,6 +2060,58 @@ function f() {}
     }
 
     #[tokio::test]
+    async fn test_recovers_declarations_after_an_unparseable_construct() {
+        // tree-sitter-typescript#335: two anonymous generic call signatures
+        // separated by a newline (no semicolon) fail to parse, and the parser
+        // then degenerates — without recovery every declaration AFTER the broken
+        // interface is lost. TypeScript itself accepts this code.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = r#"
+interface Broken<E> {
+  <K extends keyof E>(key: K): E[K]
+  <K extends string>(key: K): number
+}
+
+export type AfterAlias = string
+
+export interface AfterInterface {
+  field: number
+}
+
+export class AfterClass {
+  method(): void {}
+}
+
+export function afterFunction(): number {
+  return 1
+}
+"#;
+        let analysis = analyzer.analyze_file(code, "broken.ts").await.unwrap();
+        let tn = &analysis.tree_node;
+
+        let type_names: Vec<&str> = tn.structs.iter().map(|s| s.name.as_str()).collect();
+        for expected in ["AfterAlias", "AfterInterface", "AfterClass"] {
+            assert!(
+                type_names.contains(&expected),
+                "{expected} lost after the unparseable interface: {type_names:?}"
+            );
+        }
+        let fn_names: Vec<&str> = tn.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            fn_names.contains(&"afterFunction"),
+            "afterFunction lost: {fn_names:?}"
+        );
+        assert!(fn_names.contains(&"method"), "method lost: {fn_names:?}");
+
+        // Recovery must not duplicate what the primary pass already found.
+        assert_eq!(
+            type_names.iter().filter(|n| **n == "AfterAlias").count(),
+            1,
+            "duplicate symbol from the recovery pass"
+        );
+    }
+
+    #[tokio::test]
     async fn test_comprehensive() {
         let analyzer = TypeScriptAnalyzer::new().unwrap();
         let code = r#"
@@ -1888,9 +2146,27 @@ export type Key = string;
         let store = tn.structs.iter().find(|c| c.name == "Store").unwrap();
         assert_eq!(store.generics, vec!["T".to_string()]);
 
-        let load = tn.functions.iter().find(|f| f.name == "load").unwrap();
+        // Two `load`s exist now: the interface's bodiless signature and the
+        // class's implementation. Select by owner rather than by name alone.
+        let load = tn
+            .functions
+            .iter()
+            .find(|f| f.name == "load" && f.owner.as_deref() == Some("Store"))
+            .expect("Store::load");
         assert!(load.is_async);
         assert!(load.is_public);
+
+        // The interface member is real callable API surface and is attributed to
+        // the interface that declares it.
+        let decl = tn
+            .functions
+            .iter()
+            .find(|f| f.name == "load" && f.owner.as_deref() == Some("Repo"))
+            .expect("Repo::load signature");
+        assert!(
+            !decl.is_async,
+            "a bodiless signature carries no async keyword"
+        );
 
         let empty = tn.functions.iter().find(|f| f.name == "empty").unwrap();
         assert!(empty.is_static);

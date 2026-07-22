@@ -11,7 +11,7 @@ Confirmed by reading source; Layer 1 should break loudly on drift.
 
 - Entry point: `loregrep exec-tool <tool> --params '<json>' --path <dir>` (`src/internal/cli_types.rs`; `--params` defaults `{}`, `--path` `.`).
 - Stdout is exactly one pretty-printed JSON `ToolResult`: `{"success": bool, "data": {...}, "error": null|string}` (`src/internal/ai_tools.rs`, printed in `src/internal/cli.rs`). Diagnostics → stderr. Exit 1 when `success:false`.
-- Index cache: `<path>/.loregrep/index.cache`, reused opportunistically on later `exec-tool` calls. Fixtures must delete this dir for cold-latency runs and gitignore it.
+- Index cache: `<cache-root>/indexes/<hash-of-canonical-path>.cache`, where `<cache-root>` is the user cache directory or `LOREGREP_CACHE_PATH`. Reused opportunistically on later `exec-tool` calls. It is never written inside the analyzed tree; runners get a cold scan by pointing `LOREGREP_CACHE_PATH` at a fresh temp dir, not by deleting anything.
 - Payload shapes (from `ai_tools.rs`):
   - `search_functions` → `data.results`: `FunctionSignature[]` (`name`, `file_path`, `parameters`, `return_type`, `is_public`, `is_async`, `is_const`, `is_static`, `is_extern`, `start_line`, `end_line`, `generics`), plus `data.count`, `data.pattern`.
   - `search_structs` → `data.results`: `StructSignature[]` (`name`, `file_path`, `fields`, `is_public`, `is_tuple_struct`, `start_line`, `end_line`, `generics`).
@@ -123,7 +123,7 @@ Plus a `loregrep-eval-retrieval-summary/1` line (per-tool aggregate P/R, pass co
 ## 4. Layer 1 — retrieval-quality runner
 
 ### 4.1 Invocation: a standalone Python 3 (stdlib-only) script shelling out to the built binary
-Not a `cargo test`, not a crate bin. Rationale: agents consume the **CLI surface** (arg parsing, stdout purity, exit codes, `.loregrep` cache) — an in-process test misses exactly the class of regression (stray `println!` polluting stdout) that breaks agents. Stdlib-only keeps CI dependency-free.
+Not a `cargo test`, not a crate bin. Rationale: agents consume the **CLI surface** (arg parsing, stdout purity, exit codes, index cache) — an in-process test misses exactly the class of regression (stray `println!` polluting stdout) that breaks agents. Stdlib-only keeps CI dependency-free.
 
 ```
 python3 evals/retrieval/run.py [--binary target/release/loregrep] [--fixture rust-basic] [--case <glob>] [--json-out ...] [--no-latency]
@@ -144,7 +144,7 @@ CI: `cargo build --release && python3 evals/retrieval/run.py` → non-zero on an
 Coverage: every tool × every applicable fixture language; ≥30 cases in P2. This is the **contribution gate** — a new-language analyzer PR must add `fixtures/<lang>-basic/` with gold covering every applicable tool.
 
 ### 4.3 Runner algorithm
-Per fixture: `rm -rf .loregrep` (cold); run first case cold (`latency_ms_cold`), rerun warm (`latency_ms_warm`), rest warm. Per case: `subprocess.run([binary,"exec-tool",tool,"--params",json.dumps(params),"--path",fixture_dir],capture_output=True,timeout=60)`; parse stdout JSON; record exit code + stderr tail. **Path normalization**: relativize each result `file_path` to the fixture root (POSIX). Project onto `match_on`; set-compare per `expect.mode`; compute P/R/F1; record FP/FN verbatim. Emit JSONL + human summary; exit 1 on unexpected failure/pass. Latency never gates pass/fail.
+Per fixture: an isolated `LOREGREP_CACHE_PATH` temp root (cold by construction); run first case cold (`latency_ms_cold`), rerun warm (`latency_ms_warm`), rest warm. Per case: `subprocess.run([binary,"exec-tool",tool,"--params",json.dumps(params),"--path",fixture_dir],capture_output=True,timeout=60)`; parse stdout JSON; record exit code + stderr tail. **Path normalization**: relativize each result `file_path` to the fixture root (POSIX). Project onto `match_on`; set-compare per `expect.mode`; compute P/R/F1; record FP/FN verbatim. Emit JSONL + human summary; exit 1 on unexpected failure/pass. Latency never gates pass/fail.
 
 ## 4b. Level 1 at population scale — SCIP parity on real repos
 

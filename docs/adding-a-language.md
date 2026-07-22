@@ -28,7 +28,7 @@ skeleton and adapt the Tree-sitter queries to your language's grammar node names
 Register the module in `src/analyzers/mod.rs`.
 
 ### 3. Wire the builder method
-In `src/loregrep.rs`, add `with_go_analyzer()` following the `with_rust_analyzer()` pattern, and add
+In `src/loregrep.rs`, add `with_<language>_analyzer()` following the `with_rust_analyzer()` pattern, and add
 your language to auto-discovery if applicable. Because dispatch goes through the registry, this is
 the only touch outside your file.
 

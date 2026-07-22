@@ -2,7 +2,7 @@
 
 **Fast code analysis tools for AI coding assistants with complete file path tracking**
 
-Loregrep is a high-performance repository indexing library that uses tree-sitter parsing to analyze codebases. It provides 6 standardized tools that supply structured code data to AI systems like Claude, GPT, and other coding assistants.
+Loregrep is a high-performance repository indexing library that uses tree-sitter parsing to analyze codebases. It provides a set of standardized tools that supply structured code data to AI systems like Claude, GPT, and other coding assistants.
 
 ## ✨ **What's New in v0.4.2: Enhanced User Experience**
 
@@ -122,7 +122,7 @@ asyncio.run(analyze_repository())
 
 ## AI Integration
 
-Loregrep provides 6 standardized tools that supply structured code data to AI coding assistants:
+Loregrep provides a set of standardized tools that supply structured code data to AI coding assistants. The list below is the current set; `LoreGrep.get_tool_definitions()` is always authoritative:
 
 ### Available Tools
 
@@ -223,6 +223,34 @@ result = await lg.execute_tool("get_repository_tree", {
 })
 ```
 
+#### 7. **trace_callers** - Transitive (upstream) callers via the call graph
+```python
+result = await lg.execute_tool("trace_callers", {
+    "function_name": "authenticate_user",
+    "max_depth": 0  # 0 = unlimited
+})
+```
+
+#### 8. **analyze_impact** - Change blast radius of a function
+```python
+result = await lg.execute_tool("analyze_impact", {
+    "function_name": "authenticate_user"
+})
+```
+
+#### 9. **find_importers** - Files that import a given file
+```python
+result = await lg.execute_tool("find_importers", {
+    "file": "src/config.py",
+    "transitive": False
+})
+```
+
+#### 10. **get_dependency_graph** - Module-level dependency graph
+```python
+result = await lg.execute_tool("get_dependency_graph", {})
+```
+
 ## Configuration Options
 
 ### Enhanced Builder Pattern with Convenience Methods
@@ -256,6 +284,33 @@ manual_loregrep = (loregrep.LoreGrep.builder()
     .build())
 ```
 
+### Full Builder Reference
+
+Every configuration method available on the Rust builder is available here.
+
+| Method | Effect |
+|--------|--------|
+| `with_rust_analyzer()` | Register the Rust analyzer |
+| `with_python_analyzer()` | Register the Python analyzer |
+| `with_typescript_analyzer()` | Register the TypeScript/TSX analyzer |
+| `with_all_analyzers()` | Register every available analyzer |
+| `configure_patterns_for_languages([...])` | Derive file patterns from language names, e.g. `["rust", "python"]` |
+| `include_patterns([...])` / `file_patterns([...])` | Glob patterns to include (aliases) |
+| `exclude_patterns([...])` | Glob patterns to skip |
+| `max_files(n)` | Cap the number of indexed files (see *Index Coverage*) |
+| `max_file_size(bytes)` | Skip files larger than this |
+| `max_depth(n)` / `unlimited_depth()` | Directory depth limit |
+| `follow_symlinks(bool)` | Follow symbolic links while scanning |
+| `respect_gitignore(bool)` | Honor `.gitignore` |
+| `optimize_for_performance()` | Speed-focused preset |
+| `comprehensive_analysis()` | Thorough preset |
+| `exclude_common_build_dirs()` / `exclude_test_dirs()` / `exclude_vendor_dirs()` | Directory exclusion presets |
+| `include_source_files()` / `include_config_files()` | Pattern inclusion presets |
+| `build()` | Produce the `LoreGrep` instance |
+
+`loregrep.LoreGrepBuilder()` constructs a builder directly and is equivalent to
+`loregrep.LoreGrep.builder()`.
+
 ### Scan Results
 
 ```python
@@ -266,8 +321,54 @@ print(f"Files scanned: {result.files_scanned}")
 print(f"Functions found: {result.functions_found}")
 print(f"Structs found: {result.structs_found}")
 print(f"Duration: {result.duration_ms}ms")
+print(f"Languages: {result.languages}")  # Languages detected during the scan
 print(f"Errors: {result.errors}")  # List of any scan errors
 ```
+
+### Inspecting the Index
+
+```python
+lg.is_scanned()                  # bool: has anything been indexed?
+lg.get_stats()                   # ScanResult for the current index (duration_ms is always 0)
+lg.first_missing_indexed_path()  # str | None: an indexed path that no longer exists on disk
+lg.set_scan_root("/path/to/repo")# record the analysis root (a scan does this for you)
+lg.clear_index()                 # drop the index and its memory, keep the configured instance
+```
+
+### Index Coverage
+
+If `max_files(n)` cut a scan short, the index is **truncated** and an empty
+result does not mean "this symbol does not exist". Check before reporting a
+miss:
+
+```python
+coverage = lg.index_coverage()
+print(coverage.files_indexed, coverage.files_discovered, coverage.truncated)
+if coverage.truncated:
+    print(coverage.note)   # human-readable explanation; None when complete
+```
+
+Tool results from a truncated index also carry `truncated`, `index_coverage`,
+`indexed_file_count` and `discovered_file_count` keys.
+
+### Version
+
+`loregrep.__version__` is read from the compiled extension, so it always
+reports the version of the code actually loaded:
+
+```python
+import loregrep
+loregrep.__version__          # e.g. "0.6.0"
+loregrep.LoreGrep.version()   # same value, same source (Cargo.toml)
+```
+
+### Not Yet Available in Python
+
+The Rust API's on-disk index cache (`save_index` / `load_index` /
+`load_index_if_fresh` / `is_cache_fresh` / `cache_path_for`) is **not** bound
+yet; those signatures are still in flux. Everything else on `LoreGrep` and
+`LoreGrepBuilder` is available, except `coverage_handle()`, which returns an
+internal handle with no Python use — `index_coverage()` returns the same data.
 
 ## How It Works
 
@@ -277,7 +378,7 @@ print(f"Errors: {result.errors}")  # List of any scan errors
 - **Structured data extraction**: Functions, classes, imports, etc. (not AI)
 
 ### AI Integration
-- **Tool interface**: 6 standardized tools that provide data **to** AI systems
+- **Tool interface**: standardized tools that provide data **to** AI systems
 - **AI assistants**: Use the structured data to answer questions about your code
 - **LLM compatibility**: Works with Claude [Other integrations planned..]
 
@@ -289,8 +390,9 @@ print(f"Errors: {result.errors}")  # List of any scan errors
 |------------|------------|-----------|---------|---------|
 | Rust       | ✅ Full    | ✅        | ✅      | ✅      |
 | Python     | ✅ Full    | ✅        | ✅      | ✅      |
-| TypeScript | 🚧 Planned | -         | -       | -       |
+| TypeScript | ✅ Full    | ✅        | ✅      | ✅      |
 | JavaScript | 🚧 Planned | -         | -       | -       |
+| Go         | 🚧 Planned | -         | -       | -       |
 
 *Additional language support coming soon*
 

@@ -8,7 +8,7 @@
 //!
 //! - **Parses** code files using tree-sitter for accurate syntax analysis
 //! - **Indexes** functions, structs, imports, exports, and relationships in memory
-//! - **Provides** 6 standardized tools that coding assistants can call to query the codebase
+//! - **Provides** standardized tools that coding assistants can call to query the codebase
 //! - **Enables** AI systems to understand code structure without re-parsing
 //!
 //! ## What It's NOT
@@ -27,7 +27,7 @@
 //!                                                          │
 //!                                                          ▼
 //! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-//! │ Coding Assistant│◀───│  6 Query Tools   │◀───│   Fast Lookups  │
+//! │ Coding Assistant│◀───│   Query Tools    │◀───│   Fast Lookups  │
 //! │   (Claude, GPT, │    │ (search, analyze,│    │  (functions,    │
 //! │   Cursor, etc.) │    │  dependencies)   │    │   structs, etc.)│
 //! └─────────────────┘    └──────────────────┘    └─────────────────┘
@@ -87,7 +87,7 @@
 //!
 //! ### Integration with Coding Assistants
 //!
-//! The library provides 6 standardized tools that AI coding assistants can call:
+//! The library provides standardized tools that AI coding assistants can call:
 //!
 //! ```ignore
 //! use loregrep::LoreGrep;
@@ -133,7 +133,7 @@
 //! // Get tool definitions for your AI system
 //! let tools = LoreGrep::get_tool_definitions();
 //!
-//! // 8 tools available:
+//! // Current tool set (get_tool_definitions() is always authoritative):
 //! // 1. search_functions      - Find functions by name/pattern
 //! // 2. search_structs        - Find structures by name/pattern
 //! // 3. analyze_file          - Get detailed file analysis
@@ -142,6 +142,8 @@
 //! // 6. trace_callers         - Trace transitive (upstream) callers via the call graph
 //! // 7. analyze_impact        - Compute change blast radius via the call graph
 //! // 8. get_repository_tree   - Get repository structure and overview
+//! // 9. find_importers        - Find files that import a given file
+//! // 10. get_dependency_graph - Resolved import graph plus import cycles
 //! ```
 //!
 //! ## Architecture Overview
@@ -152,7 +154,7 @@
 //! - **`RepoMap`**: Fast in-memory indexes with lookup optimization
 //! - **`RepositoryScanner`**: File discovery with gitignore support
 //! - **Language Analyzers**: Tree-sitter based parsing (Rust complete, others on roadmap)
-//! - **Tool System**: 6 standardized tools for AI integration
+//! - **Tool System**: standardized tools for AI integration
 //!
 //! ### Design Characteristics
 //!
@@ -166,7 +168,7 @@
 //! |------------|------------|-----------|---------|---------|-------|
 //! | Rust       | ✅ Full    | ✅        | ✅      | ✅      | ✅    |
 //! | Python     | ✅ Full    | ✅        | ✅      | ✅      | ✅    |
-//! | TypeScript | 📋 Roadmap | -         | -       | -       | -     |
+//! | TypeScript | ✅ Full    | ✅        | ✅      | ✅      | ✅    |
 //! | JavaScript | 📋 Roadmap | -         | -       | -       | -     |
 //! | Go         | 📋 Roadmap | -         | -       | -       | -     |
 //!
@@ -279,7 +281,7 @@
 //! ## Future Roadmap
 //!
 //! ### Language Support
-//! - **TypeScript/JavaScript Analyzers**: Support for modern JS/TS features including interfaces, types, and ES6+ syntax
+//! - **JavaScript Analyzer**: Support for modern JS features including ES6+ syntax (TypeScript/TSX is already supported)
 //! - **Go Analyzer**: Package declarations, interfaces, and Go-specific function signatures
 //!
 //! ### Advanced Analysis Features  
@@ -368,6 +370,7 @@ fn loregrep_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<python_bindings::PyScanResult>()?;
     m.add_class::<python_bindings::PyToolResult>()?;
     m.add_class::<python_bindings::PyToolSchema>()?;
+    m.add_class::<python_bindings::PyIndexCoverage>()?;
 
     // Add module version
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -378,12 +381,45 @@ fn loregrep_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(feature = "python")]
 pub mod python_bindings {
     use super::*;
-    use crate::core::types::{ScanResult, ToolResult};
+    use crate::core::types::ScanResult;
     use crate::loregrep::{LoreGrep, LoreGrepBuilder};
-    use pyo3::prelude::*;
     use pyo3::types::PyDict;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
+
+    // ============================================================================
+    // API PARITY MAP  (Rust `LoreGrep`/`LoreGrepBuilder` -> Python)
+    //
+    // These bindings are meant to be a COMPLETE mirror of the Rust public API.
+    // Every `pub fn` on `LoreGrep` and `LoreGrepBuilder` in `src/loregrep.rs` is
+    // either bound below or listed here with the reason it is not. If you add a
+    // `pub fn` there, add it here too — this list is the audit trail that stops
+    // the bindings from silently drifting behind the Rust surface again.
+    //
+    // Deliberately NOT exposed:
+    //
+    //   LoreGrep::save_index
+    //   LoreGrep::load_index
+    //   LoreGrep::load_index_if_fresh
+    //   LoreGrep::is_cache_fresh
+    //   LoreGrep::cache_path_for   (and whatever else this group becomes)
+    //       The on-disk index cache. Deferred, not rejected: these signatures are
+    //       actively being reworked, so binding them now would bind an API about
+    //       to change. Bind them as a group once they settle.
+    //
+    //   (`with_go_analyzer` and `cache_ttl` are absent from BOTH surfaces now —
+    //   they were no-ops, and a bound no-op tells an agent a feature exists and
+    //   then fails silently. See the comments at their former sites in
+    //   `src/loregrep.rs`. Re-binding them when they do something is additive.)
+    //
+    //   LoreGrep::coverage_handle
+    //       Returns a `CoverageHandle`, internal plumbing that exists so the tool
+    //       layer can share the coverage cell with `LoreGrep`. A Python host has
+    //       nothing to wire it into; `index_coverage()` gives it the same data as
+    //       a value.
+    //
+    // Everything else is bound below.
+    // ============================================================================
 
     /// High-level Python API for LoreGrep - matches the Rust API exactly
     #[pyclass(name = "LoreGrep")]
@@ -508,17 +544,11 @@ pub mod python_bindings {
                     *guard = loregrep;
                 } // mutex guard is dropped here
 
-                Ok(PyScanResult {
-                    files_scanned: result.files_scanned,
-                    functions_found: result.functions_found,
-                    structs_found: result.structs_found,
-                    errors: Vec::new(), // TODO: Collect actual errors from scan
-                    duration_ms: result.duration_ms,
-                })
+                Ok(PyScanResult::from_scan_result(result))
             })
         }
 
-        /// Execute one of the 6 AI tools
+        /// Execute one of the AI tools (see `get_tool_definitions`)
         fn execute_tool<'py>(
             &self,
             py: Python<'py>,
@@ -625,8 +655,83 @@ pub mod python_bindings {
             env!("CARGO_PKG_VERSION")
         }
 
+        /// Repository statistics for the current in-memory index.
+        ///
+        /// Unlike `scan()` this does not touch the filesystem; `duration_ms` is
+        /// always 0.
+        fn get_stats(&self) -> PyResult<PyScanResult> {
+            let loregrep = self.lock()?;
+            let stats = loregrep.get_stats().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to read repository stats: {}",
+                    e
+                ))
+            })?;
+            Ok(PyScanResult::from_scan_result(stats))
+        }
+
+        /// How much of the repository the current index covers.
+        ///
+        /// Consult this before reporting "not found" to a user or an agent: a
+        /// `max_files` limit can truncate the index, and an empty result set
+        /// from a truncated index does not mean the symbol does not exist.
+        fn index_coverage(&self) -> PyResult<PyIndexCoverage> {
+            let coverage = self.lock()?.index_coverage();
+            Ok(PyIndexCoverage {
+                files_indexed: coverage.files_indexed,
+                files_discovered: coverage.files_discovered,
+                truncated: coverage.truncated,
+                note: coverage.note(),
+            })
+        }
+
+        /// Whether a repository has been scanned into this index.
+        fn is_scanned(&self) -> PyResult<bool> {
+            Ok(self.lock()?.is_scanned())
+        }
+
+        /// Record the analysis root on the index.
+        ///
+        /// A scan sets this itself, so this is only needed by hosts that
+        /// populate an index by other means.
+        fn set_scan_root(&self, root: &str) -> PyResult<()> {
+            self.lock()?.set_scan_root(root);
+            Ok(())
+        }
+
+        /// The first indexed file path that no longer exists on disk, if any.
+        ///
+        /// A cheap staleness probe: `None` means every indexed path still
+        /// resolves under the recorded analysis root.
+        fn first_missing_indexed_path(&self) -> PyResult<Option<String>> {
+            Ok(self.lock()?.first_missing_indexed_path())
+        }
+
+        /// Reset the in-memory index to empty, including its coverage.
+        ///
+        /// `scan()` replaces the index wholesale, so this is not required before
+        /// a rescan; use it to release the memory of an index you are done with
+        /// while keeping the configured instance alive.
+        fn clear_index(&self) -> PyResult<()> {
+            self.lock()?.clear_index();
+            Ok(())
+        }
+
         fn __repr__(&self) -> String {
             "LoreGrep(configured and ready for repository analysis)".to_string()
+        }
+    }
+
+    impl PyLoreGrep {
+        /// Lock the shared instance, turning a poisoned mutex into a Python
+        /// exception rather than a panic across the FFI boundary.
+        fn lock(&self) -> PyResult<std::sync::MutexGuard<'_, LoreGrep>> {
+            self.inner.lock().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to acquire lock: {}",
+                    e
+                ))
+            })
         }
     }
 
@@ -638,6 +743,16 @@ pub mod python_bindings {
 
     #[pymethods]
     impl PyLoreGrepBuilder {
+        /// Create a builder with the default configuration
+        ///
+        /// Equivalent to `LoreGrep.builder()`.
+        #[new]
+        fn new() -> Self {
+            PyLoreGrepBuilder {
+                inner: LoreGrepBuilder::new(),
+            }
+        }
+
         /// Set maximum file size to process
         fn max_file_size(mut slf: PyRefMut<Self>, size: u64) -> PyRefMut<Self> {
             slf.inner = slf.inner.clone().max_file_size(size);
@@ -650,9 +765,51 @@ pub mod python_bindings {
             slf
         }
 
+        /// Set maximum directory depth to unlimited
+        fn unlimited_depth(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().unlimited_depth();
+            slf
+        }
+
+        /// Set the maximum number of files to index
+        ///
+        /// A scan that hits this limit produces a TRUNCATED index; check
+        /// `LoreGrep.index_coverage()` before treating an empty result as
+        /// "does not exist".
+        fn max_files(mut slf: PyRefMut<Self>, limit: usize) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().max_files(limit);
+            slf
+        }
+
         /// Set file patterns to include
         fn file_patterns(mut slf: PyRefMut<Self>, patterns: Vec<String>) -> PyRefMut<Self> {
             slf.inner = slf.inner.clone().file_patterns(patterns);
+            slf
+        }
+
+        /// Set file patterns to include (same as `file_patterns`)
+        fn include_patterns(mut slf: PyRefMut<Self>, patterns: Vec<String>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().include_patterns(patterns);
+            slf
+        }
+
+        /// Enable or disable following symbolic links while scanning
+        fn follow_symlinks(mut slf: PyRefMut<Self>, follow: bool) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().follow_symlinks(follow);
+            slf
+        }
+
+        /// Configure file patterns from a list of language names
+        ///
+        /// e.g. `["rust", "python"]` -> `*.rs`, `*.py`, ...
+        fn configure_patterns_for_languages(
+            mut slf: PyRefMut<Self>,
+            languages: Vec<String>,
+        ) -> PyRefMut<Self> {
+            slf.inner = slf
+                .inner
+                .clone()
+                .configure_patterns_for_languages(&languages);
             slf
         }
 
@@ -677,6 +834,12 @@ pub mod python_bindings {
         /// Add Python language analyzer with feedback
         fn with_python_analyzer(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
             slf.inner = slf.inner.clone().with_python_analyzer();
+            slf
+        }
+
+        /// Add TypeScript/TSX language analyzer
+        fn with_typescript_analyzer(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
+            slf.inner = slf.inner.clone().with_typescript_analyzer();
             slf
         }
 
@@ -757,6 +920,21 @@ pub mod python_bindings {
         pub errors: Vec<String>,
         #[pyo3(get)]
         pub duration_ms: u64,
+        #[pyo3(get)]
+        pub languages: Vec<String>,
+    }
+
+    impl PyScanResult {
+        fn from_scan_result(result: ScanResult) -> Self {
+            PyScanResult {
+                files_scanned: result.files_scanned,
+                functions_found: result.functions_found,
+                structs_found: result.structs_found,
+                errors: Vec::new(), // TODO: Collect actual errors from scan
+                duration_ms: result.duration_ms,
+                languages: result.languages,
+            }
+        }
     }
 
     #[pymethods]
@@ -765,6 +943,36 @@ pub mod python_bindings {
             format!(
                 "ScanResult(files={}, functions={}, structs={}, duration={}ms)",
                 self.files_scanned, self.functions_found, self.structs_found, self.duration_ms
+            )
+        }
+    }
+
+    /// Python wrapper for IndexCoverage - how much of the repository is indexed
+    #[pyclass(name = "IndexCoverage")]
+    pub struct PyIndexCoverage {
+        /// Files actually analyzed and stored in the index
+        #[pyo3(get)]
+        pub files_indexed: usize,
+        /// Files discovery found before any `max_files` limit was applied
+        #[pyo3(get)]
+        pub files_discovered: usize,
+        /// True when a limit stopped the scan short of everything discovered
+        #[pyo3(get)]
+        pub truncated: bool,
+        /// A human-readable coverage note, or None when the index is complete
+        #[pyo3(get)]
+        pub note: Option<String>,
+    }
+
+    #[pymethods]
+    impl PyIndexCoverage {
+        fn __repr__(&self) -> String {
+            format!(
+                "IndexCoverage(indexed={}, discovered={}, truncated={})",
+                self.files_indexed,
+                self.files_discovered,
+                // Python spelling: this repr is read in a Python REPL.
+                if self.truncated { "True" } else { "False" }
             )
         }
     }

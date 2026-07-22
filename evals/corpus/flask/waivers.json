@@ -1,0 +1,223 @@
+{
+  "schema": "loregrep-eval-waivers/1",
+  "repo": "flask",
+  "$comment": [
+    "Per-symbol triage of every scorer false positive, verified individually against",
+    "source - never as a class. Each entry cites the evidence that justifies it.",
+    "A waiver means: loregrep emitted a real definition that the ORACLE does not",
+    "represent. It is not a licence to ignore the symbol; the scorer counts waived",
+    "items by class, and a waiver that stops matching is reported as stale, so this",
+    "file cannot silently absorb a future regression.",
+    "Entries are only for symbols in files the ORACLE DID index. When an entire file is outside the indexer's projects, the scorer's structural `outside_oracle_scope` guard classifies it \u2014 that is a better statement than a per-symbol waiver, so such entries were removed here rather than kept (they surfaced automatically as STALE when the guard landed)."
+  ],
+  "waivers": [
+    {
+      "at": "src/flask/cli.py:236",
+      "name": "locate_app",
+      "kind": "function",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@t.overload chain: several `def` statements share one qualified name. scip-python emits one definition occurrence per unique symbol string, so only the first survives into the golden. Every cited line is a real `def` in source (verified); loregrep emitting each one is correct for navigation."
+    },
+    {
+      "at": "src/flask/cli.py:241",
+      "name": "locate_app",
+      "kind": "function",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@t.overload chain: several `def` statements share one qualified name. scip-python emits one definition occurrence per unique symbol string, so only the first survives into the golden. Every cited line is a real `def` in source (verified); loregrep emitting each one is correct for navigation."
+    },
+    {
+      "at": "src/flask/config.py:33",
+      "name": "__get__",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@t.overload chain: several `def` statements share one qualified name. scip-python emits one definition occurrence per unique symbol string, so only the first survives into the golden. Every cited line is a real `def` in source (verified); loregrep emitting each one is correct for navigation."
+    },
+    {
+      "at": "src/flask/config.py:35",
+      "name": "__get__",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@t.overload chain: several `def` statements share one qualified name. scip-python emits one definition occurrence per unique symbol string, so only the first survives into the golden. Every cited line is a real `def` in source (verified); loregrep emitting each one is correct for navigation."
+    },
+    {
+      "at": "src/flask/helpers.py:58",
+      "name": "stream_with_context",
+      "kind": "function",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@t.overload chain: several `def` statements share one qualified name. scip-python emits one definition occurrence per unique symbol string, so only the first survives into the golden. Every cited line is a real `def` in source (verified); loregrep emitting each one is correct for navigation."
+    },
+    {
+      "at": "src/flask/helpers.py:63",
+      "name": "stream_with_context",
+      "kind": "function",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@t.overload chain: several `def` statements share one qualified name. scip-python emits one definition occurrence per unique symbol string, so only the first survives into the golden. Every cited line is a real `def` in source (verified); loregrep emitting each one is correct for navigation."
+    },
+    {
+      "at": "src/flask/sansio/app.py:563",
+      "name": "debug",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/sansio/scaffold.py:234",
+      "name": "static_folder",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/sansio/scaffold.py:265",
+      "name": "static_url_path",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/sessions.py:33",
+      "name": "permanent",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/wrappers.py:89",
+      "name": "max_content_length",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/wrappers.py:116",
+      "name": "max_form_memory_size",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/wrappers.py:143",
+      "name": "max_form_parts",
+      "kind": "method",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "@<name>.setter paired with the @property getter of the same name (decorator verified on the preceding line). Two real `def`s, one qualified name; the golden keeps the getter. The setter is a distinct definition site."
+    },
+    {
+      "at": "src/flask/views.py:115",
+      "name": "view",
+      "kind": "function",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "Two `def view(...)` in the if/else branches of View.as_view (lines 106 and 115, both verified in source). Same qualified name, so the golden holds only line 106."
+    },
+    {
+      "at": "tests/test_cli.py:54",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:59",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:64",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:73",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:82",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:91",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:100",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:109",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:114",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:120",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "tests/test_cli.py:127",
+      "name": "Module",
+      "kind": "class",
+      "class": "oracle-collapsed-sibling",
+      "verdict": "oracle-artifact",
+      "why": "One of 12 `class Module:` statements, all at the same indent inside the single function test_find_best_app (verified by indentation scan). Python rebinds the name each time; the oracle keeps the first (line 49). All 12 are real definition sites."
+    },
+    {
+      "at": "src/flask/cli.py:971",
+      "name": "app",
+      "kind": "function",
+      "class": "oracle-local-binding",
+      "verdict": "oracle-artifact",
+      "why": "`def app(...)` inside an `except` block, shadowing `app: WSGIApplication = info.load_app()` bound at line 963 (both verified). scip-python models the whole name as a `local N` symbol, which the converter drops with all locals, so no golden entry exists at any line."
+    }
+  ]
+}

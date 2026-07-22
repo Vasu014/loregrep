@@ -24,13 +24,16 @@ Design notes (verified empirically against loregrep 0.4.2):
 """
 
 import argparse
+import atexit
 import fnmatch
 import json
 import os
 import random
+import shutil
 import string
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,10 +76,16 @@ def dig(obj, dotted):
 
 
 def relativize_path(p, fixture_abs):
-    """Relativize an absolute (or scan-joined) result path to the fixture root, POSIX."""
+    """Relativize a result path to the fixture root, POSIX.
+
+    loregrep emits ROOT-RELATIVE paths (relative to the `--path` it was given,
+    which is `fixture_abs` here), so a relative path is anchored at the scan root,
+    not at this repo's root. Absolute paths are still accepted: input tolerance is
+    the point, and older/embedding callers may hand back either.
+    """
     if not isinstance(p, str):
         return p
-    ap = p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
+    ap = p if os.path.isabs(p) else os.path.join(fixture_abs, p)
     ap = os.path.normpath(ap)
     try:
         rel = os.path.relpath(ap, fixture_abs)
@@ -149,13 +158,56 @@ def score(expected_items, actual_items, match_on):
 # Core execution
 # --------------------------------------------------------------------------- #
 
-def run_tool(binary, tool, params, fixture_abs, timeout=60):
-    """Invoke `loregrep exec-tool` and return (parsed_json, exit_code, stderr_tail)."""
+_CACHE_ROOT = None
+
+
+def isolated_cache_root():
+    """A private, empty index-cache directory for this harness process.
+
+    loregrep persists its index under `config.cache.path` (overridable with
+    `LOREGREP_CACHE_PATH`), keyed by a hash of the scanned root. Every measured
+    run must start from an empty one, or the harness scores whatever a previous
+    build happened to leave behind.
+
+    Isolation rather than deletion: the harness used to force a cold pass by
+    `rm -rf <tree>/.loregrep`, which hardcoded the cache's location into the
+    eval and became a silent no-op the moment that location changed — the
+    failure mode being "the scorecards keep printing, against a stale index".
+    A temp directory this process owns cannot go stale and needs no knowledge of
+    how loregrep addresses its cache entries. It is removed at exit, so nothing
+    accumulates and nothing outside it is ever deleted.
+    """
+    global _CACHE_ROOT
+    if _CACHE_ROOT is None:
+        _CACHE_ROOT = tempfile.mkdtemp(prefix="loregrep-eval-cache-")
+        atexit.register(shutil.rmtree, _CACHE_ROOT, ignore_errors=True)
+    return _CACHE_ROOT
+
+
+def tool_env():
+    """Child environment for every `loregrep` invocation the harness makes."""
+    env = dict(os.environ)
+    env["LOREGREP_CACHE_PATH"] = isolated_cache_root()
+    return env
+
+
+def run_tool(binary, tool, params, fixture_abs, timeout=60, cwd=None):
+    """Invoke `loregrep exec-tool` and return (parsed_json, exit_code, stderr_tail).
+
+    `cwd` matters more than it looks: config discovery starts at `loregrep.toml`
+    RELATIVE TO THE WORKING DIRECTORY (CliConfig::default_config_paths), and a
+    discovered config REPLACES the built-in include/exclude patterns. Running from
+    this repo's root therefore silently applied the developer's own config to the
+    scanned tree — which is how a stray `*.test.ts` exclusion once removed 59
+    symbols from a corpus scorecard. Callers measuring anything reproducible must
+    pin cwd to the tree under test, so the result depends only on pinned inputs.
+    """
     cmd = [binary, "exec-tool", tool,
            "--params", json.dumps(params),
            "--path", fixture_abs]
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          cwd=cwd, env=tool_env())
     latency_ms = int((time.time() - t0) * 1000)
     stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-3:]) if proc.stderr else ""
     parsed = None
@@ -222,6 +274,34 @@ def load_known_failures():
     return {e["id"]: e for e in data}
 
 
+def run_corpus(args, binary):
+    """`--corpus <id>`: definition parity against the SCIP golden.
+
+    A thin delegation to corpus_score, deliberately sharing this module's
+    helpers rather than duplicating them — two runners that can disagree about
+    what "the same result" means is a bug factory. The fixture path above and
+    this one answer different questions: fixtures pin contracts and traps an
+    oracle cannot express, the corpus measures population-scale recall.
+    """
+    import corpus_score
+
+    corpus_dir = os.path.join(REPO_ROOT, "evals", "corpus", args.corpus)
+    golden = os.path.join(corpus_dir, "golden-symbols.json")
+    src = os.path.join(corpus_dir, "src")
+    if not os.path.exists(golden):
+        print("ERROR: golden not found: %s\n  generate it with "
+              "evals/corpus/scripts/scip_to_golden.py" % golden, file=sys.stderr)
+        return 2
+    if not os.path.isdir(src):
+        print("ERROR: corpus checkout not found: %s\n  fetch it with "
+              "./evals/corpus/fetch.sh %s" % (src, args.corpus), file=sys.stderr)
+        return 2
+    argv = ["--golden", golden, "--src", src, "--binary", binary]
+    if args.json_out:
+        argv += ["--json-out", args.json_out]
+    return corpus_score.main(argv)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Loregrep Layer 1 retrieval runner")
     ap.add_argument("--binary", default=os.environ.get("LOREGREP_BIN",
@@ -231,6 +311,12 @@ def main():
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--no-latency", action="store_true",
                     help="(accepted for compatibility; the slice does a single cold pass)")
+    ap.add_argument("--corpus", default=None, metavar="REPO_ID",
+                    help="score population-scale DEFINITION PARITY against the SCIP "
+                         "golden for a pinned corpus repo (see EVAL_PLAN.md 4b) "
+                         "instead of running the hand-written fixture cases. "
+                         "Requires evals/corpus/<id>/golden-symbols.json and a "
+                         "checkout at evals/corpus/<id>/src (./evals/corpus/fetch.sh).")
     args = ap.parse_args()
 
     binary = os.path.abspath(args.binary)
@@ -238,6 +324,9 @@ def main():
         print("ERROR: binary not found: %s\n  build it with: cargo build --release" % binary,
               file=sys.stderr)
         return 2
+
+    if args.corpus:
+        return run_corpus(args, binary)
 
     fixture_abs = os.path.abspath(os.path.join(FIXTURES_DIR, args.fixture))
     gold_path = os.path.join(fixture_abs, "gold", "cases.json")
@@ -257,10 +346,11 @@ def main():
     run_id = "%s-%s" % (time.strftime("%Y%m%dT%H%M%S"),
                         "".join(random.choices(string.ascii_lowercase + string.digits, k=6)))
 
-    # Cold pass: clear the per-fixture index cache so the first call rescans.
-    cache_dir = os.path.join(fixture_abs, ".loregrep")
-    if os.path.isdir(cache_dir):
-        subprocess.run(["rm", "-rf", cache_dir])
+    # Cold pass: every invocation below points at `isolated_cache_root()`, a
+    # temp directory created empty for this process, so the first call rescans
+    # by construction. (This used to `rm -rf <fixture>/.loregrep`; see
+    # `isolated_cache_root` for why that is the wrong shape.)
+    isolated_cache_root()
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out_path = args.json_out or os.path.join(RESULTS_DIR, "%s.jsonl" % run_id)
