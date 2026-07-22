@@ -15,6 +15,9 @@ pub enum TypeKind {
     AbstractClass,
     Interface,
     TypeAlias,
+    /// A TypeScript `namespace X {}` (or the legacy `module X {}`) — a named
+    /// container of declarations rather than a type.
+    Namespace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
