@@ -432,11 +432,17 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
         source: &str,
         file_path: &str,
     ) -> Result<Vec<FunctionSignature>> {
-        // Three shapes of "function": top-level declarations, arrow functions
-        // bound to a `const`/`let`/`var`, and class methods.
+        // The shapes of "function": top-level declarations (including
+        // generators), function expressions and arrows bound to a
+        // `const`/`let`/`var`, and class methods. A bound function expression is
+        // named by its BINDING (`const f = function inner() {}` is `f`), which is
+        // what callers actually write.
         let query_str = r#"
             (function_declaration name: (identifier) @name) @function
+            (generator_function_declaration name: (identifier) @name) @function
             (variable_declarator name: (identifier) @name value: (arrow_function) @arrow) @arrow_decl
+            (variable_declarator name: (identifier) @name value: (function_expression) @arrow) @arrow_decl
+            (variable_declarator name: (identifier) @name value: (generator_function) @arrow) @arrow_decl
             (method_definition name: (property_identifier) @name) @method
         "#;
 
@@ -565,6 +571,9 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             (abstract_class_declaration name: (type_identifier) @name) @class
             (interface_declaration name: (type_identifier) @name) @interface
             (type_alias_declaration name: (type_identifier) @name) @type_alias
+            (enum_declaration name: (identifier) @name) @enum
+            (internal_module name: (identifier) @name) @namespace
+            (module name: (identifier) @name) @namespace
         "#;
 
         let query =
@@ -597,6 +606,14 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                         node = Some(capture.node);
                         kind = "type_alias";
                     }
+                    "enum" => {
+                        node = Some(capture.node);
+                        kind = "enum";
+                    }
+                    "namespace" => {
+                        node = Some(capture.node);
+                        kind = "namespace";
+                    }
                     _ => {}
                 }
             }
@@ -622,6 +639,9 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                 "abstract_class_declaration" => TypeKind::AbstractClass,
                 "interface_declaration" => TypeKind::Interface,
                 "type_alias_declaration" => TypeKind::TypeAlias,
+                "enum_declaration" => TypeKind::Enum,
+                // `namespace X {}` and the legacy `module X {}`.
+                "internal_module" | "module" => TypeKind::Namespace,
                 _ => TypeKind::Struct,
             };
             // `extends`/`implements` (class) and `extends` (interface) supertypes.
@@ -661,6 +681,28 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                                     sig.fields.push(
                                         StructField::new(field_name, field_type)
                                             .with_visibility(is_public),
+                                    );
+                                }
+                            }
+                            // Enum member: `Red` or `Green = 2`. The members are
+                            // the useful content of an enum, so record them as
+                            // fields (with the assigned value as the "type" when
+                            // there is one).
+                            "property_identifier" => {
+                                sig.fields.push(
+                                    StructField::new(self.text(&member, source), String::new())
+                                        .with_visibility(true),
+                                );
+                            }
+                            "enum_assignment" => {
+                                if let Some(fname) = member.child_by_field_name("name") {
+                                    let value = member
+                                        .child_by_field_name("value")
+                                        .map(|v| self.text(&v, source))
+                                        .unwrap_or_default();
+                                    sig.fields.push(
+                                        StructField::new(self.text(&fname, source), value)
+                                            .with_visibility(true),
                                     );
                                 }
                             }
@@ -1227,6 +1269,115 @@ export class Service {
         assert_eq!(imports[0].module_path, "fs");
         assert!(imports[0].is_external);
         assert!(imports[0].imported_items.contains(&"readFile".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_enum_is_extracted_with_members() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "export enum Color { Red, Green = 2 }";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let structs = &analysis.tree_node.structs;
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].name, "Color");
+        assert_eq!(structs[0].kind, TypeKind::Enum);
+        assert!(structs[0].is_public);
+        let members: Vec<&str> = structs[0].fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(members, vec!["Red", "Green"]);
+        // An explicitly assigned member carries its value.
+        assert_eq!(structs[0].fields[1].field_type, "2");
+    }
+
+    #[tokio::test]
+    async fn test_const_and_ambient_enums_are_extracted() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "const enum Fast { A }\ndeclare enum Ambient { X }";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let names: Vec<&str> = analysis
+            .tree_node
+            .structs
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(names.contains(&"Fast"), "got {names:?}");
+        assert!(names.contains(&"Ambient"), "got {names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_namespace_and_legacy_module_are_extracted() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "export namespace NS { export const x = 1; }\nmodule Legacy {}";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let by_name: Vec<(&str, TypeKind)> = analysis
+            .tree_node
+            .structs
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
+        assert!(
+            by_name.contains(&("NS", TypeKind::Namespace)),
+            "got {by_name:?}"
+        );
+        assert!(
+            by_name.contains(&("Legacy", TypeKind::Namespace)),
+            "got {by_name:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generator_function_is_extracted() {
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "export function* gen() { yield 1; }\nexport async function* agen() {}";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let names: Vec<&str> = analysis
+            .tree_node
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(names.contains(&"gen"), "got {names:?}");
+        assert!(names.contains(&"agen"), "got {names:?}");
+        let agen = analysis
+            .tree_node
+            .functions
+            .iter()
+            .find(|f| f.name == "agen")
+            .unwrap();
+        assert!(agen.is_async);
+    }
+
+    #[tokio::test]
+    async fn test_bound_function_expression_is_named_by_its_binding() {
+        // `const f = function inner() {}` is called as `f`, so that is the name
+        // that matters; the inner name only shows up in stack traces.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code =
+            "export const fnExpr = function inner() { return 4; };\nconst g = function* () {};";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let names: Vec<&str> = analysis
+            .tree_node
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(names.contains(&"fnExpr"), "got {names:?}");
+        assert!(names.contains(&"g"), "got {names:?}");
+        assert!(!names.contains(&"inner"), "got {names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_function_expression_inside_a_body_is_not_top_level() {
+        // Same rule as arrows: a function expression bound inside another
+        // function is a local, not a module-level function.
+        let analyzer = TypeScriptAnalyzer::new().unwrap();
+        let code = "function outer() { const helper = function () {}; return helper; }";
+        let analysis = analyzer.analyze_file(code, "a.ts").await.unwrap();
+        let names: Vec<&str> = analysis
+            .tree_node
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["outer"]);
     }
 
     #[tokio::test]
