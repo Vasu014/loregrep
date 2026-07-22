@@ -12,13 +12,145 @@ use crate::types::{AnalysisError, TreeNode};
 // Create our own Result type alias for this module
 type Result<T> = std::result::Result<T, AnalysisError>;
 
+/// On-disk cache format version.
+///
+/// Bump this whenever the meaning or shape of anything in the cache changes.
+/// There is deliberately NO migration path: the cache is derived data that
+/// regenerates in seconds, and migration code for a derived artifact is a bug
+/// farm. Every cache written by a different format version is rejected outright
+/// and rebuilt.
+///
+/// * v1 — original header (`version`, `created_at`, `file_count`,
+///   `content_hash`, `compression`). Validated the crate version only; the
+///   `file_count` and per-file `content_hash` fields were written and never
+///   read, and nothing recorded the configuration the index was built with.
+/// * v2 — adds `config_fingerprint` (so a cache built with different
+///   include/exclude patterns, size/depth limits or analyzer set is rejected
+///   rather than silently served) and index-coverage fields (so a truncated
+///   index is never mistaken for a complete one). `file_count` is now
+///   validated against the payload.
+pub const CACHE_FORMAT_VERSION: u32 = 2;
+
+/// How much of the repository an index actually covers.
+///
+/// An index built with a `max_files` limit can stop short of the discovered
+/// file set. That fact must travel with the index — through the cache, and out
+/// to the tool layer — because a silently truncated index answers "not found"
+/// with the same confidence as a complete one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexCoverage {
+    /// Files actually analyzed and stored in the index.
+    pub files_indexed: usize,
+    /// Files discovery found before the `max_files` limit was applied.
+    pub files_discovered: usize,
+    /// True when `files_indexed < files_discovered` because of a limit.
+    pub truncated: bool,
+}
+
+impl Default for IndexCoverage {
+    fn default() -> Self {
+        Self::complete(0)
+    }
+}
+
+impl IndexCoverage {
+    /// Coverage for an index that contains everything discovery found.
+    pub fn complete(files: usize) -> Self {
+        Self {
+            files_indexed: files,
+            files_discovered: files,
+            truncated: false,
+        }
+    }
+
+    /// Coverage for an index that was cut short by a limit.
+    pub fn partial(files_indexed: usize, files_discovered: usize) -> Self {
+        Self {
+            files_indexed,
+            files_discovered,
+            truncated: files_indexed < files_discovered,
+        }
+    }
+
+    /// A human-readable coverage note, or `None` when the index is complete.
+    ///
+    /// This is the string handed to agents so an empty result set from a
+    /// truncated index cannot be read as "this symbol does not exist".
+    pub fn note(&self) -> Option<String> {
+        if !self.truncated {
+            return None;
+        }
+        Some(format!(
+            "index covers {} of {} files (truncated by the max_files limit); \
+             absence of a symbol does NOT prove it is missing from the repository",
+            group_digits(self.files_indexed),
+            group_digits(self.files_discovered)
+        ))
+    }
+}
+
+/// Format an integer with thousands separators ("10050" -> "10,050").
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A cheaply cloneable, shared handle to the current [`IndexCoverage`].
+///
+/// The coverage of the live index is written by the scan/cache-load path and
+/// read by whatever renders tool responses. It is a separate handle (rather
+/// than a field on `RepoMap`) so both sides can hold it without either owning
+/// the other.
+#[derive(Debug, Clone, Default)]
+pub struct CoverageHandle {
+    inner: std::sync::Arc<std::sync::Mutex<IndexCoverage>>,
+}
+
+impl CoverageHandle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current coverage. Returns the default (complete, empty) coverage if the
+    /// lock is poisoned — coverage reporting must never be the thing that fails
+    /// a query.
+    pub fn get(&self) -> IndexCoverage {
+        self.inner
+            .lock()
+            .map(|c| *c)
+            .unwrap_or_else(|_| IndexCoverage::default())
+    }
+
+    pub fn set(&self, coverage: IndexCoverage) {
+        if let Ok(mut slot) = self.inner.lock() {
+            *slot = coverage;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheHeader {
-    pub version: String,
+    /// See [`CACHE_FORMAT_VERSION`]. Any other value means "throw it away".
+    pub format_version: u32,
+    /// Crate version that produced the cache.
+    pub crate_version: String,
     pub created_at: SystemTime,
     pub file_count: usize,
     pub content_hash: String,
     pub compression: CompressionType,
+    /// Fingerprint of the scan configuration and analyzer set that produced the
+    /// index. A cache built with a `*.rs`-only include list must not be served
+    /// to a run whose configuration also indexes Python.
+    pub config_fingerprint: String,
+    /// Coverage of the indexed set (see [`IndexCoverage`]).
+    pub coverage: IndexCoverage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,18 +170,34 @@ impl SerializedRepoMap {
     pub fn new(repo_map: &RepoMap, compression: CompressionType) -> Self {
         let files = repo_map.get_all_files().to_vec();
         let content_hash = Self::calculate_content_hash(&files);
+        let coverage = IndexCoverage::complete(files.len());
 
         Self {
             header: CacheHeader {
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                format_version: CACHE_FORMAT_VERSION,
+                crate_version: env!("CARGO_PKG_VERSION").to_string(),
                 created_at: SystemTime::now(),
                 file_count: files.len(),
                 content_hash,
                 compression,
+                config_fingerprint: String::new(),
+                coverage,
             },
             metadata: repo_map.get_metadata().clone(),
             files,
         }
+    }
+
+    /// Stamp the configuration fingerprint the index was built with.
+    pub fn with_config_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.header.config_fingerprint = fingerprint.into();
+        self
+    }
+
+    /// Stamp the coverage of the index being written.
+    pub fn with_coverage(mut self, coverage: IndexCoverage) -> Self {
+        self.header.coverage = coverage;
+        self
     }
 
     fn calculate_content_hash(files: &[TreeNode]) -> String {
@@ -70,10 +218,23 @@ impl SerializedRepoMap {
     }
 }
 
+/// A cache that was read back from disk, together with everything the header
+/// says about it.
+pub struct LoadedIndex {
+    pub repo_map: RepoMap,
+    pub coverage: IndexCoverage,
+    pub header: CacheHeader,
+}
+
 pub struct PersistenceManager {
     cache_dir: PathBuf,
     compression: CompressionType,
     max_cache_files: usize,
+    /// Fingerprint of the *current* configuration. Stamped into caches on save
+    /// and required to match on load.
+    config_fingerprint: String,
+    /// Coverage stamped into caches on save.
+    coverage: IndexCoverage,
 }
 
 impl PersistenceManager {
@@ -86,6 +247,8 @@ impl PersistenceManager {
             cache_dir,
             compression: CompressionType::Gzip,
             max_cache_files: 10, // Keep last 10 cache files
+            config_fingerprint: String::new(),
+            coverage: IndexCoverage::default(),
         })
     }
 
@@ -99,9 +262,23 @@ impl PersistenceManager {
         self
     }
 
+    /// Set the configuration fingerprint used to stamp and validate caches.
+    pub fn with_config_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.config_fingerprint = fingerprint.into();
+        self
+    }
+
+    /// Set the index coverage stamped into caches written by this manager.
+    pub fn with_coverage(mut self, coverage: IndexCoverage) -> Self {
+        self.coverage = coverage;
+        self
+    }
+
     /// Save RepoMap to disk with optional compression
     pub fn save_to_disk(&self, repo_map: &RepoMap, name: &str) -> Result<PathBuf> {
-        let serialized = SerializedRepoMap::new(repo_map, self.compression.clone());
+        let serialized = SerializedRepoMap::new(repo_map, self.compression.clone())
+            .with_config_fingerprint(self.config_fingerprint.clone())
+            .with_coverage(self.coverage);
         let filename = format!("{}.cache", name);
         let file_path = self.cache_dir.join(&filename);
 
@@ -120,8 +297,20 @@ impl PersistenceManager {
         Ok(file_path)
     }
 
-    /// Load RepoMap from disk
+    /// Load RepoMap from disk, rejecting any cache this build must not trust.
     pub fn load_from_disk(&self, name: &str) -> Result<RepoMap> {
+        Ok(self.load_index(name)?.repo_map)
+    }
+
+    /// Load a cache and everything its header asserts about it.
+    ///
+    /// Rejects, in order: a missing file, a foreign cache *format* (see
+    /// [`CACHE_FORMAT_VERSION`] — there is no migration), a cache written by a
+    /// different crate version, a cache built with a different configuration or
+    /// analyzer set, and a cache whose payload disagrees with its own
+    /// `file_count`. Every one of these returns an error so the caller rescans
+    /// rather than serving results it cannot vouch for.
+    pub fn load_index(&self, name: &str) -> Result<LoadedIndex> {
         let filename = format!("{}.cache", name);
         let file_path = self.cache_dir.join(&filename);
 
@@ -132,14 +321,46 @@ impl PersistenceManager {
             )));
         }
 
-        let serialized = self.load_serialized(&file_path)?;
+        // A cache written by an older format fails to deserialize (its header is
+        // shaped differently); report that as the format mismatch it is.
+        let serialized = self.load_serialized(&file_path).map_err(|e| {
+            AnalysisError::Other(format!(
+                "Cache is not readable as format v{}, regeneration required ({})",
+                CACHE_FORMAT_VERSION, e
+            ))
+        })?;
 
-        // Validate cache version
-        if serialized.header.version != env!("CARGO_PKG_VERSION") {
+        if serialized.header.format_version != CACHE_FORMAT_VERSION {
+            return Err(AnalysisError::Other(format!(
+                "Cache format version mismatch (found v{}, expected v{}), regeneration required",
+                serialized.header.format_version, CACHE_FORMAT_VERSION
+            )));
+        }
+
+        if serialized.header.crate_version != env!("CARGO_PKG_VERSION") {
             return Err(AnalysisError::Other(
                 "Cache version mismatch, regeneration required".to_string(),
             ));
         }
+
+        if serialized.header.config_fingerprint != self.config_fingerprint {
+            return Err(AnalysisError::Other(
+                "Cache was built with a different scan configuration or analyzer set, \
+                 regeneration required"
+                    .to_string(),
+            ));
+        }
+
+        if serialized.header.file_count != serialized.files.len() {
+            return Err(AnalysisError::Other(format!(
+                "Cache is inconsistent: header claims {} files, payload has {}",
+                serialized.header.file_count,
+                serialized.files.len()
+            )));
+        }
+
+        let header = serialized.header.clone();
+        let coverage = header.coverage;
 
         // Reconstruct RepoMap
         let mut repo_map = RepoMap::new();
@@ -147,31 +368,11 @@ impl PersistenceManager {
             repo_map.add_file(file)?;
         }
 
-        Ok(repo_map)
-    }
-
-    /// Check if cache is valid for a given repository
-    pub fn is_cache_valid(&self, repo_path: &Path) -> bool {
-        let filename = format!("{}.cache", repo_path.file_name().unwrap().to_string_lossy());
-        let cache_path = self.cache_dir.join(&filename);
-
-        if !cache_path.exists() {
-            return false;
-        }
-
-        // Check cache modification time vs repository modification time
-        if let Ok(cache_metadata) = std::fs::metadata(&cache_path) {
-            if let Ok(cache_modified) = cache_metadata.modified() {
-                // Simple heuristic: check if cache is newer than repo directory
-                if let Ok(repo_metadata) = std::fs::metadata(repo_path) {
-                    if let Ok(repo_modified) = repo_metadata.modified() {
-                        return cache_modified > repo_modified;
-                    }
-                }
-            }
-        }
-
-        false
+        Ok(LoadedIndex {
+            repo_map,
+            coverage,
+            header,
+        })
     }
 
     /// Get incremental update information
@@ -418,11 +619,18 @@ impl CacheFileInfo {
     }
 }
 
-// Extension trait for RepoMap to add persistence capabilities
+// Extension trait for RepoMap to add persistence capabilities.
+//
+// There is deliberately no `is_cache_valid` here. The previous one returned a
+// hardcoded `false`, and `PersistenceManager`'s returned whether the cache file
+// was newer than the repository *directory* — a directory's mtime does not
+// change when a file's contents are edited, so it answered "valid" for a stale
+// cache, and it panicked outright on a path with no file name (`--path .`).
+// Validity now lives in one place: `PersistenceManager::load_index` (identity of
+// the cache) plus the caller's disk comparison (contents of the cache).
 pub trait PersistentRepoMap {
     fn save_to_disk(&self, path: &Path) -> Result<()>;
     fn load_from_disk(path: &Path) -> Result<RepoMap>;
-    fn is_cache_valid(&self, repo_path: &Path) -> bool;
 }
 
 impl PersistentRepoMap for RepoMap {
@@ -470,6 +678,13 @@ impl PersistentRepoMap for RepoMap {
             }
         };
 
+        if serialized.header.format_version != CACHE_FORMAT_VERSION {
+            return Err(AnalysisError::Other(format!(
+                "Cache format version mismatch (found v{}, expected v{}), regeneration required",
+                serialized.header.format_version, CACHE_FORMAT_VERSION
+            )));
+        }
+
         // Reconstruct RepoMap
         let mut repo_map = RepoMap::new();
         for file in serialized.files {
@@ -477,12 +692,6 @@ impl PersistentRepoMap for RepoMap {
         }
 
         Ok(repo_map)
-    }
-
-    fn is_cache_valid(&self, _repo_path: &Path) -> bool {
-        // This implementation would need access to the original cache file path
-        // For now, return false to force regeneration
-        false
     }
 }
 
@@ -635,31 +844,175 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Write `serialized` as an uncompressed cache named `<name>.cache`.
+    fn write_raw_cache(dir: &Path, name: &str, serialized: &SerializedRepoMap) {
+        let cache_path = dir.join(format!("{}.cache", name));
+        let file = File::create(&cache_path).unwrap();
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, serialized).unwrap();
+    }
+
     #[test]
     fn test_version_mismatch() {
         let temp_dir = TempDir::new().unwrap();
         let manager = PersistenceManager::new(temp_dir.path()).unwrap();
 
-        // Create a cache with wrong version
+        // Create a cache written by another crate version.
         let mut serialized = SerializedRepoMap::new(&create_test_repo_map(), CompressionType::None);
-        serialized.header.version = "0.0.0".to_string(); // Wrong version
+        serialized.header.crate_version = "0.0.0".to_string();
+        write_raw_cache(temp_dir.path(), "wrong_version", &serialized);
 
-        let cache_path = temp_dir.path().join("wrong_version.cache");
-        let file = File::create(&cache_path).unwrap();
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &serialized).unwrap();
+        // The bytes are readable...
+        assert!(
+            manager
+                .load_serialized(&temp_dir.path().join("wrong_version.cache"))
+                .is_ok()
+        );
 
-        // Try to load - should fail due to version mismatch
-        let result = manager.load_serialized(&cache_path);
-        assert!(result.is_ok()); // Loading works
+        // ...but the validated load path must refuse it.
+        let err = manager.load_from_disk("wrong_version").unwrap_err();
+        assert!(
+            err.to_string().contains("version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
 
-        // But reconstruction should fail
-        let loaded = result.unwrap();
-        let mut repo_map = RepoMap::new();
-        for file in loaded.files {
-            repo_map.add_file(file).unwrap();
-        }
-        // Version check happens in load_from_disk, not load_serialized
+    #[test]
+    fn test_foreign_cache_format_version_is_rejected() {
+        // Regression: the cache format is versioned and there is NO migration.
+        // A cache stamped with any other format version must be rejected, not
+        // interpreted.
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PersistenceManager::new(temp_dir.path()).unwrap();
+
+        let mut serialized = SerializedRepoMap::new(&create_test_repo_map(), CompressionType::None);
+        serialized.header.format_version = CACHE_FORMAT_VERSION - 1;
+        write_raw_cache(temp_dir.path(), "old_format", &serialized);
+
+        let err = manager.load_from_disk("old_format").unwrap_err();
+        assert!(
+            err.to_string().contains("format version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_prior_format_cache_payload_is_rejected() {
+        // A v1 cache file (header without format_version/config_fingerprint/
+        // coverage) must not load at all. This is the "treat ALL prior caches as
+        // invalid" contract, exercised against the actual v1 JSON shape.
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PersistenceManager::new(temp_dir.path()).unwrap();
+
+        let v1 = serde_json::json!({
+            "header": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+                "file_count": 0,
+                "content_hash": "deadbeef",
+                "compression": "None",
+            },
+            "metadata": RepoMap::new().get_metadata(),
+            "files": [],
+        });
+        std::fs::write(
+            temp_dir.path().join("v1.cache"),
+            serde_json::to_vec_pretty(&v1).unwrap(),
+        )
+        .unwrap();
+
+        let err = manager.load_from_disk("v1").unwrap_err();
+        assert!(
+            err.to_string().contains("format v"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_fingerprint_mismatch_is_rejected() {
+        // K4 regression: a cache built under one configuration (e.g. a
+        // `*.rs`-only include list) must NOT be served to a run configured
+        // differently (e.g. one that also indexes Python) — that is how a
+        // Python file stays silently absent from the index.
+        let temp_dir = TempDir::new().unwrap();
+        let repo_map = create_test_repo_map();
+
+        let rust_only = PersistenceManager::new(temp_dir.path())
+            .unwrap()
+            .with_config_fingerprint("include=[*.rs]");
+        rust_only.save_to_disk(&repo_map, "cfg").unwrap();
+
+        // Same configuration: the cache loads.
+        assert!(rust_only.load_from_disk("cfg").is_ok());
+
+        // Different configuration: rejected.
+        let rust_and_python = PersistenceManager::new(temp_dir.path())
+            .unwrap()
+            .with_config_fingerprint("include=[*.rs,*.py]");
+        let err = rust_and_python.load_from_disk("cfg").unwrap_err();
+        assert!(
+            err.to_string().contains("different scan configuration"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_header_file_count_is_validated() {
+        // `file_count` used to be written and never read. It is now checked
+        // against the payload it describes.
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PersistenceManager::new(temp_dir.path()).unwrap();
+
+        let mut serialized = SerializedRepoMap::new(&create_test_repo_map(), CompressionType::None);
+        serialized.header.file_count = 99;
+        write_raw_cache(temp_dir.path(), "bad_count", &serialized);
+
+        let err = manager.load_from_disk("bad_count").unwrap_err();
+        assert!(
+            err.to_string().contains("inconsistent"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_coverage_round_trips_through_the_cache() {
+        // K6: truncation is a property of the index and must survive
+        // persistence, so a cache-backed run reports it just like a scan does.
+        let temp_dir = TempDir::new().unwrap();
+        let manager = PersistenceManager::new(temp_dir.path())
+            .unwrap()
+            .with_coverage(IndexCoverage::partial(10_000, 10_050));
+
+        manager
+            .save_to_disk(&create_test_repo_map(), "truncated")
+            .unwrap();
+
+        let loaded = manager.load_index("truncated").unwrap();
+        assert!(loaded.coverage.truncated);
+        assert_eq!(loaded.coverage.files_indexed, 10_000);
+        assert_eq!(loaded.coverage.files_discovered, 10_050);
+        assert_eq!(
+            loaded.coverage.note().unwrap(),
+            "index covers 10,000 of 10,050 files (truncated by the max_files limit); \
+             absence of a symbol does NOT prove it is missing from the repository"
+        );
+
+        // A complete index reports no note at all.
+        assert!(IndexCoverage::complete(12).note().is_none());
+    }
+
+    #[test]
+    fn test_coverage_handle_shares_state() {
+        let handle = CoverageHandle::new();
+        assert!(!handle.get().truncated);
+
+        let clone = handle.clone();
+        clone.set(IndexCoverage::partial(5, 9));
+
+        let seen = handle.get();
+        assert!(seen.truncated);
+        assert_eq!(seen.files_indexed, 5);
+        assert_eq!(seen.files_discovered, 9);
     }
 
     #[test]
@@ -845,7 +1198,8 @@ mod tests {
         let repo_map = create_test_repo_map();
         let serialized = SerializedRepoMap::new(&repo_map, CompressionType::Gzip);
 
-        assert_eq!(serialized.header.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(serialized.header.crate_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(serialized.header.format_version, CACHE_FORMAT_VERSION);
         assert_eq!(serialized.header.file_count, 3);
         assert_eq!(serialized.files.len(), 3);
         assert!(!serialized.header.content_hash.is_empty());

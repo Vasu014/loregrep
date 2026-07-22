@@ -4,7 +4,7 @@ use ignore::{Walk, WalkBuilder};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::analyzers::registry::RegistryHandle;
@@ -362,56 +362,14 @@ impl RepositoryScanner {
         Ok((count, languages))
     }
 
-    /// Return the most recent modification time among the files this scanner
-    /// would index under `root_path`, or `None` when there are no such files.
-    ///
-    /// This deliberately reuses the SAME gitignore-aware walker and the SAME
-    /// include/exclude filters and language detection as [`scan`], so a
-    /// freshness check built on it considers exactly the files that get
-    /// indexed. A file living in an excluded directory (e.g. `target/`,
-    /// `dist/`, `.venv/`) or matched by `.gitignore` therefore does not affect
-    /// the result — otherwise a regenerated artifact there would make a cache
-    /// look perpetually stale and defeat it.
-    pub fn newest_modified_time<P: AsRef<Path>>(&self, root_path: P) -> Option<SystemTime> {
-        let root_path = root_path.as_ref();
-        let walker = self.build_walker(root_path).ok()?;
-
-        let mut newest: Option<SystemTime> = None;
-        for result in walker {
-            let entry = match result {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-
-            // Files only (mirror the `scan` loop, which skips directories).
-            if entry.file_type().map_or(true, |ft| !ft.is_file()) {
-                continue;
-            }
-
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
-
-            // Apply the exact same include/exclude + language gates as `scan`,
-            // so excluded/gitignored/unknown files never influence freshness.
-            if !self.filters.should_include(path, metadata.len()) {
-                continue;
-            }
-            if self.resolve_language(path) == "unknown" {
-                continue;
-            }
-
-            if let Ok(modified) = metadata.modified() {
-                if newest.is_none_or(|n| modified > n) {
-                    newest = Some(modified);
-                }
-            }
-        }
-
-        newest
-    }
+    // `newest_modified_time` used to live here, as the basis of the cache
+    // freshness check. It was removed with that check: max(mtime) answers "was
+    // anything edited", which is not the same question as "does the index still
+    // describe this tree". A file added with a preserved older mtime is never
+    // newer than the cache, and a deleted file makes nothing newer than it, so
+    // both were invisible forever. Freshness is now decided by comparing the
+    // discovered path set and per-file content hashes against the index
+    // (`LoreGrep::is_cache_fresh`), which uses `scan` directly.
 
     /// Check if a path should be analyzed based on current filters
     pub fn should_analyze(&self, path: &Path) -> Result<bool> {

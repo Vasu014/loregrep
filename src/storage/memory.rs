@@ -173,6 +173,23 @@ impl Default for RepoMapMetadata {
     }
 }
 
+/// The outcome of resolving a caller-supplied file path against the index.
+///
+/// Exists because `Option<usize>` collapsed two different answers into `None`:
+/// "no such file" and "several files match that suffix". A caller that renders
+/// both as "not found" tells the agent its file is absent when the index in fact
+/// holds ten of them, and gives it nothing to disambiguate with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileLookup {
+    /// Exactly one file matched.
+    Found(usize),
+    /// Several files matched the suffix; indices of every candidate, in index
+    /// order. Never guess between them.
+    Ambiguous(Vec<usize>),
+    /// Nothing in the index matched.
+    NotFound,
+}
+
 /// Enhanced RepoMap with fast lookups and comprehensive indexing
 #[derive(Debug)]
 pub struct RepoMap {
@@ -398,23 +415,46 @@ impl RepoMap {
     /// path: an exact match on the stored (absolute) path first, else a unique
     /// whole-segment suffix match (so a repo-relative `src/config.rs` finds
     /// `/abs/.../src/config.rs`). Ambiguous suffix → `None` (never guess).
+    ///
+    /// Callers that render an error should prefer [`RepoMap::lookup_file_index`]:
+    /// this signature cannot distinguish "absent" from "matched several files",
+    /// and reporting the second as the first teaches an agent that a file it can
+    /// see in the index does not exist.
     pub fn resolve_file_index(&self, file_path: &str) -> Option<usize> {
+        match self.lookup_file_index(file_path) {
+            FileLookup::Found(idx) => Some(idx),
+            _ => None,
+        }
+    }
+
+    /// Resolve a file argument to an index, distinguishing the two ways it can
+    /// fail. `mod.rs` in a repo with ten of them is not missing — it is
+    /// ambiguous, and the caller can only say so if it is told so.
+    pub fn lookup_file_index(&self, file_path: &str) -> FileLookup {
         if let Some(idx) = self.file_index_of(file_path) {
-            return Some(idx);
+            return FileLookup::Found(idx);
         }
         let norm = crate::storage::graph::normalize_path(file_path);
         let needle = format!("/{norm}");
-        let mut hit = None;
+        let mut hits: Vec<usize> = Vec::new();
         for (i, f) in self.files.iter().enumerate() {
             let np = crate::storage::graph::normalize_path(&f.file_path);
             if np == norm || np.ends_with(&needle) {
-                if hit.is_some() {
-                    return None;
-                }
-                hit = Some(i);
+                hits.push(i);
             }
         }
-        hit
+        match hits.len() {
+            0 => FileLookup::NotFound,
+            1 => FileLookup::Found(hits[0]),
+            _ => FileLookup::Ambiguous(hits),
+        }
+    }
+
+    /// The longest path prefix common to every indexed file. Used only as a
+    /// fallback anchor when no scan root was recorded (a cache loaded by an old
+    /// writer, say); `scan_root()` is authoritative when present.
+    pub fn common_root_path(&self) -> String {
+        self.find_common_root_path()
     }
 
     /// Get files by language
@@ -1063,14 +1103,22 @@ impl RepoMap {
         // First, ensure all directory paths exist
         let mut all_dir_paths: HashSet<String> = HashSet::new();
 
-        // Collect all directory paths from files
+        // Collect all directory paths from files.
+        //
+        // The walk stops AT the root instead of merely skipping it. Walking past
+        // it produced a directory node for every terminal ancestor — `""` for a
+        // relative root, `"/"` for an absolute one — which surfaced as a phantom
+        // child `{"name": "", "path": ""}` in every tree. Feeding that empty path
+        // back to a tool that takes a path prefix then matched nothing and
+        // reported success, so the tree taught agents a path that silently lies.
         for file_node in &file_nodes {
             let mut current_path = std::path::Path::new(&file_node.path);
             while let Some(parent) = current_path.parent() {
                 let parent_str = parent.to_string_lossy().to_string();
-                if parent_str != root_path {
-                    all_dir_paths.insert(parent_str);
+                if parent_str == root_path || parent_str.is_empty() || parent_str == "/" {
+                    break;
                 }
+                all_dir_paths.insert(parent_str);
                 current_path = parent;
             }
         }
@@ -2405,5 +2453,93 @@ mod tests {
 
         // Test non-matches
         assert!(!repo_map.matches_pattern("other_function", "test"));
+    }
+
+    fn repo_map_with_paths(paths: &[&str]) -> RepoMap {
+        let mut map = RepoMap::new();
+        for path in paths {
+            let mut node = TreeNode::new(path.to_string(), "rust".to_string());
+            node.content_hash = format!("h_{path}");
+            map.add_file(node).unwrap();
+        }
+        map
+    }
+
+    // K8: a suffix that matches several files is AMBIGUOUS, not absent. The old
+    // `Option` signature could not say so, and callers rendered both as
+    // "file not found in the index: mod.rs" for a file the index holds twice.
+    #[test]
+    fn lookup_file_index_distinguishes_ambiguous_from_missing() {
+        let map = repo_map_with_paths(&["/repo/a/mod.rs", "/repo/b/mod.rs", "/repo/only.rs"]);
+
+        match map.lookup_file_index("mod.rs") {
+            FileLookup::Ambiguous(indices) => assert_eq!(indices.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        assert_eq!(map.lookup_file_index("nope.rs"), FileLookup::NotFound);
+        // A suffix unique enough to name one file still resolves.
+        assert!(matches!(
+            map.lookup_file_index("a/mod.rs"),
+            FileLookup::Found(_)
+        ));
+        assert!(matches!(
+            map.lookup_file_index("/repo/only.rs"),
+            FileLookup::Found(_)
+        ));
+    }
+
+    // The Option-returning wrapper keeps its old contract for callers that only
+    // want "did it resolve": ambiguity is still None, never a guess.
+    #[test]
+    fn resolve_file_index_still_refuses_to_guess() {
+        let map = repo_map_with_paths(&["/repo/a/mod.rs", "/repo/b/mod.rs"]);
+        assert_eq!(map.resolve_file_index("mod.rs"), None);
+        assert!(map.resolve_file_index("a/mod.rs").is_some());
+    }
+
+    fn collect_dir_paths(node: &RepositoryTreeNode, out: &mut Vec<(String, String)>) {
+        if let RepositoryTreeNode::Directory(dir) = node {
+            out.push((dir.name.clone(), dir.path.clone()));
+            for child in &dir.children {
+                collect_dir_paths(child, out);
+            }
+        }
+    }
+
+    // F8: the parent walk used to insert every ancestor of every file, including
+    // the terminal `""` (relative roots) and `"/"` (absolute roots), producing a
+    // phantom child `{"name": "", "path": ""}` in every tree. That empty path is
+    // not a valid input to any sibling tool, so the tree emitted a path that
+    // silently lies.
+    #[test]
+    fn repository_tree_has_no_phantom_empty_directory_node() {
+        for paths in [
+            // Relative roots yielded the `""` phantom...
+            vec!["./src/a.rs", "./src/deep/b.rs", "./tests/c.rs"],
+            // ...absolute ones the `"/"` phantom.
+            vec!["/repo/src/a.rs", "/repo/src/deep/b.rs", "/repo/tests/c.rs"],
+        ] {
+            let mut map = repo_map_with_paths(&paths);
+            map.build_repository_tree().unwrap();
+            let tree = map.get_repository_tree().unwrap();
+
+            let mut dirs = Vec::new();
+            collect_dir_paths(&RepositoryTreeNode::Directory(tree.root.clone()), &mut dirs);
+            assert!(
+                !dirs.is_empty(),
+                "expected directory nodes for {paths:?}, got none"
+            );
+            for (name, path) in &dirs {
+                assert!(
+                    !path.is_empty() && path != "/",
+                    "phantom directory node {name:?} -> {path:?} in tree for {paths:?}: {dirs:?}"
+                );
+            }
+            // The real directories are still there.
+            assert!(
+                dirs.iter().any(|(n, _)| n == "deep"),
+                "lost a real directory: {dirs:?}"
+            );
+        }
     }
 }

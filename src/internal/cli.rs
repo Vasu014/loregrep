@@ -12,6 +12,7 @@ use crate::{
         cli_types::{AnalyzeArgs, ExecToolArgs, ScanArgs, SearchArgs},
         config::CliConfig,
     },
+    loregrep::LoreGrepConfig,
 };
 
 /// Lightweight search result used for plain, machine-facing output.
@@ -54,7 +55,9 @@ impl CliApp {
         // Create LoreGrep instance using public API
         let mut builder = LoreGrep::builder()
             .with_all_analyzers() // Rust, Python, TypeScript/TSX
-            .max_files(10000) // Default max files
+            // One default file limit for the whole project (see the const's
+            // documentation for why 10,000).
+            .max_files(LoreGrepConfig::DEFAULT_MAX_FILES)
             .cache_ttl(config.cache.ttl_hours * 3600) // Convert hours to seconds
             .include_patterns(config.file_scanning.include_patterns.clone())
             .exclude_patterns(config.file_scanning.exclude_patterns.clone())
@@ -147,41 +150,25 @@ impl CliApp {
         let cache_path = LoreGrep::default_cache_path(&args.path);
 
         // Try to reuse a fresh cache; fall back to scanning on any miss/failure.
-        // The freshness walk (inside `is_cache_fresh`) only runs when the cache
-        // file exists — on the first run there is no cache, so we skip straight
-        // to a single scan below rather than walking the tree twice.
-        let loaded_from_cache = if self.loregrep.is_cache_fresh(&cache_path, &args.path) {
-            match self.loregrep.load_index(&cache_path) {
-                Ok(()) => {
-                    // Deletion guard: mtime freshness cannot detect a *removed*
-                    // source file (nothing remaining is newer than the cache),
-                    // so a loaded cache would still return the deleted file's
-                    // symbols. Verify every indexed path still exists; if one is
-                    // gone, discard the loaded index and rescan.
-                    if let Some(missing) = self.loregrep.first_missing_indexed_path() {
-                        eprintln!(
-                            "Cache stale: indexed file no longer exists ({}); rescanning",
-                            missing
-                        );
-                        self.loregrep.clear_index();
-                        false
-                    } else {
-                        eprintln!("Loaded index cache from {}", cache_path.display());
-                        // The cache does not carry the analysis root, so restore
-                        // it from the invocation: without it, path containment
-                        // for agent-supplied parameters cannot be enforced and
-                        // those tools refuse rather than guess.
-                        self.loregrep.set_scan_root(&args.path.to_string_lossy());
-                        true
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Cache load failed ({}); rescanning", e);
-                    false
-                }
+        // Validation only runs when the cache file exists — on the first run
+        // there is no cache, so we go straight to the single scan below rather
+        // than walking the tree twice.
+        //
+        // `load_index_if_fresh` validates the cache against this build, this
+        // configuration and the files actually on disk (path set + content
+        // hashes) before installing it, and restores the analysis root. Any
+        // mismatch — an added file with a preserved old mtime, a deleted file, a
+        // changed configuration — falls through to a rescan.
+        let loaded_from_cache = match self.loregrep.load_index_if_fresh(&cache_path, &args.path) {
+            Ok(true) => {
+                eprintln!("Loaded index cache from {}", cache_path.display());
+                true
             }
-        } else {
-            false
+            Ok(false) => false,
+            Err(e) => {
+                eprintln!("Cache load failed ({}); rescanning", e);
+                false
+            }
         };
 
         if !loaded_from_cache {
@@ -805,7 +792,18 @@ impl CliApp {
     /// best-effort optimization, so a failure is non-fatal — it warns on stderr
     /// and returns rather than aborting the command. Diagnostics go to stderr
     /// only; stdout is untouched (machine-first output).
+    /// A truncated index is deliberately not persisted: caching a partial view
+    /// of the repository would let the next run reload it as authoritative.
     fn save_cache(&self, root_path: &Path) {
+        let coverage = self.loregrep.index_coverage();
+        if coverage.truncated {
+            eprintln!(
+                "Not caching a truncated index ({} of {} files); raise max_files and rescan",
+                coverage.files_indexed, coverage.files_discovered
+            );
+            return;
+        }
+
         let cache_path = LoreGrep::default_cache_path(root_path);
         match self.loregrep.save_index(&cache_path) {
             Ok(()) => eprintln!("Saved index cache to {}", cache_path.display()),
@@ -1148,19 +1146,21 @@ struct PrivateStruct {
         assert!(cache_path.exists(), "first run should write the cache");
 
         // Delete one indexed file. Its removal does NOT make any surviving file
-        // newer than the cache, so pure mtime freshness still reports "fresh".
+        // newer than the cache, so the old max(mtime) gate reported "fresh"
+        // forever. Comparing the indexed path set against what is on disk sees
+        // it immediately.
         fs::remove_file(&doomed).unwrap();
 
         let mut app2 = CliApp::new(create_test_config(), false, false)
             .await
             .unwrap();
         assert!(
-            app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
-            "mtime freshness alone cannot see the deletion (this is the hole)"
+            !app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
+            "a deleted indexed file MUST make the cache stale"
         );
 
-        // Second run: the deletion guard must fire, discard the cache, and
-        // rescan so the deleted file's symbols are gone.
+        // Second run: the cache is rejected and the path rescanned, so the
+        // deleted file's symbols are gone.
         let args = ExecToolArgs {
             tool: "search_functions".to_string(),
             params: r#"{"pattern":"beta_doomed"}"#.to_string(),
