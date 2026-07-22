@@ -407,6 +407,11 @@ pub mod python_bindings {
     //       actively being reworked, so binding them now would bind an API about
     //       to change. Bind them as a group once they settle.
     //
+    //   (`with_go_analyzer` and `cache_ttl` are absent from BOTH surfaces now —
+    //   they were no-ops, and a bound no-op tells an agent a feature exists and
+    //   then fails silently. See the comments at their former sites in
+    //   `src/loregrep.rs`. Re-binding them when they do something is additive.)
+    //
     //   LoreGrep::coverage_handle
     //       Returns a `CoverageHandle`, internal plumbing that exists so the tool
     //       layer can share the coverage cell with `LoreGrep`. A Python host has
@@ -794,16 +799,6 @@ pub mod python_bindings {
             slf
         }
 
-        /// Set the TTL, in seconds, for cached query results
-        ///
-        /// Bound for parity with the Rust builder. NOTE: the core currently only
-        /// stores this value; no code path reads it yet, so setting it has no
-        /// observable effect.
-        fn cache_ttl(mut slf: PyRefMut<Self>, seconds: u64) -> PyRefMut<Self> {
-            slf.inner = slf.inner.clone().cache_ttl(seconds);
-            slf
-        }
-
         /// Configure file patterns from a list of language names
         ///
         /// e.g. `["rust", "python"]` -> `*.rs`, `*.py`, ...
@@ -845,16 +840,6 @@ pub mod python_bindings {
         /// Add TypeScript/TSX language analyzer
         fn with_typescript_analyzer(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
             slf.inner = slf.inner.clone().with_typescript_analyzer();
-            slf
-        }
-
-        /// Add Go language analyzer
-        ///
-        /// Bound for parity with the Rust builder. NOTE: the Go analyzer is not
-        /// implemented yet, so this is currently a no-op there and here; Go files
-        /// are skipped during scanning.
-        fn with_go_analyzer(mut slf: PyRefMut<Self>) -> PyRefMut<Self> {
-            slf.inner = slf.inner.clone().with_go_analyzer();
             slf
         }
 

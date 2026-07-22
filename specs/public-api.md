@@ -73,14 +73,8 @@ impl LoreGrepBuilder {
     /// Add TypeScript/JavaScript analyzer (future)
     pub fn with_typescript_analyzer(self) -> Self;
     
-    /// Add Go language analyzer (future)
-    pub fn with_go_analyzer(self) -> Self;
-    
     /// Set maximum number of files to index
     pub fn max_files(self, limit: usize) -> Self;
-    
-    /// Set cache TTL for query results
-    pub fn cache_ttl(self, seconds: u64) -> Self;
     
     /// Build the LoreGrep instance
     pub fn build(self) -> Result<LoreGrep>;

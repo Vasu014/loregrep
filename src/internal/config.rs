@@ -48,7 +48,6 @@ pub struct CacheConfig {
     pub enabled: bool,
     pub path: PathBuf,
     pub max_size_mb: u64,
-    pub ttl_hours: u64,
 }
 
 impl Default for FileScanningConfig {
@@ -136,7 +135,6 @@ impl Default for CacheConfig {
             enabled: true,
             path: cache_dir,
             max_size_mb: 100,
-            ttl_hours: 24,
         }
     }
 }

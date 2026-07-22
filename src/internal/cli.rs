@@ -58,7 +58,6 @@ impl CliApp {
             // One default file limit for the whole project (see the const's
             // documentation for why 10,000).
             .max_files(LoreGrepConfig::DEFAULT_MAX_FILES)
-            .cache_ttl(config.cache.ttl_hours * 3600) // Convert hours to seconds
             .include_patterns(config.file_scanning.include_patterns.clone())
             .exclude_patterns(config.file_scanning.exclude_patterns.clone())
             .max_file_size(config.file_scanning.max_file_size)

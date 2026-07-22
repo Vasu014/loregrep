@@ -293,7 +293,6 @@ Every configuration method available on the Rust builder is available here.
 | `with_rust_analyzer()` | Register the Rust analyzer |
 | `with_python_analyzer()` | Register the Python analyzer |
 | `with_typescript_analyzer()` | Register the TypeScript/TSX analyzer |
-| `with_go_analyzer()` | No-op today — the Go analyzer is not implemented yet |
 | `with_all_analyzers()` | Register every available analyzer |
 | `configure_patterns_for_languages([...])` | Derive file patterns from language names, e.g. `["rust", "python"]` |
 | `include_patterns([...])` / `file_patterns([...])` | Glob patterns to include (aliases) |
@@ -303,7 +302,6 @@ Every configuration method available on the Rust builder is available here.
 | `max_depth(n)` / `unlimited_depth()` | Directory depth limit |
 | `follow_symlinks(bool)` | Follow symbolic links while scanning |
 | `respect_gitignore(bool)` | Honor `.gitignore` |
-| `cache_ttl(seconds)` | Stored but not yet consulted by the core — currently has no effect |
 | `optimize_for_performance()` | Speed-focused preset |
 | `comprehensive_analysis()` | Thorough preset |
 | `exclude_common_build_dirs()` / `exclude_test_dirs()` / `exclude_vendor_dirs()` | Directory exclusion presets |

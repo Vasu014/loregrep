@@ -33,7 +33,6 @@ pub struct LoreGrep {
 #[derive(Debug, Clone)]
 pub struct LoreGrepConfig {
     pub max_files: Option<usize>,
-    pub cache_ttl_seconds: u64,
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub max_file_size: u64,
@@ -61,7 +60,6 @@ impl Default for LoreGrepConfig {
     fn default() -> Self {
         Self {
             max_files: Some(Self::DEFAULT_MAX_FILES),
-            cache_ttl_seconds: 300, // 5 minutes
             include_patterns: vec![
                 "**/*.rs".to_string(),
                 "**/*.py".to_string(),
@@ -1302,24 +1300,28 @@ impl LoreGrepBuilder {
         self
     }
 
-    /// Add Go language analyzer (future)
-    pub fn with_go_analyzer(self) -> Self {
-        // TODO: Implement when Go analyzer is available
-        self
-    }
-
+    // No `with_go_analyzer` here yet, deliberately. It existed as a no-op that
+    // returned `self` unchanged, so calling it announced Go support and then
+    // skipped every Go file in silence — the caller had no error to learn from.
+    // A bound method is a promise; absent beats documented-ineffective. It comes
+    // back the day an analyzer honours it, which is a purely additive change.
     /// Set maximum number of files to index
     pub fn max_files(mut self, limit: usize) -> Self {
         self.config.max_files = Some(limit);
         self
     }
 
-    /// Set cache TTL for query results
-    pub fn cache_ttl(mut self, seconds: u64) -> Self {
-        self.config.cache_ttl_seconds = seconds;
-        self
-    }
-
+    // No `cache_ttl` here either. It set `LoreGrepConfig.cache_ttl_seconds`,
+    // which nothing ever read: `RepoMap` has a live query-result TTL, but the
+    // builder's value was never handed to it, so `RepoMap`'s own hardcoded
+    // default applied and a caller's setting was discarded in silence. That is
+    // the same stored-and-never-read defect the cache header's field table
+    // exists to catch.
+    //
+    // It is also the wrong model to re-wire: index freshness here is decided by
+    // content hashes, and honouring a time-based TTL would bind us to config
+    // that contradicts that design. RepoMap keeps its internal 300s query cache;
+    // it is an implementation detail, not a promise.
     /// Add include patterns for file scanning
     pub fn include_patterns(mut self, patterns: Vec<String>) -> Self {
         self.config.include_patterns = patterns;
@@ -1462,7 +1464,6 @@ mod tests {
     #[test]
     fn test_loregrep_builder_default() {
         let builder = LoreGrepBuilder::new();
-        assert_eq!(builder.config.cache_ttl_seconds, 300);
         assert_eq!(builder.config.max_files, Some(10000));
         // Registry should be initialized (can check by listing supported languages)
         assert!(builder.registry.list_supported_languages().is_empty()); // Empty initially
@@ -1472,12 +1473,10 @@ mod tests {
     fn test_loregrep_builder_configuration() {
         let builder = LoreGrepBuilder::new()
             .max_files(5000)
-            .cache_ttl(600)
             .include_patterns(vec!["**/*.rs".to_string(), "**/*.py".to_string()])
             .exclude_patterns(vec!["**/test/**".to_string()]);
 
         assert_eq!(builder.config.max_files, Some(5000));
-        assert_eq!(builder.config.cache_ttl_seconds, 600);
         assert_eq!(builder.config.include_patterns.len(), 2);
         assert_eq!(builder.config.exclude_patterns.len(), 1);
     }
@@ -1520,7 +1519,6 @@ mod tests {
     fn test_config_default() {
         let config = LoreGrepConfig::default();
         assert_eq!(config.max_files, Some(10000));
-        assert_eq!(config.cache_ttl_seconds, 300);
         assert!(!config.include_patterns.is_empty());
         assert!(!config.exclude_patterns.is_empty());
     }
@@ -1550,7 +1548,6 @@ mod tests {
         let loregrep = LoreGrep::builder()
             .with_rust_analyzer()
             .max_files(1000)
-            .cache_ttl(120)
             .build();
 
         assert!(loregrep.is_ok());
@@ -1666,7 +1663,6 @@ mod tests {
     fn test_config_comprehensive() {
         let config = LoreGrepConfig {
             max_files: Some(5000),
-            cache_ttl_seconds: 600,
             include_patterns: vec!["**/*.rs".to_string(), "**/*.py".to_string()],
             exclude_patterns: vec!["**/test/**".to_string()],
             max_file_size: 2 * 1024 * 1024, // 2MB
@@ -1676,7 +1672,6 @@ mod tests {
         };
 
         assert_eq!(config.max_files, Some(5000));
-        assert_eq!(config.cache_ttl_seconds, 600);
         assert_eq!(config.include_patterns.len(), 2);
         assert_eq!(config.exclude_patterns.len(), 1);
         assert_eq!(config.max_file_size, 2 * 1024 * 1024);
