@@ -654,7 +654,7 @@ def apply_waivers(card, waivers):
 
 
 def score_golden(golden, binary, src_abs, allow_commit_mismatch=False,
-                 keep_cache=False, timeout=600):
+                 timeout=600):
     """Load-free entry point: golden dict in, full scorecard out."""
     language = golden["language"]
     src_commit = read_src_commit(src_abs)
@@ -690,17 +690,22 @@ def score_golden(golden, binary, src_abs, allow_commit_mismatch=False,
                           % (golden.get("commit"), src_abs, src_commit))
         return card
 
-    cache_dir = os.path.join(src_abs, ".loregrep")
-    if not keep_cache and os.path.isdir(cache_dir):
-        subprocess.run(["rm", "-rf", cache_dir])
+    # A scored run must start from an empty index cache and must leave the
+    # pinned checkout exactly as it found it. Both now hold by construction:
+    # every `loregrep` call this harness makes points at `_run.isolated_cache_root()`,
+    # a temp directory owned by this process and deleted at exit, so there is
+    # nothing to clear before the run and nothing to clean up after it.
+    #
+    # This used to `rm -rf <src>/.loregrep` on both sides. That hardcoded where
+    # loregrep keeps its cache, and would have degraded into a silent no-op the
+    # moment that moved — scoring a stale index while still printing a
+    # scorecard. Isolation cannot rot that way.
+    _run.isolated_cache_root()
 
     t0 = time.time()
     emitted, calls = collect_symbols(binary, src_abs, timeout=timeout)
     card["tool_calls"] = calls
     card["wall_ms"] = int((time.time() - t0) * 1000)
-
-    if not keep_cache and os.path.isdir(cache_dir):
-        subprocess.run(["rm", "-rf", cache_dir])
 
     if not all(c["ok"] for c in calls):
         card["refused"] = "tool_error"
@@ -799,8 +804,10 @@ def main(argv=None):
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--allow-commit-mismatch", action="store_true",
                     help="score even if the checkout is not at the golden's commit")
-    ap.add_argument("--keep-cache", action="store_true",
-                    help="do not remove <src>/.loregrep before and after the run")
+    # --keep-cache is gone: it meant "do not delete <src>/.loregrep", and the
+    # index cache no longer lives in the scanned tree. Every run now uses a
+    # private temp cache directory (see score_golden), so there is nothing left
+    # for the flag to opt out of.
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args(argv)
 
@@ -822,7 +829,7 @@ def main(argv=None):
 
     card = score_golden(golden, binary, src_abs,
                         allow_commit_mismatch=args.allow_commit_mismatch,
-                        keep_cache=args.keep_cache, timeout=args.timeout)
+                        timeout=args.timeout)
 
     # Provenance: any config file the scanned tree itself carries is part of the
     # pinned fixture; anything else would be a machine-dependent input and must

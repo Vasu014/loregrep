@@ -120,9 +120,18 @@ impl Default for OutputConfig {
 
 impl Default for CacheConfig {
     fn default() -> Self {
+        // Everything the CLI persists per repository lives under this
+        // directory, NOT inside the analysed tree (K11). The fallback used when
+        // ProjectDirs is unavailable must therefore be absolute too: a relative
+        // ".loregrep_cache" would follow the process working directory around
+        // and drop cache files into whatever tree the user happened to be
+        // standing in — the same bug in a different costume.
         let cache_dir = ProjectDirs::from("com", "loregrep", "loregrep")
             .map(|dirs| dirs.cache_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".loregrep_cache"));
+            .or_else(|| {
+                directories::UserDirs::new().map(|d| d.home_dir().join(".cache").join("loregrep"))
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("loregrep-cache"));
         Self {
             enabled: true,
             path: cache_dir,
@@ -130,6 +139,17 @@ impl Default for CacheConfig {
             ttl_hours: 24,
         }
     }
+}
+
+/// Resolve `path` against the current working directory if it is relative.
+/// Purely lexical: the directory need not exist yet.
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| std::env::temp_dir().join(path))
 }
 
 impl CliConfig {
@@ -154,6 +174,12 @@ impl CliConfig {
 
         // Override with environment variables
         config.apply_env_vars();
+
+        // A cache path is only meaningful as an absolute location; see
+        // `CacheConfig::default`. A config file or `LOREGREP_CACHE_PATH` may
+        // still name a relative one, so pin it to the working directory *once*,
+        // here, rather than letting every later write re-resolve it.
+        config.cache.path = absolutize(&config.cache.path);
 
         // Validate configuration
         config.validate()?;
@@ -291,6 +317,27 @@ mod tests {
         assert!(cfg.cache.enabled);
         // Present output field kept; removed `colors` ignored (no error):
         assert!(cfg.output.verbose);
+    }
+
+    #[test]
+    fn the_default_cache_path_is_absolute() {
+        // K11: a relative cache root follows the process working directory and
+        // writes into whatever tree the user happens to be standing in.
+        let cfg = CacheConfig::default();
+        assert!(
+            cfg.path.is_absolute(),
+            "default cache path must be absolute, got {:?}",
+            cfg.path
+        );
+    }
+
+    #[test]
+    fn a_relative_configured_cache_path_is_pinned_to_the_cwd() {
+        assert!(absolutize(Path::new("relative/cache")).is_absolute());
+        assert_eq!(
+            absolutize(Path::new("/already/absolute")),
+            PathBuf::from("/already/absolute")
+        );
     }
 
     #[test]

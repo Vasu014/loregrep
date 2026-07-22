@@ -24,13 +24,16 @@ Design notes (verified empirically against loregrep 0.4.2):
 """
 
 import argparse
+import atexit
 import fnmatch
 import json
 import os
 import random
+import shutil
 import string
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -155,6 +158,39 @@ def score(expected_items, actual_items, match_on):
 # Core execution
 # --------------------------------------------------------------------------- #
 
+_CACHE_ROOT = None
+
+
+def isolated_cache_root():
+    """A private, empty index-cache directory for this harness process.
+
+    loregrep persists its index under `config.cache.path` (overridable with
+    `LOREGREP_CACHE_PATH`), keyed by a hash of the scanned root. Every measured
+    run must start from an empty one, or the harness scores whatever a previous
+    build happened to leave behind.
+
+    Isolation rather than deletion: the harness used to force a cold pass by
+    `rm -rf <tree>/.loregrep`, which hardcoded the cache's location into the
+    eval and became a silent no-op the moment that location changed — the
+    failure mode being "the scorecards keep printing, against a stale index".
+    A temp directory this process owns cannot go stale and needs no knowledge of
+    how loregrep addresses its cache entries. It is removed at exit, so nothing
+    accumulates and nothing outside it is ever deleted.
+    """
+    global _CACHE_ROOT
+    if _CACHE_ROOT is None:
+        _CACHE_ROOT = tempfile.mkdtemp(prefix="loregrep-eval-cache-")
+        atexit.register(shutil.rmtree, _CACHE_ROOT, ignore_errors=True)
+    return _CACHE_ROOT
+
+
+def tool_env():
+    """Child environment for every `loregrep` invocation the harness makes."""
+    env = dict(os.environ)
+    env["LOREGREP_CACHE_PATH"] = isolated_cache_root()
+    return env
+
+
 def run_tool(binary, tool, params, fixture_abs, timeout=60, cwd=None):
     """Invoke `loregrep exec-tool` and return (parsed_json, exit_code, stderr_tail).
 
@@ -171,7 +207,7 @@ def run_tool(binary, tool, params, fixture_abs, timeout=60, cwd=None):
            "--path", fixture_abs]
     t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                          cwd=cwd)
+                          cwd=cwd, env=tool_env())
     latency_ms = int((time.time() - t0) * 1000)
     stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-3:]) if proc.stderr else ""
     parsed = None
@@ -310,10 +346,11 @@ def main():
     run_id = "%s-%s" % (time.strftime("%Y%m%dT%H%M%S"),
                         "".join(random.choices(string.ascii_lowercase + string.digits, k=6)))
 
-    # Cold pass: clear the per-fixture index cache so the first call rescans.
-    cache_dir = os.path.join(fixture_abs, ".loregrep")
-    if os.path.isdir(cache_dir):
-        subprocess.run(["rm", "-rf", cache_dir])
+    # Cold pass: every invocation below points at `isolated_cache_root()`, a
+    # temp directory created empty for this process, so the first call rescans
+    # by construction. (This used to `rm -rf <fixture>/.loregrep`; see
+    # `isolated_cache_root` for why that is the wrong shape.)
+    isolated_cache_root()
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out_path = args.json_out or os.path.join(RESULTS_DIR, "%s.jsonl" % run_id)

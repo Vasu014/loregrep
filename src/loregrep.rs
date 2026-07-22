@@ -683,15 +683,44 @@ impl LoreGrep {
         repo_map.get_metadata().total_files > 0
     }
 
-    /// Return the stable, per-repository cache path for a scanned root:
-    /// `<root>/.loregrep/index.cache`.
+    /// Return the stable cache path for `repo_root` **inside a caller-owned
+    /// cache root**: `<cache_root>/indexes/<blake3-of-canonical-repo-root>.cache`.
     ///
-    /// This is the location the CLI reads from / writes to so that repeated
-    /// invocations on the same repository can reuse a previously persisted
-    /// index instead of rescanning. The containing `.loregrep/` directory is
-    /// created on demand by [`LoreGrep::save_index`].
-    pub fn default_cache_path<P: AsRef<Path>>(root: P) -> PathBuf {
-        root.as_ref().join(".loregrep").join("index.cache")
+    /// The cache root is a parameter, not a default, because the previous
+    /// version of this function derived the path from the analysed tree
+    /// (`<repo_root>/.loregrep/index.cache`) — which meant a read-only query
+    /// like `exec-tool --path /someone/elses/repo` wrote into a tree the user
+    /// never asked to modify (K11). A caller that wants a cache must now say
+    /// where its own cache lives; the CLI passes `config.cache.path`.
+    ///
+    /// The repo root is canonicalized before hashing (see
+    /// [`crate::scanner::discovery::canonical_root`]), so every spelling of the
+    /// same tree — `.`, `../x`, an absolute path, a symlink — maps to one cache
+    /// entry. The hash is only an addressing scheme, never a trust boundary:
+    /// the cache header records the canonical `scan_root` and
+    /// [`LoreGrep::load_index_if_fresh`] refuses any entry whose recorded root
+    /// is not this run's, so a collision or a stale entry is caught
+    /// structurally.
+    ///
+    /// `cache_root` must be absolute. A relative cache root would resolve
+    /// against whatever working directory the process happened to have — the
+    /// same class of bug this function exists to remove — so it is rejected
+    /// rather than silently used.
+    ///
+    /// The containing directory is created on demand by
+    /// [`LoreGrep::save_index`].
+    pub fn cache_path_for(cache_root: &Path, repo_root: &Path) -> Result<PathBuf> {
+        if !cache_root.is_absolute() {
+            return Err(LoreGrepError::InternalError(format!(
+                "cache root must be an absolute path, got {:?}",
+                cache_root
+            )));
+        }
+        let canonical = crate::scanner::discovery::canonical_root(repo_root);
+        let digest = blake3::hash(canonical.to_string_lossy().as_bytes())
+            .to_hex()
+            .to_string();
+        Ok(cache_root.join("indexes").join(format!("{}.cache", digest)))
     }
 
     /// Split a full cache file path (e.g. `<root>/.loregrep/index.cache`) into
@@ -1415,6 +1444,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Cache path for `repo` under a disposable, absolute cache root — the
+    /// shape the CLI uses (`config.cache.path`), never inside the analysed
+    /// tree. Each call gets its own root so tests cannot see each other's
+    /// caches.
+    fn scratch_cache_path(repo: &Path) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "loregrep-lib-test-cache-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        LoreGrep::cache_path_for(&root, repo).unwrap()
+    }
+
     #[test]
     fn test_loregrep_builder_default() {
         let builder = LoreGrepBuilder::new();
@@ -1696,7 +1740,7 @@ mod tests {
 
         let mut lg = LoreGrep::builder().build().unwrap();
         lg.scan(temp_dir.path().to_str().unwrap()).await.unwrap();
-        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        let cache_path = scratch_cache_path(temp_dir.path());
         lg.save_index(&cache_path).unwrap();
 
         // A freshly written cache is fresh.
@@ -1740,7 +1784,7 @@ mod tests {
         assert!(before.success);
 
         // Persist the index to disk.
-        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        let cache_path = scratch_cache_path(temp_dir.path());
         original.save_index(&cache_path).unwrap();
         assert!(cache_path.exists(), "cache file should be written");
 
@@ -2040,7 +2084,7 @@ mod tests {
 
         let mut lg = LoreGrep::builder().build().unwrap();
         lg.scan(repo.path().to_str().unwrap()).await.unwrap();
-        let cache_path = LoreGrep::default_cache_path(repo.path());
+        let cache_path = scratch_cache_path(repo.path());
         lg.save_index(&cache_path).unwrap();
         assert!(lg.is_cache_fresh(&cache_path, repo.path()));
 
@@ -2080,7 +2124,7 @@ mod tests {
 
         let mut lg = LoreGrep::builder().build().unwrap();
         lg.scan(repo.path().to_str().unwrap()).await.unwrap();
-        let cache_path = LoreGrep::default_cache_path(repo.path());
+        let cache_path = scratch_cache_path(repo.path());
         lg.save_index(&cache_path).unwrap();
         assert!(lg.is_cache_fresh(&cache_path, repo.path()));
 
@@ -2114,7 +2158,7 @@ mod tests {
         )
         .unwrap();
 
-        let cache_path = LoreGrep::default_cache_path(repo.path());
+        let cache_path = scratch_cache_path(repo.path());
 
         let mut rust_only = LoreGrep::builder()
             .with_all_analyzers()
@@ -2165,7 +2209,7 @@ mod tests {
         )
         .unwrap();
 
-        let cache_path = LoreGrep::default_cache_path(repo.path());
+        let cache_path = scratch_cache_path(repo.path());
         let mut rust_only = LoreGrep::builder().with_rust_analyzer().build().unwrap();
         rust_only.scan(repo.path().to_str().unwrap()).await.unwrap();
         rust_only.save_index(&cache_path).unwrap();
@@ -2230,7 +2274,7 @@ mod tests {
         );
 
         // A truncated index must not be persisted as authoritative.
-        let cache_path = LoreGrep::default_cache_path(repo.path());
+        let cache_path = scratch_cache_path(repo.path());
         let err = lg.save_index(&cache_path).unwrap_err();
         assert!(
             err.to_string().contains("truncated"),
@@ -2263,7 +2307,7 @@ mod tests {
         assert!(result.data.get("truncated").is_none());
         assert!(result.data.get("index_coverage").is_none());
 
-        let cache_path = LoreGrep::default_cache_path(repo.path());
+        let cache_path = scratch_cache_path(repo.path());
         lg.save_index(&cache_path).unwrap();
         assert!(cache_path.exists());
     }
@@ -2536,7 +2580,7 @@ mod tests {
 
         let mut lg = LoreGrep::builder().build().unwrap();
         lg.scan(repo_one.path().to_str().unwrap()).await.unwrap();
-        let cache = LoreGrep::default_cache_path(repo_one.path());
+        let cache = scratch_cache_path(repo_one.path());
         lg.save_index(&cache).unwrap();
         assert!(lg.is_cache_fresh(&cache, repo_one.path()));
 
@@ -2545,5 +2589,89 @@ mod tests {
             !lg.is_cache_fresh(&cache, repo_two.path()),
             "a cache built for one root must not be served to another"
         );
+    }
+
+    /// K11: the cache now lives in ONE shared directory keyed by a hash of the
+    /// repository root, so two repositories' caches are neighbours rather than
+    /// living in their own trees. Two properties have to hold for that to be
+    /// safe, and they are tested here rather than assumed.
+    #[tokio::test]
+    async fn a_shared_cache_root_keys_repositories_apart_and_still_gates_on_the_root() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let cache_root = TempDir::new().unwrap();
+        let repo_one = TempDir::new().unwrap();
+        let repo_two = TempDir::new().unwrap();
+        fs::write(
+            repo_one.path().join("a.rs"),
+            "pub fn only_in_one() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            repo_two.path().join("a.rs"),
+            "pub fn only_in_two() -> i32 { 2 }\n",
+        )
+        .unwrap();
+
+        let one = LoreGrep::cache_path_for(cache_root.path(), repo_one.path()).unwrap();
+        let two = LoreGrep::cache_path_for(cache_root.path(), repo_two.path()).unwrap();
+        assert_ne!(one, two, "distinct roots must not share a cache entry");
+        assert!(
+            one.starts_with(cache_root.path()),
+            "cache stays in its root"
+        );
+        assert!(
+            !one.starts_with(repo_one.path()),
+            "nothing may be written inside the analysed tree"
+        );
+
+        let mut lg = LoreGrep::builder().build().unwrap();
+        lg.scan(repo_one.path().to_str().unwrap()).await.unwrap();
+        lg.save_index(&one).unwrap();
+        assert!(lg.is_cache_fresh(&one, repo_one.path()));
+
+        // Simulate the failure mode a shared directory introduces: an entry
+        // sitting at repo_two's address that actually describes repo_one (a
+        // hash collision, or a stale file). The recorded canonical `scan_root`
+        // in the header — not the file's name — decides, so it is refused.
+        fs::copy(&one, &two).unwrap();
+        assert!(
+            !lg.is_cache_fresh(&two, repo_two.path()),
+            "the header's scan_root, not the file's address, is the gate"
+        );
+    }
+
+    /// Every spelling of one root must address one cache entry, or the "cache"
+    /// silently becomes one rescan per spelling.
+    #[test]
+    fn equivalent_spellings_of_a_root_address_one_cache_entry() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let cache_root = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        fs::create_dir(repo.path().join("src")).unwrap();
+
+        let canonical = LoreGrep::cache_path_for(cache_root.path(), repo.path()).unwrap();
+        for spelling in [
+            repo.path().join("."),
+            repo.path().join("src").join(".."),
+            repo.path().join("./src/../."),
+        ] {
+            assert_eq!(
+                LoreGrep::cache_path_for(cache_root.path(), &spelling).unwrap(),
+                canonical,
+                "spelling {:?} must reuse the same cache entry",
+                spelling
+            );
+        }
+    }
+
+    /// A relative cache root would follow the process working directory around —
+    /// exactly the bug moving the cache out of the tree was meant to end.
+    #[test]
+    fn a_relative_cache_root_is_refused() {
+        assert!(LoreGrep::cache_path_for(Path::new("relative"), Path::new("/tmp")).is_err());
     }
 }

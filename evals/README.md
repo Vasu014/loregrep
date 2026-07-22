@@ -95,8 +95,11 @@ being trusted:
 Both are structurally unreachable from this harness, and that was confirmed
 rather than assumed:
 
-- `corpus_score.py` removes `<src>/.loregrep` **before and after** every run, so
-  each scoring pass is a cold scan (K5's vector needs a surviving cache).
+- Every scoring pass runs with `LOREGREP_CACHE_PATH` pointed at a fresh temporary
+  directory that is discarded when the run ends, so each pass is a cold scan by
+  construction (K5's vector needs a surviving cache). This replaced an earlier
+  scheme that deleted `<src>/.loregrep` before and after each run; isolating the
+  cache root is stronger, because it cannot be defeated by the cache moving.
 - Scoring spawns one `exec-tool` subprocess per tool call, one root per process,
   so no library instance outlives a single repository (K3 needs one that does).
 - Every corpus checkout comes from `git clone` via `fetch.sh`, so all mtimes are
@@ -116,5 +119,6 @@ numbers depend on neither checkout location nor build artifacts.
 
 Re-run this whenever a cache or scan-state defect is found:
 
-    find evals/corpus -maxdepth 3 -name .loregrep -type d -exec rm -rf {} +
     for c in ripgrep flask hono; do python3 evals/retrieval/run.py --corpus $c; done
+
+(No cache cleanup step is needed — the runner isolates its own cache root per run.)

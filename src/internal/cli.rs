@@ -75,13 +75,13 @@ impl CliApp {
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create LoreGrep instance: {}", e))?;
 
-        // Create cache directory if it doesn't exist
+        // Create the cache directory itself if it doesn't exist. (This used to
+        // create `config.cache.path.parent()` — the *parent* of the cache
+        // directory — which is not a directory anything ever writes to.)
         if config.cache.enabled {
-            if let Some(parent) = config.cache.path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .context("Failed to create cache directory")?;
-            }
+            tokio::fs::create_dir_all(&config.cache.path)
+                .await
+                .context("Failed to create cache directory")?;
         }
 
         if verbose {
@@ -138,49 +138,82 @@ impl CliApp {
         Ok(())
     }
 
-    /// Execute a single analysis tool and print its `ToolResult` as JSON to stdout.
+    /// The persisted index cache file for `root`, or `None` when caching is off.
     ///
-    /// To avoid rescanning the repository on every invocation, this first tries a
-    /// persisted per-repo index cache (`<path>/.loregrep/index.cache`): if a fresh
-    /// cache exists it is loaded and the scan is skipped; otherwise the path is
-    /// scanned and the resulting index is saved for next time. Cache use is
-    /// opportunistic (no flag required). All diagnostics go to stderr, so stdout
-    /// carries only the JSON result (for agent/tool consumption).
-    pub async fn exec_tool(&mut self, args: ExecToolArgs) -> Result<()> {
-        let cache_path = LoreGrep::default_cache_path(&args.path);
-
-        // Try to reuse a fresh cache; fall back to scanning on any miss/failure.
-        // Validation only runs when the cache file exists — on the first run
-        // there is no cache, so we go straight to the single scan below rather
-        // than walking the tree twice.
-        //
-        // `load_index_if_fresh` validates the cache against this build, this
-        // configuration and the files actually on disk (path set + content
-        // hashes) before installing it, and restores the analysis root. Any
-        // mismatch — an added file with a preserved old mtime, a deleted file, a
-        // changed configuration — falls through to a rescan.
-        let loaded_from_cache = match self.loregrep.load_index_if_fresh(&cache_path, &args.path) {
-            Ok(true) => {
-                eprintln!("Loaded index cache from {}", cache_path.display());
-                true
-            }
-            Ok(false) => false,
+    /// The cache lives under the user's own cache directory
+    /// (`config.cache.path`), never inside the analysed tree: a query is a read,
+    /// and a read must not create files in someone else's repository (K11).
+    fn index_cache_path(&self, root: &Path) -> Option<std::path::PathBuf> {
+        if !self.config.cache.enabled {
+            return None;
+        }
+        match LoreGrep::cache_path_for(&self.config.cache.path, root) {
+            Ok(path) => Some(path),
             Err(e) => {
-                eprintln!("Cache load failed ({}); rescanning", e);
-                false
+                eprintln!("Cache disabled for this run: {}", e);
+                None
             }
+        }
+    }
+
+    /// Make sure an index for `root` is in memory: reuse a validated persisted
+    /// cache if there is one, otherwise scan and persist the result.
+    ///
+    /// Both `exec-tool` and `search` need exactly this, and having them share
+    /// one method is what keeps them from drifting apart — `search` previously
+    /// had no load-or-scan step at all and so reported "Repository not scanned"
+    /// on every single invocation (K7).
+    ///
+    /// Validation only runs when the cache file exists — on the first run there
+    /// is no cache, so we go straight to the single scan rather than walking the
+    /// tree twice.
+    ///
+    /// `load_index_if_fresh` validates the cache against this build, this
+    /// configuration and the files actually on disk (path set + content hashes)
+    /// before installing it, and checks the recorded analysis root. Any mismatch
+    /// — an added file with a preserved old mtime, a deleted file, a changed
+    /// configuration, a cache belonging to a different tree — falls through to a
+    /// rescan.
+    async fn ensure_index(&mut self, root: &Path) -> Result<()> {
+        let cache_path = self.index_cache_path(root);
+
+        let loaded_from_cache = match &cache_path {
+            Some(path) => match self.loregrep.load_index_if_fresh(path, root) {
+                Ok(true) => {
+                    eprintln!("Loaded index cache from {}", path.display());
+                    true
+                }
+                Ok(false) => false,
+                Err(e) => {
+                    eprintln!("Cache load failed ({}); rescanning", e);
+                    false
+                }
+            },
+            None => false,
         };
 
         if !loaded_from_cache {
             self.loregrep
-                .scan(&args.path.to_string_lossy())
+                .scan(&root.to_string_lossy())
                 .await
                 .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
 
             // Persist the freshly built index so the next invocation can skip
             // the scan. Uses the shared, non-fatal save path.
-            self.save_cache(&args.path);
+            self.save_cache(root);
         }
+
+        Ok(())
+    }
+
+    /// Execute a single analysis tool and print its `ToolResult` as JSON to stdout.
+    ///
+    /// The index is obtained through [`CliApp::ensure_index`] (validated cache,
+    /// else scan). Cache use is opportunistic (no flag required) and honours
+    /// `config.cache.enabled`. All diagnostics go to stderr, so stdout carries
+    /// only the JSON result (for agent/tool consumption).
+    pub async fn exec_tool(&mut self, args: ExecToolArgs) -> Result<()> {
+        self.ensure_index(&args.path).await?;
 
         let params: serde_json::Value = serde_json::from_str(&args.params)
             .map_err(|e| anyhow::anyhow!("Invalid --params JSON: {}", e))?;
@@ -199,11 +232,15 @@ impl CliApp {
         Ok(())
     }
 
-    pub async fn search(&self, args: SearchArgs) -> Result<()> {
-        if !self.loregrep.is_scanned() {
-            eprintln!("Repository not scanned. Run 'scan' first to populate data.");
-            return Ok(());
-        }
+    /// Search the index for `args.query`.
+    ///
+    /// This used to bail out with "Repository not scanned. Run 'scan' first" —
+    /// unconditionally, because every process starts with an empty index and
+    /// nothing here ever loaded the persisted one, so the advice was both
+    /// useless and impossible to follow (K7). It now obtains an index the same
+    /// way `exec-tool` does.
+    pub async fn search(&mut self, args: SearchArgs) -> Result<()> {
+        self.ensure_index(&args.path).await?;
 
         let start_time = Instant::now();
 
@@ -809,10 +846,10 @@ impl CliApp {
 
     // Helper methods
 
-    /// Persist the current in-memory index to the per-repo cache
-    /// (`<root>/.loregrep/index.cache`) so later invocations can skip rescanning.
+    /// Persist the current in-memory index to this repository's entry in the
+    /// user's cache directory so later invocations can skip rescanning.
     ///
-    /// This is the single save path shared by `scan` and `exec_tool`: it owns
+    /// This is the single save path shared by `scan` and `ensure_index`: it owns
     /// the cache-path computation and the error policy. Cache saving is a
     /// best-effort optimization, so a failure is non-fatal — it warns on stderr
     /// and returns rather than aborting the command. Diagnostics go to stderr
@@ -820,6 +857,10 @@ impl CliApp {
     /// A truncated index is deliberately not persisted: caching a partial view
     /// of the repository would let the next run reload it as authoritative.
     fn save_cache(&self, root_path: &Path) {
+        let Some(cache_path) = self.index_cache_path(root_path) else {
+            return; // caching disabled
+        };
+
         let coverage = self.loregrep.index_coverage();
         if coverage.truncated {
             eprintln!(
@@ -829,7 +870,6 @@ impl CliApp {
             return;
         }
 
-        let cache_path = LoreGrep::default_cache_path(root_path);
         match self.loregrep.save_index(&cache_path) {
             Ok(()) => eprintln!("Saved index cache to {}", cache_path.display()),
             Err(e) => eprintln!("Warning: failed to save index cache: {}", e),
@@ -844,8 +884,55 @@ mod tests {
     use tempfile::TempDir;
     use tokio::test;
 
+    /// A config whose index cache lives somewhere disposable.
+    ///
+    /// `CliConfig::default()` points at the *developer's real* cache directory,
+    /// so tests that ran a scan used to write there. Every test gets its own
+    /// root; tests that need two `CliApp`s to share a cache use
+    /// [`create_test_config_with_cache`] instead.
     fn create_test_config() -> CliConfig {
-        CliConfig::default()
+        let mut config = CliConfig::default();
+        config.cache.path = unique_temp_cache_root();
+        config
+    }
+
+    fn create_test_config_with_cache(cache_dir: &TempDir) -> CliConfig {
+        let mut config = CliConfig::default();
+        config.cache.path = cache_dir.path().to_path_buf();
+        config
+    }
+
+    fn unique_temp_cache_root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "loregrep-test-cache-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// Snapshot of every path under `root` and the bytes of every file, used to
+    /// prove a command did not modify the tree it read.
+    fn tree_snapshot(root: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+        fn walk(dir: &Path, out: &mut Vec<(std::path::PathBuf, Option<Vec<u8>>)>) {
+            let mut entries: Vec<_> = fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    out.push((path.clone(), None));
+                    walk(&path, out);
+                } else {
+                    out.push((path.clone(), Some(fs::read(&path).unwrap())));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out
     }
 
     fn create_test_rust_file(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
@@ -967,12 +1054,16 @@ struct PrivateStruct {
 
     #[test]
     async fn test_search_empty_repo_map() {
+        // An empty directory, not "." — `search` now indexes the path it is
+        // given, and pointing a unit test at the process working directory
+        // would scan whatever tree the test runner happens to sit in.
+        let empty = TempDir::new().unwrap();
         let config = create_test_config();
-        let app = CliApp::new(config, false, false).await.unwrap();
+        let mut app = CliApp::new(config, false, false).await.unwrap();
 
         let search_args = SearchArgs {
             query: "test".to_string(),
-            path: std::path::PathBuf::from("."),
+            path: empty.path().to_path_buf(),
             r#type: "function".to_string(),
             limit: 10,
             fuzzy: false,
@@ -1067,6 +1158,169 @@ struct PrivateStruct {
     }
 
     #[test]
+    async fn exec_tool_leaves_the_analysed_tree_byte_for_byte_unchanged() {
+        // K11: `exec-tool` is a read. It used to write
+        // `<path>/.loregrep/index.cache` unconditionally — creating a directory
+        // inside a repository the user only asked a question about, and
+        // ignoring `cache.enabled` entirely.
+        let repo = TempDir::new().unwrap();
+        create_test_rust_file(
+            &repo,
+            "read_only.rs",
+            "pub fn read_only_fn() -> i32 { 1 }\n",
+        );
+        let nested = repo.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("more.rs"), "pub fn more_fn() -> i32 { 2 }\n").unwrap();
+
+        let before = tree_snapshot(repo.path());
+
+        let cache_dir = TempDir::new().unwrap();
+        let mut app = CliApp::new(create_test_config_with_cache(&cache_dir), false, false)
+            .await
+            .unwrap();
+        let args = ExecToolArgs {
+            tool: "search_functions".to_string(),
+            params: r#"{"pattern":"read_only_fn"}"#.to_string(),
+            path: repo.path().to_path_buf(),
+        };
+        assert!(app.exec_tool(args).await.is_ok());
+
+        assert_eq!(
+            tree_snapshot(repo.path()),
+            before,
+            "exec-tool must not modify the repository it analyses"
+        );
+        assert!(
+            !repo.path().join(".loregrep").exists(),
+            "no .loregrep directory may appear in the analysed tree"
+        );
+        // The index went to the user's own cache directory instead.
+        assert!(
+            LoreGrep::cache_path_for(cache_dir.path(), repo.path())
+                .unwrap()
+                .exists(),
+            "the index cache belongs under the configured cache root"
+        );
+    }
+
+    #[test]
+    async fn exec_tool_honours_the_cache_disabled_setting() {
+        // With caching off, nothing is written anywhere — neither in the
+        // analysed tree nor in the cache root. `exec_tool` used to consult no
+        // setting at all.
+        let repo = TempDir::new().unwrap();
+        create_test_rust_file(&repo, "nocache.rs", "pub fn nocache_fn() -> i32 { 1 }\n");
+        let before = tree_snapshot(repo.path());
+
+        let cache_dir = TempDir::new().unwrap();
+        let mut config = create_test_config_with_cache(&cache_dir);
+        config.cache.enabled = false;
+
+        let mut app = CliApp::new(config, false, false).await.unwrap();
+        let args = ExecToolArgs {
+            tool: "search_functions".to_string(),
+            params: r#"{"pattern":"nocache_fn"}"#.to_string(),
+            path: repo.path().to_path_buf(),
+        };
+        assert!(app.exec_tool(args).await.is_ok());
+
+        assert_eq!(tree_snapshot(repo.path()), before);
+        assert!(
+            !LoreGrep::cache_path_for(cache_dir.path(), repo.path())
+                .unwrap()
+                .exists(),
+            "cache.enabled = false must mean no cache file"
+        );
+    }
+
+    #[test]
+    async fn search_works_without_a_prior_scan_in_the_same_process() {
+        // K7: `search` opened with `if !is_scanned() { "run scan first" }`, and
+        // since each process starts empty that branch was taken every time —
+        // advice that could not be followed. It must obtain an index itself.
+        let repo = TempDir::new().unwrap();
+        create_test_rust_file(
+            &repo,
+            "searchable.rs",
+            "pub fn searchable_fn() -> i32 { 5 }\n",
+        );
+
+        let cache_dir = TempDir::new().unwrap();
+        let mut app = CliApp::new(create_test_config_with_cache(&cache_dir), false, false)
+            .await
+            .unwrap();
+        assert!(!app.loregrep.is_scanned(), "a fresh process starts empty");
+
+        let args = SearchArgs {
+            query: "searchable_fn".to_string(),
+            path: repo.path().to_path_buf(),
+            r#type: "function".to_string(),
+            limit: 10,
+            fuzzy: false,
+        };
+        assert!(app.search(args).await.is_ok());
+
+        assert!(
+            app.loregrep.is_scanned(),
+            "search must populate the index instead of telling the user to scan"
+        );
+        let result = app
+            .loregrep
+            .execute_tool(
+                "search_functions",
+                serde_json::json!({"pattern": "searchable_fn"}),
+            )
+            .await
+            .unwrap();
+        let count = result
+            .data
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(count >= 1, "search should find the function it indexed");
+    }
+
+    #[test]
+    async fn search_reuses_the_cache_exec_tool_wrote() {
+        // The two commands share one load-or-scan path, so an index built by
+        // either is usable by the other.
+        let repo = TempDir::new().unwrap();
+        create_test_rust_file(&repo, "shared.rs", "pub fn shared_fn() -> i32 { 3 }\n");
+
+        let cache_dir = TempDir::new().unwrap();
+        let cache_path = LoreGrep::cache_path_for(cache_dir.path(), repo.path()).unwrap();
+
+        {
+            let mut app = CliApp::new(create_test_config_with_cache(&cache_dir), false, false)
+                .await
+                .unwrap();
+            let args = ExecToolArgs {
+                tool: "search_functions".to_string(),
+                params: r#"{"pattern":"shared_fn"}"#.to_string(),
+                path: repo.path().to_path_buf(),
+            };
+            assert!(app.exec_tool(args).await.is_ok());
+        }
+        assert!(cache_path.exists());
+
+        let mut app2 = CliApp::new(create_test_config_with_cache(&cache_dir), false, false)
+            .await
+            .unwrap();
+        assert!(app2.loregrep.is_cache_fresh(&cache_path, repo.path()));
+
+        let args = SearchArgs {
+            query: "shared_fn".to_string(),
+            path: repo.path().to_path_buf(),
+            r#type: "all".to_string(),
+            limit: 10,
+            fuzzy: false,
+        };
+        assert!(app2.search(args).await.is_ok());
+        assert!(app2.loregrep.is_scanned());
+    }
+
+    #[test]
     async fn test_exec_tool_persists_and_reuses_cache() {
         // First exec-tool invocation scans and writes a per-repo index cache;
         // a second, fresh CliApp on the same path finds that cache fresh and
@@ -1078,7 +1332,8 @@ struct PrivateStruct {
             "pub fn cached_target() -> i32 { 7 }\n",
         );
 
-        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        let cache_dir = TempDir::new().unwrap();
+        let cache_path = LoreGrep::cache_path_for(cache_dir.path(), temp_dir.path()).unwrap();
         assert!(
             !cache_path.exists(),
             "no cache should exist before first run"
@@ -1086,7 +1341,7 @@ struct PrivateStruct {
 
         // First invocation: scans, then persists the index.
         {
-            let config = create_test_config();
+            let config = create_test_config_with_cache(&cache_dir);
             let mut app = CliApp::new(config, false, false).await.unwrap();
             let args = ExecToolArgs {
                 tool: "search_functions".to_string(),
@@ -1101,7 +1356,7 @@ struct PrivateStruct {
         );
 
         // Second invocation with a brand-new app: the cache is fresh and used.
-        let config = create_test_config();
+        let config = create_test_config_with_cache(&cache_dir);
         let mut app2 = CliApp::new(config, false, false).await.unwrap();
         assert!(
             app2.loregrep.is_cache_fresh(&cache_path, temp_dir.path()),
@@ -1151,11 +1406,12 @@ struct PrivateStruct {
             "pub fn beta_doomed() -> i32 { 2 }\n",
         );
 
-        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        let cache_dir = TempDir::new().unwrap();
+        let cache_path = LoreGrep::cache_path_for(cache_dir.path(), temp_dir.path()).unwrap();
 
         // First run: scan both files and persist the cache.
         {
-            let mut app = CliApp::new(create_test_config(), false, false)
+            let mut app = CliApp::new(create_test_config_with_cache(&cache_dir), false, false)
                 .await
                 .unwrap();
             let args = ExecToolArgs {
@@ -1173,7 +1429,7 @@ struct PrivateStruct {
         // it immediately.
         fs::remove_file(&doomed).unwrap();
 
-        let mut app2 = CliApp::new(create_test_config(), false, false)
+        let mut app2 = CliApp::new(create_test_config_with_cache(&cache_dir), false, false)
             .await
             .unwrap();
         assert!(
@@ -1239,13 +1495,14 @@ struct PrivateStruct {
 
         // Configure the scanner to exclude that directory (mirrors how config
         // exclude_patterns / gitignore drop build artifacts).
-        let mut config = create_test_config();
+        let cache_dir = TempDir::new().unwrap();
+        let mut config = create_test_config_with_cache(&cache_dir);
         config
             .file_scanning
             .exclude_patterns
             .push("**/excluded/**".to_string());
 
-        let cache_path = LoreGrep::default_cache_path(temp_dir.path());
+        let cache_path = LoreGrep::cache_path_for(cache_dir.path(), temp_dir.path()).unwrap();
         {
             let mut app = CliApp::new(config.clone(), false, false).await.unwrap();
             let args = ExecToolArgs {
