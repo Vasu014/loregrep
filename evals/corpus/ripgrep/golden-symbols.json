@@ -7,8 +7,8 @@
     "indexer": "rust-analyzer",
     "indexer_version": "1.97.1 (8bab26f4 2026-07-14)",
     "scip_cli_version": "v0.9.0",
-    "converter_version": "1.0.0",
-    "generated_at": "2026-07-22T08:27:38Z"
+    "converter_version": "1.1.0",
+    "generated_at": "2026-07-22T08:44:56Z"
   },
   "policy": {
     "include_nested_functions": false,

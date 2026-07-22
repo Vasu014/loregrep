@@ -385,6 +385,9 @@ def score_symbols(golden_symbols, emitted_symbols, language, policy=None):
         (emitted_lang if language_of_path(e["file"]) == language
          else emitted_other_lang).append(e)
 
+    # Files the oracle never indexed at all (see the post-match guard below).
+    oracle_files = {g["file"] for g in golden_symbols}
+
     pairs, wrong_file, missing, extra = match_symbols(golden_in, emitted_lang)
 
     # Policy exclusions apply ONLY to unmatched emitted symbols. Anything that
@@ -393,8 +396,19 @@ def score_symbols(golden_symbols, emitted_symbols, language, policy=None):
         if policy.get("include_nested_functions") is False else set()
     excluded = {}
     false_positives = []
+    emitted_out_of_scope = []
     for e in extra:
+        # Parity is only meaningful where BOTH sides can speak. An indexer builds
+        # from tsconfig/package projects and may cover a strict subset of the
+        # tree (scip-typescript indexes no *.test.ts in hono), so an UNMATCHED
+        # symbol in a file with zero golden entries is unmeasurable, not a false
+        # positive. Applied after matching on purpose: doing it earlier would
+        # swallow wrong-file findings, where the whole point is that loregrep put
+        # a real symbol somewhere the oracle did not.
         bucket = classify_exclusion(e, policy, nested_ids)
+        if bucket is None and e["file"] not in oracle_files:
+            emitted_out_of_scope.append(e)
+            continue
         if bucket:
             excluded.setdefault(bucket, []).append(e)
         else:
@@ -503,6 +517,12 @@ def score_symbols(golden_symbols, emitted_symbols, language, policy=None):
         ex, trunc = _cap([_ex(s) for s in sorted(items, key=lambda s: (s["file"],
                                                                       s["start_line"] or 0))])
         excluded_out[bucket] = {"count": len(items), "examples": ex, "truncated": trunc}
+    if emitted_out_of_scope:
+        ex, trunc = _cap([_ex(s) for s in emitted_out_of_scope])
+        n_files = len({s["file"] for s in emitted_out_of_scope})
+        excluded_out["outside_oracle_scope"] = {
+            "count": len(emitted_out_of_scope), "examples": ex, "truncated": trunc,
+            "distinct_files": n_files}
     if emitted_other_lang:
         ex, trunc = _cap([_ex(s) for s in emitted_other_lang])
         excluded_out["other_language"] = {"count": len(emitted_other_lang),
@@ -547,8 +567,16 @@ def collect_symbols(binary, src_abs, timeout=600):
     for tool, normalizer in (("search_functions", normalize_emitted_function),
                              ("search_structs", normalize_emitted_type)):
         params = {"pattern": ENUMERATE_PATTERN, "limit": ENUMERATE_LIMIT}
+        # cwd = the pinned checkout, NOT this repo. loregrep discovers
+        # `loregrep.toml` relative to the working directory and a discovered
+        # config REPLACES the built-in include/exclude patterns, so scoring from
+        # the repo root leaked the developer's own config into the measurement
+        # (it once silently dropped every *.test.ts file from a corpus, 59
+        # symbols, with nothing in the scorecard to show for it). Pinning cwd to
+        # the tree under test makes the number depend only on pinned inputs.
         parsed, rc, stderr_tail, latency_ms = run_tool(binary, tool, params,
-                                                       src_abs, timeout=timeout)
+                                                       src_abs, timeout=timeout,
+                                                       cwd=src_abs)
         items = _run.dig(parsed, "data.results") if parsed else None
         ok = isinstance(items, list)
         if ok:
@@ -566,6 +594,63 @@ def read_src_commit(src_abs):
         return out.stdout.strip() or None
     except Exception:
         return None
+
+
+def load_waivers(golden_path):
+    """Per-symbol waivers living beside the golden (`waivers.json`).
+
+    A waiver records that loregrep emitted a REAL definition the oracle does not
+    represent — an overload sibling, a pyright-pruned branch, a name the indexer
+    models as a local. It is triage, not amnesty: waived items stay counted by
+    class, and a waiver that no longer matches any false positive is reported as
+    STALE, the same ratchet `known_failures.json` applies to xfails. Without that,
+    a genuine regression could hide inside a stack of legitimate quirks.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(golden_path)), "waivers.json")
+    if not os.path.exists(path):
+        return {}, path
+    with open(path) as fh:
+        doc = json.load(fh)
+    index = {}
+    for entry in doc.get("waivers", []):
+        index[(entry["at"], entry["name"])] = entry
+    return index, path
+
+
+def apply_waivers(card, waivers):
+    """Move waived false positives into counted per-class buckets."""
+    if not waivers:
+        return card
+    matched = set()
+    by_class = {}
+    for kind, bucket in card.get("per_kind", {}).items():
+        kept = []
+        for fp in bucket.get("false_positives", []):
+            key = (fp["at"], fp["name"])
+            hit = waivers.get(key)
+            if hit:
+                matched.add(key)
+                by_class.setdefault(hit["class"], []).append(fp)
+                bucket["false_positives_n"] -= 1
+            else:
+                kept.append(fp)
+        bucket["false_positives"] = kept
+    for cls, items in sorted(by_class.items()):
+        card["excluded"]["waived:" + cls] = {
+            "count": len(items),
+            "examples": items[:50],
+            "truncated": len(items) > 50,
+        }
+    card["excluded_total"] = sum(v["count"] for v in card["excluded"].values())
+    card["totals"]["false_positives_n"] = max(
+        0, card["totals"].get("false_positives_n", 0) - len(matched))
+    card["totals"]["waived"] = len(matched)
+    stale = [dict(k=k, entry=v) for k, v in waivers.items() if k not in matched]
+    card["stale_waivers"] = [
+        {"at": k[0], "name": k[1], "class": v["class"]}
+        for k, v in sorted(waivers.items()) if k not in matched
+    ]
+    return card
 
 
 def score_golden(golden, binary, src_abs, allow_commit_mismatch=False,
@@ -665,6 +750,14 @@ def print_summary(card, out_path=None):
     print("defect split: missing=%d  wrong_file=%d  span_mismatch=%d  kind_mismatch=%d  FP=%d"
           % (t["missing"], t["wrong_file"], t["span_mismatch"], t["kind_mismatch"],
              t["false_positives_n"]))
+    if t.get("waived"):
+        print("waived (individually triaged, see waivers.json): %d" % t["waived"])
+    # A waiver that matches nothing is either fixed upstream or was wrong. Same
+    # ratchet as an unexpectedly-passing known_failure: it must be visible.
+    if card.get("stale_waivers"):
+        print("STALE WAIVERS (no longer match any finding - re-triage or delete):")
+        for sw in card["stale_waivers"][:20]:
+            print("  %-52s %s [%s]" % (sw["at"], sw["name"], sw["class"]))
     if card["excluded"]:
         print("excluded by policy (NOT counted against precision):")
         for bucket, v in sorted(card["excluded"].items()):
@@ -730,6 +823,17 @@ def main(argv=None):
     card = score_golden(golden, binary, src_abs,
                         allow_commit_mismatch=args.allow_commit_mismatch,
                         keep_cache=args.keep_cache, timeout=args.timeout)
+
+    # Provenance: any config file the scanned tree itself carries is part of the
+    # pinned fixture; anything else would be a machine-dependent input and must
+    # be visible in the scorecard rather than silently applied.
+    discovered = [n for n in ("loregrep.toml", ".loregrep.toml")
+                  if os.path.exists(os.path.join(src_abs, n))]
+    card["config_in_effect"] = discovered or "built-in defaults"
+
+    waivers, waivers_path = load_waivers(args.golden)
+    card["waivers_file"] = waivers_path if waivers else None
+    card = apply_waivers(card, waivers)
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out_path = args.json_out or os.path.join(

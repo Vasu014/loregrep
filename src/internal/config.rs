@@ -76,11 +76,16 @@ impl Default for FileScanningConfig {
                 "**/dist/**".to_string(),
                 "**/build/**".to_string(),
                 "**/.git/**".to_string(),
+                // Generated type stubs: no executable code, pure index noise.
                 "*.d.ts".to_string(),
-                "*.test.js".to_string(),
-                "*.spec.js".to_string(),
-                "*.test.ts".to_string(),
-                "*.spec.ts".to_string(),
+                // NOTE: test files are deliberately NOT excluded. They were once
+                // (*.test.ts/*.spec.ts/*.test.js/*.spec.js) which (a) disagreed
+                // with the library defaults in LoreGrepConfig, so the same binary
+                // indexed different trees depending on entry point, (b) was
+                // asymmetric — *.test.tsx and *.spec.tsx were still indexed — and
+                // (c) silently hid test call sites from "who calls X", which is
+                // often exactly where the usage examples live. Users who want
+                // them gone can say so in loregrep.toml.
             ],
             max_file_size: 1024 * 1024, // 1MB
             follow_symlinks: false,

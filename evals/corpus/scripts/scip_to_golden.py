@@ -14,6 +14,11 @@ The inclusion policy and the SCIP-kind -> neutral-kind mapping this implements
 are documented in evals/corpus/POLICY.md. Keep the two in sync; POLICY.md is
 the decision record for what this file does.
 
+Languages: rust (rust-analyzer SCIP), python (scip-python) and typescript
+(scip-typescript). Each has its own converter function; `convert()` only
+dispatches. Any other --language is refused rather than pretending one descriptor
+grammar generalises to another.
+
 Usage:
     python3 scip_to_golden.py --scip index.scip --repo loregrep \\
         --commit <40-hex> --language rust --out golden-symbols.json
@@ -24,13 +29,14 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime
+import fnmatch
 import json
 import os
 import re
 import subprocess
 import sys
 
-CONVERTER_VERSION = "1.0.0"
+CONVERTER_VERSION = "1.1.0"
 SCHEMA_VERSION = 1
 
 # --------------------------------------------------------------------------
@@ -115,6 +121,10 @@ RUST_SIGNATURE_KEYWORDS = {
 
 RUST_VISIBILITY_RE = re.compile(r"^(pub\s*\([^)]*\)|pub)\s+")
 STDLIB_PACKAGES = {"std", "core", "alloc", "proc_macro", "test", "rust-std"}
+
+# scip-python stamps every non-first-party symbol with the distribution it came
+# from; the typeshed bundle it ships under is spelled exactly like this.
+PYTHON_STDLIB_PACKAGES = {"python-stdlib"}
 
 
 class ConversionError(Exception):
@@ -554,11 +564,27 @@ def cfg_test_module(repo_root, rel_path, start_line):
 
 def convert(index, language, excluded_paths=None, packages=None, stats=None,
             repo_root=None, excluded_kinds=EXCLUDED_KINDS):
-    if language != "rust":
+    """Dispatch to the per-language converter.
+
+    Each language gets its own function rather than a pile of `if language ==`
+    branches inside one loop: the descriptor grammars, the kind signals and the
+    "what is first-party" rules genuinely differ, and a shared loop would make a
+    Python change able to regress Rust. See POLICY.md.
+    """
+    impl = {"rust": convert_rust, "python": convert_python,
+            "typescript": convert_typescript}.get(language)
+    if impl is None:
         raise ConversionError(
-            "language %r is not implemented; only 'rust' descriptors are "
-            "understood by this converter (see POLICY.md)" % language
+            "language %r is not implemented; only 'rust', 'python' and "
+            "'typescript' descriptors are understood by this converter "
+            "(see POLICY.md)" % language
         )
+    return impl(index, excluded_paths=excluded_paths, packages=packages, stats=stats,
+                repo_root=repo_root, excluded_kinds=excluded_kinds)
+
+
+def convert_rust(index, excluded_paths=None, packages=None, stats=None,
+                 repo_root=None, excluded_kinds=EXCLUDED_KINDS):
     stats = stats or Stats()
     excluded = tuple(excluded_paths or ())
     allowed_packages = set(packages) if packages else infer_local_packages(index)
@@ -712,15 +738,680 @@ def convert(index, language, excluded_paths=None, packages=None, stats=None,
     return deduped, stats
 
 
+# --------------------------------------------------------------------------
+# Python classification (scip-python)
+# --------------------------------------------------------------------------
+
+# scip-python 0.6.6 emits NO `kind` field on SymbolInformation: a symbol carries
+# only {symbol, documentation, relationships}. So the PRIMARY kind signal for
+# Python is the symbol string's trailing descriptor — the structural,
+# machine-generated part of the grammar — and the rendered `documentation[0]`
+# fenced block is a SECONDARY, corroborating signal only. That is the mirror
+# image of the Rust path (where a rendered signature is primary and a numeric,
+# drift-prone `kind` enum is secondary): in each language the stable signal wins.
+# Disagreements are counted in --stats, never silently resolved. See POLICY.md.
+PYTHON_DESCRIPTOR_TO_NEUTRAL = {
+    "method": "function",  # `foo().`      — promoted to "method" when a class encloses it
+    "type": "class",       # `Foo#`        — every Python `class` statement
+    "macro": "namespace",  # `__init__:`   — SCIP *meta* descriptor: the module itself
+    "term": None,          # `x.`          — variable / class attribute / TypeVar / type alias
+    "parameter": None,     # `foo().(x)`
+    "type_parameter": None,
+    "namespace": None,     # a bare module path with nothing after it
+}
+
+# The fenced block scip-python renders as the first documentation entry, e.g.
+#     ```python\n@overload\ndef quote(\n  string: bytes\n) -> str:\n```
+PYTHON_DOC_FENCE_RE = re.compile(r"^```python\n(.*?)\n?```\s*$", re.S)
+
+PYTHON_TEST_BASENAME_GLOBS = ("test_*.py", "*_test.py", "tests.py", "conftest.py")
+
+
+def python_doc_head(sym_info):
+    """First non-decorator source line of the rendered ```python``` block, or ""."""
+    docs = (sym_info or {}).get("documentation") or []
+    if not docs:
+        return ""
+    first = (docs[0] or "").strip()
+    m = PYTHON_DOC_FENCE_RE.match(first)
+    if not m:
+        # Module pseudo-symbols are rendered unfenced, as a bare `(module) a.b`.
+        # Only pyright's parenthesised pseudo-kind renderings are trusted here;
+        # anything else in an unfenced first entry is prose (a parameter's
+        # docstring line), which must say nothing about kind.
+        return first.split("\n", 1)[0] if first.startswith("(") else ""
+    for line in m.group(1).split("\n"):
+        line = line.strip()
+        if not line or line.startswith("@"):
+            continue  # decorators sit above the declaration, exactly as in source
+        return line
+    return ""
+
+
+def python_doc_kind(head):
+    """Neutral kind implied by a rendered declaration head, or None if it says nothing."""
+    if not head:
+        return None
+    if head.startswith("async def ") or head.startswith("def "):
+        return "function"
+    if head.startswith("class ") or head == "class":
+        return "class"
+    if head.startswith("(module)"):
+        return "namespace"
+    # "(variable) x: T", "(type alias) X: ...", "undefined = t.TypeVar(...)" and
+    # bare inferred-type renderings all describe bindings, not declarations.
+    return None
+
+
+def python_is_module(parsed):
+    """True for the one `<module.path>/__init__:` pseudo-symbol scip-python emits per file.
+
+    `:` is SCIP's *meta* descriptor; parse_descriptors labels it "macro" because
+    Rust's `macro_rules!` uses the same suffix. Python emits it for exactly one
+    thing — the module — so the label is unambiguous here.
+    """
+    return bool(parsed.descriptors) and parsed.descriptors[-1].kind == "macro"
+
+
+def python_module_path(parsed):
+    """Dotted module path of a module pseudo-symbol (`flask.app`), or ""."""
+    for d in parsed.descriptors:
+        if d.kind == "namespace":
+            return d.name
+    return ""
+
+
+def python_name(parsed):
+    """Bare identifier as written at the definition site.
+
+    scip-python carries no `display_name`, so the name always comes from the
+    trailing descriptor. The module pseudo-symbol is the exception: its trailing
+    descriptor is the literal `__init__`, and the identifier a reader means is
+    the last segment of the dotted module path.
+    """
+    if python_is_module(parsed):
+        return (python_module_path(parsed).rsplit(".", 1) or [""])[-1]
+    return parsed.descriptors[-1].name if parsed.descriptors else ""
+
+
+def python_owner(parsed):
+    """Immediately-enclosing class of a callable, or None.
+
+    Only the *innermost* enclosing descriptor counts. A `def` nested inside a
+    method (`Flask#run().poll().`) is a closure, not a method of `Flask`: Python
+    binds it to the function's local scope and it is unreachable as `Flask.poll`.
+    Walking further out (as the Rust path does, where no such nesting exists)
+    would invent a method that does not exist.
+    """
+    head = parsed.descriptors[:-1]
+    if head and head[-1].kind == "type":
+        return head[-1].name or None
+    return None
+
+
+def python_is_nested(parsed):
+    """True when any callable encloses this definition (inner def / inner class)."""
+    return any(d.kind == "method" for d in parsed.descriptors[:-1])
+
+
+def python_visibility(name):
+    """PEP 8 underscore convention.
+
+    Python has no visibility *construct*, so this is a naming convention rather
+    than a language fact — recorded as such in POLICY.md. Dunders (`__init__`,
+    `__call__`) are protocol members and count as public; a single or double
+    leading underscore is the community's "private" marker.
+    """
+    if not name:
+        return "unknown"
+    if name.startswith("__") and name.endswith("__"):
+        return "public"
+    return "private" if name.startswith("_") else "public"
+
+
+def python_is_test_path(rel_path):
+    parts = rel_path.split("/")
+    if any(p in ("tests", "test") for p in parts[:-1]):
+        return True
+    base = parts[-1]
+    return any(fnmatch.fnmatch(base, g) for g in PYTHON_TEST_BASENAME_GLOBS)
+
+
+def python_flags(rel_path, parsed, doc_head):
+    flags = []
+    if doc_head.startswith("async def "):
+        flags.append("async")
+    if python_is_nested(parsed):
+        flags.append("nested")
+    if python_is_test_path(rel_path):
+        flags.append("test")
+    return sorted(set(flags))
+
+
+def infer_local_packages_python(index):
+    """Packages that are part of the indexed checkout.
+
+    A module pseudo-symbol (`<module.path>/__init__:`) is *defined* only in the
+    file that is that module, so owning a module definition inside the indexed
+    documents is exactly "this package's source is in this checkout". Werkzeug,
+    click and python-stdlib appear only as references and never clear this bar.
+    Falls back to "every non-stdlib package with any definition"; `--package`
+    overrides.
+    """
+    module_owners = set()
+    any_owners = set()
+    for doc in index.get("documents", []):
+        for occ in doc.get("occurrences", []):
+            if not occ.get("symbol_roles", 0) & ROLE_DEFINITION:
+                continue
+            sym = occ.get("symbol", "")
+            if sym.startswith("local "):
+                continue
+            p = ParsedSymbol(sym)
+            if not p.package or p.package.lower() in PYTHON_STDLIB_PACKAGES:
+                continue
+            any_owners.add(p.package.lower())
+            if python_is_module(p):
+                module_owners.add(p.package.lower())
+    return module_owners or any_owners
+
+
+def convert_python(index, excluded_paths=None, packages=None, stats=None,
+                   repo_root=None, excluded_kinds=EXCLUDED_KINDS):
+    """scip-python index -> neutral definition golden. See POLICY.md §10."""
+    stats = stats or Stats()
+    excluded = tuple(excluded_paths or ())
+    # Package-name casing is not stable in scip-python output (first-party
+    # definitions say `flask 3.1.3`, ~108 reference occurrences say `Flask
+    # 3.1.3`), so first-party membership is decided case-insensitively.
+    allowed_packages = set(p.lower() for p in packages) if packages \
+        else infer_local_packages_python(index)
+
+    symbols = []
+    for doc in index.get("documents", []):
+        rel_path = (doc.get("relative_path") or "").replace(os.sep, "/")
+        while rel_path.startswith("./"):
+            rel_path = rel_path[2:]
+        if any(rel_path == e or rel_path.startswith(e.rstrip("/") + "/") for e in excluded):
+            # Counted per DEFINITION, not per document: "18 files" says nothing
+            # about how much inventory the exclusion removed.
+            stats.dropped["excluded_path_file"] += 1
+            stats.dropped["excluded_path"] += sum(
+                1 for o in doc.get("occurrences", [])
+                if o.get("symbol_roles", 0) & ROLE_DEFINITION
+                and not (o.get("symbol") or "").startswith("local ")
+            )
+            continue
+        info = {s["symbol"]: s for s in doc.get("symbols", [])}
+
+        for occ in doc.get("occurrences", []):
+            if not occ.get("symbol_roles", 0) & ROLE_DEFINITION:
+                continue  # a reference, not a definition
+            raw = occ.get("symbol", "")
+            if raw.startswith("local "):
+                stats.dropped["local"] += 1
+                continue
+            parsed = ParsedSymbol(raw)
+            if not parsed.descriptors:
+                stats.dropped["unparseable_symbol"] += 1
+                continue
+            if parsed.package.lower() not in allowed_packages:
+                stats.dropped["external_package"] += 1
+                stats.packages_dropped[parsed.package] += 1
+                continue
+
+            sym_info = info.get(raw, {})
+            doc_head = python_doc_head(sym_info)
+            descriptor_kind = parsed.descriptors[-1].kind
+            neutral = PYTHON_DESCRIPTOR_TO_NEUTRAL.get(descriptor_kind, None)
+
+            from_doc = python_doc_kind(doc_head)
+            if neutral is not None and from_doc is not None and from_doc != neutral:
+                stats.disagreements["descriptor:%s vs doc:%s" % (descriptor_kind, from_doc)] += 1
+            if neutral is None:
+                stats.dropped["kind:%s" % descriptor_kind] += 1
+                continue
+
+            name = python_name(parsed)
+            if not name:
+                stats.dropped["anonymous"] += 1
+                continue
+
+            owner = None
+            if neutral == "function":
+                owner = python_owner(parsed)
+                if owner:
+                    neutral = "method"
+
+            # Span convention, identical to the Rust path (see POLICY.md §4).
+            # scip-python's `enclosing_range` opens at the first DECORATOR line,
+            # so its start is not the declaration; the symbol's own name
+            # occurrence is, and that is what a syntax-level parser reports.
+            name_span = range_to_lines(occ.get("range"))
+            enclosing_span = range_to_lines(occ.get("enclosing_range") or None)
+            if name_span is None and enclosing_span is None:
+                stats.dropped["no_range"] += 1
+                continue
+            start_line = (name_span or enclosing_span)[0]
+            end_line = (enclosing_span or name_span)[1]
+            if end_line < start_line:
+                end_line = start_line
+
+            entry = {
+                "name": name,
+                "kind": neutral,
+                "file": rel_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "owner": owner,
+                "visibility": python_visibility(name),
+                "flags": python_flags(rel_path, parsed, doc_head),
+            }
+            if entry["kind"] in (excluded_kinds or ()):
+                stats.dropped["kind:%s" % entry["kind"]] += 1
+                continue
+            symbols.append(entry)
+            stats.kinds[neutral] += 1
+            stats.packages_kept[parsed.package] += 1
+
+    symbols.sort(key=lambda s: (s["file"], s["start_line"], s["name"], s["kind"],
+                                s["owner"] or "", s["end_line"]))
+    deduped = []
+    seen = set()
+    for s in symbols:
+        key = (s["file"], s["start_line"], s["end_line"], s["name"], s["kind"], s["owner"])
+        if key in seen:
+            stats.dropped["duplicate"] += 1
+            continue
+        seen.add(key)
+        deduped.append(s)
+    return deduped, stats
+
+
+# --------------------------------------------------------------------------
+# TypeScript classification (scip-typescript)
+# --------------------------------------------------------------------------
+
+# scip-typescript 0.4.0, like scip-python and unlike rust-analyzer, emits NO
+# `kind` and no `display_name` on SymbolInformation: an entry carries only
+# {symbol, documentation, relationships}. Unlike Python, though, the descriptor
+# suffix is NOT sufficient here: a `#` (type) descriptor covers `class`,
+# `interface`, `type X = ...` AND `enum` alike, and TypeScript is the one corpus
+# language whose neutral kinds have to tell those four apart. So for TypeScript
+# the PRIMARY kind signal is the rendered ```ts documentation block, and the
+# descriptor suffix is the SECONDARY, corroborating one. See POLICY.md §11.2.
+TS_FENCE_RE = re.compile(r"^```ts\n(.*?)\n?```\s*$", re.S)
+
+# Descriptor suffix -> the coarse class the symbol string can vouch for. The
+# rendered doc head must land inside the same class or the two signals disagree.
+TS_DESCRIPTOR_CLASS = {
+    "type": "type-ish",       # `X#`   — class | interface | type_alias | enum
+    "method": "callable",     # `f().` — function | method | ctor | accessor
+    "term": "binding",        # `x.`   — const/let/var, property, enum member
+    "namespace": "namespace",  # `N/`  — a `namespace`/`module` block, or the file
+    "macro": None,            # `t0:`  — SCIP meta: object/type-literal scopes
+    "parameter": None,
+    "type_parameter": None,
+}
+
+# Rendered declaration head -> (neutral kind, coarse class). `None` neutral means
+# "recognised, and deliberately not a golden symbol".
+TS_DOC_HEAD_RULES = (
+    (re.compile(r"^type\b"), "type_alias", "type-ish"),
+    (re.compile(r"^interface\b"), "interface", "type-ish"),
+    (re.compile(r"^(abstract\s+)?class\b"), "class", "type-ish"),
+    (re.compile(r"^(const\s+)?enum\b"), "enum", "type-ish"),
+    (re.compile(r"^(declare\s+)?function\b"), "function", "callable"),
+    (re.compile(r"^\(method\)"), "method", "callable"),
+    (re.compile(r"^constructor\b"), "method", "callable"),
+    (re.compile(r"^(get|set)\s+\S"), "method", "callable"),
+    (re.compile(r"^module\s+[\"']"), None, "namespace"),     # the per-file module
+    (re.compile(r"^(var|const|let)\b"), None, "binding"),
+    (re.compile(r"^\((property|parameter|enum member|local [a-z ]+)\)"), None, "binding"),
+)
+
+TS_IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+TS_TEST_BASENAME_GLOBS = ("*.test.ts", "*.test.tsx", "*.test.js", "*.test.jsx",
+                          "*.spec.ts", "*.spec.tsx", "*.spec.js", "*.spec.jsx")
+TS_TEST_DIR_COMPONENTS = ("test", "tests", "__tests__", "runtime-tests", "spec", "specs")
+
+
+def ts_doc_head(sym_info):
+    """First line of the rendered ```ts``` block, or "" when it says nothing."""
+    docs = (sym_info or {}).get("documentation") or []
+    if not docs:
+        return ""
+    first = (docs[0] or "").strip()
+    m = TS_FENCE_RE.match(first)
+    body = m.group(1) if m else first
+    for line in body.split("\n"):
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
+def ts_doc_kind(head):
+    """(neutral kind, coarse class) implied by a rendered head; (None, None) if silent."""
+    for rx, neutral, klass in TS_DOC_HEAD_RULES:
+        if rx.match(head):
+            return neutral, klass
+    return None, None
+
+
+def ts_is_file_module(parsed, rel_path):
+    """True for the one `<dir>/`<file.ts>`/` pseudo-symbol emitted per document.
+
+    scip-typescript models every file as a module, so a `namespace`-final symbol
+    is ambiguous: it is either that per-file pseudo-symbol or a real
+    `namespace X {}` / `declare namespace X {}` block, which loregrep DOES emit
+    (`TypeKind::Namespace`). They are told apart structurally: the file module's
+    trailing descriptor is the document's own basename. Getting this wrong in
+    either direction is expensive — see POLICY.md §11.4.
+    """
+    if not parsed.descriptors or parsed.descriptors[-1].kind != "namespace":
+        return False
+    return parsed.descriptors[-1].name == rel_path.rsplit("/", 1)[-1]
+
+
+def ts_normalize_name(raw):
+    """`<constructor>` -> constructor, `<get>url` / `<set>url` -> url.
+
+    scip-typescript spells accessors and constructors with an angle-bracketed
+    role prefix that is not an identifier anyone writes or searches for.
+    """
+    if raw == "<constructor>":
+        return "constructor"
+    m = re.match(r"^<(get|set)>(.+)$", raw)
+    return m.group(2) if m else raw
+
+
+def ts_owner(descriptors):
+    """Nearest enclosing type descriptor (`Cls#m().` -> Cls), or None.
+
+    Interfaces own their method signatures exactly as classes own their methods;
+    both are `<Type>#<member>().` in the symbol string.
+    """
+    for d in reversed(descriptors[:-1]):
+        if d.kind == "type":
+            return d.name or None
+    return None
+
+
+def ts_is_module_level_term(parsed):
+    """A `.` descriptor whose only ancestors are namespaces (file/`namespace X {}`).
+
+    Excludes class fields and interface/type-literal properties (`Cls#x.`,
+    `T#typeLiteral0:x.`) and enum members (`E#V.`), none of which loregrep's
+    TypeScript analyzer emits as a definition.
+    """
+    return all(d.kind == "namespace" for d in parsed.descriptors[:-1])
+
+
+def ts_is_test_path(rel_path):
+    parts = rel_path.split("/")
+    if any(p in TS_TEST_DIR_COMPONENTS for p in parts[:-1]):
+        return True
+    return any(fnmatch.fnmatch(parts[-1], g) for g in TS_TEST_BASENAME_GLOBS)
+
+
+def ts_rendered_type_is_callable(head):
+    """True when `var x: <type>` renders a bare function type.
+
+    Corroborating signal only (see POLICY.md §11.2): it is right about arrows
+    whose type is written inline and wrong about arrows annotated with a named
+    alias (`const h: MiddlewareHandler = (c) => …`), which is why it does not
+    decide inclusion.
+    """
+    if ":" not in head:
+        return False
+    t = head.split(":", 1)[1].strip()
+    if t.startswith("<"):  # generic arrow: <T>(x: T) => T
+        depth = 0
+        for i, ch in enumerate(t):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+                if depth == 0:
+                    t = t[i + 1:].strip()
+                    break
+        else:
+            return False
+    if not t.startswith("("):
+        return False
+    depth = 0
+    for i, ch in enumerate(t):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return t[i + 1:].lstrip().startswith("=>")
+    return False
+
+
+def infer_local_packages_typescript(index):
+    """Packages whose source is in this checkout.
+
+    scip-typescript stamps every non-local symbol with
+    `npm <package> <version>`; an npm dependency pulled in from node_modules is
+    an ordinary symbol under a different package. A package owns a per-file
+    module pseudo-symbol only for files it actually contributed to the index, so
+    "owns a file module" is exactly "its source was indexed here". Falls back to
+    "every package with any definition"; `--package` overrides.
+    """
+    module_owners = set()
+    any_owners = set()
+    for doc in index.get("documents", []):
+        rel_path = (doc.get("relative_path") or "").replace(os.sep, "/")
+        for occ in doc.get("occurrences", []):
+            if not occ.get("symbol_roles", 0) & ROLE_DEFINITION:
+                continue
+            sym = occ.get("symbol", "")
+            if sym.startswith("local "):
+                continue
+            p = ParsedSymbol(sym)
+            if not p.package:
+                continue
+            any_owners.add(p.package)
+            if ts_is_file_module(p, rel_path):
+                module_owners.add(p.package)
+    return module_owners or any_owners
+
+
+def convert_typescript(index, excluded_paths=None, packages=None, stats=None,
+                       repo_root=None, excluded_kinds=()):
+    """scip-typescript index -> neutral definition golden. See POLICY.md §11."""
+    stats = stats or Stats()
+    excluded = tuple(excluded_paths or ())
+    allowed_packages = set(packages) if packages else infer_local_packages_typescript(index)
+
+    symbols = []
+    for doc in index.get("documents", []):
+        rel_path = (doc.get("relative_path") or "").replace(os.sep, "/")
+        while rel_path.startswith("./"):
+            rel_path = rel_path[2:]
+        if any(rel_path == e or rel_path.startswith(e.rstrip("/") + "/") for e in excluded):
+            stats.dropped["excluded_path_file"] += 1
+            stats.dropped["excluded_path"] += sum(
+                1 for o in doc.get("occurrences", [])
+                if o.get("symbol_roles", 0) & ROLE_DEFINITION
+                and not (o.get("symbol") or "").startswith("local ")
+            )
+            continue
+        info = {s["symbol"]: s for s in doc.get("symbols", [])}
+
+        for occ in doc.get("occurrences", []):
+            if not occ.get("symbol_roles", 0) & ROLE_DEFINITION:
+                continue  # a reference, not a definition
+            raw = occ.get("symbol", "")
+            if raw.startswith("local "):
+                stats.dropped["local"] += 1
+                continue
+            parsed = ParsedSymbol(raw)
+            if not parsed.descriptors:
+                stats.dropped["unparseable_symbol"] += 1
+                continue
+            if parsed.package not in allowed_packages:
+                stats.dropped["external_package"] += 1
+                stats.packages_dropped[parsed.package] += 1
+                continue
+
+            descriptor_kind = parsed.descriptors[-1].kind
+            klass = TS_DESCRIPTOR_CLASS.get(descriptor_kind)
+            if klass is None:
+                stats.dropped["descriptor:%s" % descriptor_kind] += 1
+                continue
+
+            head = ts_doc_head(info.get(raw, {}))
+            doc_neutral, doc_class = ts_doc_kind(head)
+            if doc_class is not None and doc_class != klass:
+                stats.disagreements["descriptor:%s vs doc:%s" % (descriptor_kind, doc_class)] += 1
+
+            has_body = occ.get("enclosing_range") is not None
+            neutral = None
+            if klass == "namespace":
+                # The per-file module pseudo-symbol is NOT a `namespace`
+                # declaration; a real `namespace X {}` block is. §11.4.
+                if ts_is_file_module(parsed, rel_path):
+                    stats.dropped["file_module"] += 1
+                    continue
+                if not TS_IDENTIFIER_RE.match(parsed.descriptors[-1].name or ""):
+                    # `declare module '../..' {}` — the "name" is a module
+                    # specifier string, not an identifier. §11.4.
+                    stats.dropped["quoted_module_declaration"] += 1
+                    continue
+                neutral = "namespace"
+            elif klass == "type-ish":
+                # ONLY the rendered head can separate class/interface/type_alias/enum.
+                neutral = doc_neutral
+                if neutral is None:
+                    stats.dropped["type_unclassified"] += 1
+                    continue
+            elif klass == "callable":
+                neutral = "function"
+            elif klass == "binding":
+                if not ts_is_module_level_term(parsed):
+                    stats.dropped["member_binding"] += 1
+                    continue
+                # A module-level binding is a *definition* only when its
+                # initializer is a function-like expression, which is exactly
+                # when scip-typescript gives the occurrence an `enclosing_range`
+                # (a plain `const N = 1` or a re-export alias gets none). The
+                # rendered type is the corroborating signal; §11.2 records the
+                # 107 hono cases where the two differ and why the structural one
+                # is right in both directions.
+                if ts_rendered_type_is_callable(head) != has_body:
+                    stats.disagreements["term:enclosing_range=%s vs rendered_fn_type=%s"
+                                        % (has_body, not has_body)] += 1
+                if not has_body:
+                    stats.dropped["binding"] += 1
+                    continue
+                neutral = "function"
+
+            name = ts_normalize_name(parsed.descriptors[-1].name or "")
+            if not name:
+                stats.dropped["anonymous"] += 1
+                continue
+
+            owner = None
+            if neutral in ("function", "method"):
+                owner = ts_owner(parsed.descriptors)
+                neutral = "method" if owner else "function"
+
+            # Span convention, identical to Rust (§4) and Python (§10.5):
+            # start_line is the DECLARATION line from the symbol's own name
+            # occurrence, end_line from `enclosing_range`.
+            name_span = range_to_lines(occ.get("range"))
+            enclosing_span = range_to_lines(occ.get("enclosing_range") or None)
+            if name_span is None and enclosing_span is None:
+                stats.dropped["no_range"] += 1
+                continue
+            start_line = (name_span or enclosing_span)[0]
+            end_line = (enclosing_span or name_span)[1]
+            if end_line < start_line:
+                end_line = start_line
+
+            flags = []
+            if ts_is_test_path(rel_path):
+                flags.append("test")
+            if rel_path.endswith(".d.ts"):
+                flags.append("ambient")
+
+            entry = {
+                "name": name,
+                "kind": neutral,
+                "file": rel_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "owner": owner,
+                # scip-typescript renders neither `export` nor
+                # `private`/`protected`; abstaining beats guessing. §11.5.
+                "visibility": "unknown",
+                "flags": sorted(set(flags)),
+            }
+            if entry["kind"] in (excluded_kinds or ()):
+                stats.dropped["kind:%s" % entry["kind"]] += 1
+                continue
+            symbols.append(entry)
+            stats.kinds[neutral] += 1
+            stats.packages_kept[parsed.package] += 1
+
+    symbols.sort(key=lambda s: (s["file"], s["start_line"], s["name"], s["kind"],
+                                s["owner"] or "", s["end_line"]))
+    deduped = []
+    seen = set()
+    for s in symbols:
+        key = (s["file"], s["start_line"], s["end_line"], s["name"], s["kind"], s["owner"])
+        if key in seen:
+            stats.dropped["duplicate"] += 1
+            continue
+        seen.add(key)
+        deduped.append(s)
+    return deduped, stats
+
+
+# Per-language policy defaults recorded in the golden's `policy` block.
+#
+# include_nested_functions differs by language because the ORACLE differs, not
+# because the languages do: rust-analyzer gives an inner `fn` a `local` symbol
+# (so the Rust golden structurally cannot contain one), while scip-python gives
+# an inner `def` a fully-qualified symbol (`create_app().index().`). Declaring
+# `true` for Python is therefore a statement of fact about the golden's contents;
+# declaring `false` would make the scorer strip loregrep's inner functions from
+# the precision denominator while the golden still demanded them, i.e. it would
+# manufacture false negatives. See POLICY.md §10.
+#
+# scip-typescript behaves like rust-analyzer here: every definition inside a
+# function body is a `local N` symbol, so a TypeScript golden structurally
+# cannot contain a nested function either. See POLICY.md §11.6.
+NESTED_FUNCTIONS_INCLUDED = {"rust": False, "python": True, "typescript": False}
+
+# Kinds outside the definition-parity contract, per language. Rust `mod` and
+# Python modules are file properties loregrep never surfaces as searchable
+# symbols; TypeScript `namespace X {}` IS surfaced (`TypeKind::Namespace`), so
+# TypeScript excludes nothing by kind — its per-file module pseudo-symbols are
+# dropped structurally instead, before they ever become a `namespace`. §11.4.
+EXCLUDED_KINDS_BY_LANGUAGE = {
+    "rust": EXCLUDED_KINDS,
+    "python": EXCLUDED_KINDS,
+    "typescript": (),
+}
+
+
 def build_golden(index, args, stats=None):
     excluded = list(args.exclude or [])
+    excluded_kinds = getattr(args, "excluded_kinds", None)
+    if excluded_kinds is None:
+        excluded_kinds = EXCLUDED_KINDS_BY_LANGUAGE.get(args.language, EXCLUDED_KINDS)
     symbols, stats = convert(
         index,
         args.language,
         excluded_paths=excluded,
         packages=args.package,
         stats=stats,
-        excluded_kinds=getattr(args, "excluded_kinds", EXCLUDED_KINDS),
+        excluded_kinds=excluded_kinds,
         repo_root=getattr(args, "repo_root", None),
     )
     tool = (index.get("metadata") or {}).get("tool_info") or {}
@@ -742,14 +1433,17 @@ def build_golden(index, args, stats=None):
             "generated_at": ts.replace(microsecond=0).isoformat() + "Z",
         },
         "policy": {
-            "include_nested_functions": False,
+            "include_nested_functions": NESTED_FUNCTIONS_INCLUDED.get(args.language, False),
             "include_test_symbols": True,
             "include_generated": False,
-            # Rust `mod` declarations. loregrep models modules as a property of a
-            # file (TreeNode.declared_modules), never as a searchable symbol, so a
-            # module is out of the definition-parity contract rather than a miss.
-            # Revisit if a module ever becomes addressable by a tool.
-            "excluded_kinds": list(getattr(args, "excluded_kinds", EXCLUDED_KINDS) or []),
+            # Rust `mod` declarations and Python modules. loregrep models a module
+            # as a property of a file (TreeNode.declared_modules for Rust; nothing
+            # at all for Python, whose analyzer emits only classes and functions),
+            # never as a searchable symbol, so a module is out of the
+            # definition-parity contract rather than a miss. Revisit if a module
+            # ever becomes addressable by a tool. Empty for TypeScript, whose
+            # `namespace X {}` loregrep DOES emit (POLICY.md §11.4).
+            "excluded_kinds": list(excluded_kinds or []),
             "excluded_paths": excluded,
         },
         "symbols": symbols,

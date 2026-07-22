@@ -143,6 +143,32 @@ impl TypeScriptAnalyzer {
         }
     }
 
+    /// Is `node` nested inside a function/method body? Walks ancestors looking
+    /// for a `statement_block` whose parent is a callable. A `namespace X {}`
+    /// body is also a `statement_block`, but its parent is the module node, so
+    /// types declared in a namespace stay addressable and stay indexed.
+    fn is_inside_function_body(node: &Node) -> bool {
+        let mut cur = node.parent();
+        while let Some(n) = cur {
+            if n.kind() == "statement_block"
+                && let Some(p) = n.parent()
+                && matches!(
+                    p.kind(),
+                    "function_declaration"
+                        | "generator_function_declaration"
+                        | "function_expression"
+                        | "generator_function"
+                        | "arrow_function"
+                        | "method_definition"
+                )
+            {
+                return true;
+            }
+            cur = n.parent();
+        }
+        false
+    }
+
     /// Extract generic type parameter names from a node's `type_parameters`
     /// field (e.g. `<T, U>` -> ["T", "U"]).
     fn extract_type_params(&self, node: &Node, source: &str) -> Vec<String> {
@@ -444,6 +470,14 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             (variable_declarator name: (identifier) @name value: (function_expression) @arrow) @arrow_decl
             (variable_declarator name: (identifier) @name value: (generator_function) @arrow) @arrow_decl
             (method_definition name: (property_identifier) @name) @method
+            ; `#private` methods use a distinct identifier node.
+            (method_definition name: (private_property_identifier) @name) @method
+            ; Bodiless declarations: interface members, abstract class methods,
+            ; and ambient `declare function`. All are real, callable API surface —
+            ; hono alone has ~60 across its interfaces and .d.ts adapters.
+            (method_signature name: (property_identifier) @name) @method
+            (abstract_method_signature name: (property_identifier) @name) @method
+            (function_signature name: (identifier) @name) @function
         "#;
 
         let query =
@@ -519,7 +553,12 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                     let mut ancestor = outer.parent();
                     while let Some(a) = ancestor {
                         match a.kind() {
-                            "class_declaration" | "abstract_class_declaration" => {
+                            // Interfaces own their members exactly as classes do;
+                            // without this an interface method surfaces ownerless
+                            // and reads as a free function.
+                            "class_declaration"
+                            | "abstract_class_declaration"
+                            | "interface_declaration" => {
                                 if let Some(n) = a.child_by_field_name("name") {
                                     func.owner = Some(self.text(&n, source));
                                 }
@@ -623,6 +662,17 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
                 None => continue,
             };
             if name.is_empty() {
+                continue;
+            }
+            // A type declared inside a function body is a local, exactly like an
+            // arrow bound inside one (see `is_top_level_arrow_decl`): it cannot be
+            // referenced from outside, so surfacing it as a module-level type is
+            // noise. hono's client tests declare `type Actual`/`type Expected`
+            // inside `it(() => { ... })` callbacks ~370 times, which is how this
+            // was found. Declarations inside a `namespace`/`module` block are NOT
+            // affected — their body is a statement_block too, but its parent is
+            // the module node, not a function.
+            if Self::is_inside_function_body(&node) {
                 continue;
             }
 
@@ -1888,9 +1938,27 @@ export type Key = string;
         let store = tn.structs.iter().find(|c| c.name == "Store").unwrap();
         assert_eq!(store.generics, vec!["T".to_string()]);
 
-        let load = tn.functions.iter().find(|f| f.name == "load").unwrap();
+        // Two `load`s exist now: the interface's bodiless signature and the
+        // class's implementation. Select by owner rather than by name alone.
+        let load = tn
+            .functions
+            .iter()
+            .find(|f| f.name == "load" && f.owner.as_deref() == Some("Store"))
+            .expect("Store::load");
         assert!(load.is_async);
         assert!(load.is_public);
+
+        // The interface member is real callable API surface and is attributed to
+        // the interface that declares it.
+        let decl = tn
+            .functions
+            .iter()
+            .find(|f| f.name == "load" && f.owner.as_deref() == Some("Repo"))
+            .expect("Repo::load signature");
+        assert!(
+            !decl.is_async,
+            "a bodiless signature carries no async keyword"
+        );
 
         let empty = tn.functions.iter().find(|f| f.name == "empty").unwrap();
         assert!(empty.is_static);

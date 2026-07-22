@@ -228,12 +228,16 @@ class TestPolicyExclusions(unittest.TestCase):
         self.assertEqual(card["excluded"]["test"]["count"], 1)
 
     def test_test_symbols_are_false_positives_when_policy_includes_them(self):
-        g = norm_golden([golden_sym("alpha", "function", "src/a.py", 1, 2)])
+        # The oracle must have indexed tests/test_a.py for this to be a defect
+        # rather than an unmeasurable file — otherwise the out-of-scope guard
+        # (correctly) claims it first.
+        g = norm_golden([golden_sym("alpha", "function", "src/a.py", 1, 2),
+                         golden_sym("test_seen", "function", "tests/test_a.py", 8, 9)])
         e = emit([fn_item("alpha", p("src/a.py"), 1, 2),
+                  fn_item("test_seen", p("tests/test_a.py"), 8, 9),
                   fn_item("test_alpha", p("tests/test_a.py"), 1, 2)])
         card = cs.score_symbols(g, e, "python", {"include_test_symbols": True})
         self.assertEqual(card["totals"]["false_positives_n"], 1)
-        self.assertEqual(card["totals"]["precision"], 0.5)
         self.assertNotIn("test", card["excluded"])
 
     def test_nested_functions_bucketed_by_span_containment(self):
@@ -379,6 +383,74 @@ class TestGoldenFlagExclusion(unittest.TestCase):
             policy={"include_test_symbols": False})
         self.assertEqual(card["totals"]["recall"], 1.0)
         self.assertEqual(card["excluded"]["golden_test"]["count"], 1)
+
+
+class TestWaivers(unittest.TestCase):
+    """Waivers are triage, not amnesty: counted by class, and stale ones surface."""
+
+    def _card(self):
+        golden = [{"name": "kept", "kind": "function", "file": "a.rs",
+                   "start_line": 1, "end_line": 2, "owner": None, "flags": []}]
+        emitted = [
+            {"name": "kept", "kind": "function", "file": "a.rs",
+             "start_line": 1, "end_line": 2, "owner": None},
+            {"name": "waived_one", "kind": "function", "file": "a.rs",
+             "start_line": 10, "end_line": 11, "owner": None},
+            {"name": "real_fp", "kind": "function", "file": "a.rs",
+             "start_line": 20, "end_line": 21, "owner": None},
+        ]
+        return cs.score_symbols(golden, emitted, "rust")
+
+    def test_waived_fp_is_bucketed_by_class_and_leaves_others_alone(self):
+        card = self._card()
+        self.assertEqual(card["totals"]["false_positives_n"], 2)
+        waivers = {("a.rs:10", "waived_one"):
+                   {"at": "a.rs:10", "name": "waived_one", "class": "oracle-artifact-x"}}
+        card = cs.apply_waivers(card, waivers)
+        self.assertEqual(card["totals"]["false_positives_n"], 1)
+        self.assertEqual(card["totals"]["waived"], 1)
+        self.assertEqual(card["excluded"]["waived:oracle-artifact-x"]["count"], 1)
+        # the un-waived false positive must survive untouched
+        remaining = [fp["name"] for b in card["per_kind"].values()
+                     for fp in b["false_positives"]]
+        self.assertEqual(remaining, ["real_fp"])
+
+    def test_waiver_matching_nothing_is_reported_stale(self):
+        card = self._card()
+        waivers = {("a.rs:999", "ghost"):
+                   {"at": "a.rs:999", "name": "ghost", "class": "oracle-artifact-x"}}
+        card = cs.apply_waivers(card, waivers)
+        self.assertEqual([s["name"] for s in card["stale_waivers"]], ["ghost"])
+
+    def test_no_waivers_leaves_the_card_unchanged(self):
+        card = self._card()
+        before = card["totals"]["false_positives_n"]
+        card = cs.apply_waivers(card, {})
+        self.assertEqual(card["totals"]["false_positives_n"], before)
+        self.assertNotIn("stale_waivers", card)
+
+
+class TestOutsideOracleScope(unittest.TestCase):
+    """An indexer may cover a strict subset of the tree; files it never indexed
+    are unmeasurable, not false positives."""
+
+    def test_symbol_in_unindexed_file_is_bucketed(self):
+        g = norm_golden([golden_sym("alpha", "function", "src/a.ts", 1, 2)])
+        e = emit([fn_item("alpha", p("src/a.ts"), 1, 2),
+                  fn_item("helper", p("src/b.test.ts"), 5, 6)])
+        card = cs.score_symbols(g, e, "typescript")
+        self.assertEqual(card["totals"]["false_positives_n"], 0)
+        self.assertEqual(card["excluded"]["outside_oracle_scope"]["count"], 1)
+        self.assertEqual(card["excluded"]["outside_oracle_scope"]["distinct_files"], 1)
+
+    def test_guard_does_not_swallow_a_wrong_file_finding(self):
+        # The whole point of wrong_file is that loregrep put a real symbol
+        # somewhere the oracle did not; the guard must run after matching.
+        g = norm_golden([golden_sym("alpha", "function", "src/a.ts", 1, 2)])
+        e = emit([fn_item("alpha", p("src/elsewhere.ts"), 1, 2)])
+        card = cs.score_symbols(g, e, "typescript")
+        self.assertEqual(card["totals"]["wrong_file"], 1)
+        self.assertNotIn("outside_oracle_scope", card["excluded"])
 
 
 if __name__ == "__main__":

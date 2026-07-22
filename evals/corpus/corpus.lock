@@ -26,6 +26,15 @@
       "language": "python",
       "indexer": "scip-python",
       "why": "Small, stable, pure-Python package with a real src/ layout, decorators, class hierarchies and typing-heavy signatures. Installable with `pip install -e .` so scip-python can see the package metadata it needs for cross-module resolution. Small enough to reindex in seconds during converter development."
+    },
+    {
+      "id": "hono",
+      "url": "https://github.com/honojs/hono.git",
+      "tag": "v4.12.31",
+      "commit": "cadff88bba34153646c9b35f24d7cc0cb61be913",
+      "language": "typescript",
+      "indexer": "scip-typescript",
+      "why": "Small, pure-TypeScript ESM library that ships its own JSX runtime, so it exercises .ts AND .tsx in one pin. Heavy on barrel re-exports (the `export ... from` forms our import extraction only recently started capturing), generics, interfaces and type aliases. Installs and indexes in seconds, which matters because regeneration is manual and iterative; large TSX app monorepos were rejected as an OOM and wall-clock trap for no extra methodology (EVAL_PLAN 4b.3)."
     }
   ],
   "toolchain": {
@@ -50,9 +59,16 @@
       "path": "evals/.tools/node_modules/.bin/scip-python",
       "role": "`scip-python index` for the Python corpus"
     },
+    "scip-typescript": {
+      "version": "0.4.0",
+      "package": "@sourcegraph/scip-typescript",
+      "install": "npm install --prefix evals/.tools",
+      "path": "evals/.tools/node_modules/.bin/scip-typescript",
+      "role": "`scip-typescript index` for the TypeScript corpus"
+    },
     "node": {
       "version": "v22.14.0",
-      "role": "runtime for scip-python"
+      "role": "runtime for scip-python and scip-typescript"
     },
     "python": {
       "version": "3.14.2",

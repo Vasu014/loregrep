@@ -149,13 +149,23 @@ def score(expected_items, actual_items, match_on):
 # Core execution
 # --------------------------------------------------------------------------- #
 
-def run_tool(binary, tool, params, fixture_abs, timeout=60):
-    """Invoke `loregrep exec-tool` and return (parsed_json, exit_code, stderr_tail)."""
+def run_tool(binary, tool, params, fixture_abs, timeout=60, cwd=None):
+    """Invoke `loregrep exec-tool` and return (parsed_json, exit_code, stderr_tail).
+
+    `cwd` matters more than it looks: config discovery starts at `loregrep.toml`
+    RELATIVE TO THE WORKING DIRECTORY (CliConfig::default_config_paths), and a
+    discovered config REPLACES the built-in include/exclude patterns. Running from
+    this repo's root therefore silently applied the developer's own config to the
+    scanned tree — which is how a stray `*.test.ts` exclusion once removed 59
+    symbols from a corpus scorecard. Callers measuring anything reproducible must
+    pin cwd to the tree under test, so the result depends only on pinned inputs.
+    """
     cmd = [binary, "exec-tool", tool,
            "--params", json.dumps(params),
            "--path", fixture_abs]
     t0 = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          cwd=cwd)
     latency_ms = int((time.time() - t0) * 1000)
     stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-3:]) if proc.stderr else ""
     parsed = None

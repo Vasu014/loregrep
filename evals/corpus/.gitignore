@@ -16,6 +16,7 @@
 */.env/
 */*.log
 */.scip-python/
+*/.npm-cache/
 __pycache__/
 *.egg-info/
 
