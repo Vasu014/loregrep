@@ -42,7 +42,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-loregrep = "0.4.2"
+loregrep = "0.6.0"
 tokio = { version = "1.35", features = ["full"] }
 serde_json = "1.0"
 ```
