@@ -50,6 +50,12 @@ impl Default for LoreGrepConfig {
                 "**/*.pyi".to_string(),
                 "**/*.ts".to_string(),
                 "**/*.tsx".to_string(),
+                "**/*.mts".to_string(),
+                "**/*.cts".to_string(),
+                "**/*.js".to_string(),
+                "**/*.jsx".to_string(),
+                "**/*.mjs".to_string(),
+                "**/*.cjs".to_string(),
             ],
             exclude_patterns: vec![
                 "**/target/**".to_string(),
@@ -114,13 +120,19 @@ impl LoreGrep {
         // then only the default Rust analyzer would be added at build time,
         // silently dropping all supported files).
         let mut all_detected_have_analyzer = true;
+        let mut has_ts_analyzer = false;
         for language in &detected_languages {
             builder = match language.as_str() {
                 "rust" => builder.with_rust_analyzer(),
                 "python" => builder.with_python_analyzer(),
-                "typescript" => builder.with_typescript_analyzer(),
-                // Future language support:
-                // "javascript" => builder.with_javascript_analyzer(),
+                // JavaScript is handled by the same analyzer (TSX grammar), so a
+                // project detected as both registers it once — registering twice
+                // is an error.
+                "typescript" | "javascript" if has_ts_analyzer => builder,
+                "typescript" | "javascript" => {
+                    has_ts_analyzer = true;
+                    builder.with_typescript_analyzer()
+                }
                 _ => {
                     all_detected_have_analyzer = false;
                     builder
@@ -690,13 +702,17 @@ impl LoreGrepBuilder {
                     "**/*.pyx".to_string(),
                     "**/*.pyi".to_string(),
                 ]),
-                "typescript" => {
-                    patterns.extend(vec!["**/*.ts".to_string(), "**/*.tsx".to_string()])
-                }
+                "typescript" => patterns.extend(vec![
+                    "**/*.ts".to_string(),
+                    "**/*.tsx".to_string(),
+                    "**/*.mts".to_string(),
+                    "**/*.cts".to_string(),
+                ]),
                 "javascript" => patterns.extend(vec![
                     "**/*.js".to_string(),
                     "**/*.jsx".to_string(),
                     "**/*.mjs".to_string(),
+                    "**/*.cjs".to_string(),
                 ]),
                 "go" => patterns.extend(vec!["**/*.go".to_string()]),
                 _ => {}
@@ -1371,37 +1387,87 @@ mod tests {
         assert!(!fresh.is_cache_fresh(&missing, temp_dir.path()));
     }
 
-    #[test]
-    fn test_auto_discover_js_only_registers_available_analyzers() {
+    #[tokio::test]
+    async fn test_builder_scan_indexes_every_js_and_ts_dialect() {
         use std::fs;
         use tempfile::TempDir;
 
-        // A JavaScript-only project: package.json + a .js file, but no
-        // tsconfig.json, so only "javascript" is detected. JavaScript has no
-        // analyzer yet, so auto_discover must fall through to registering the
-        // full available set (rust + python + typescript) rather than silently
-        // ending up with only the default Rust analyzer.
+        // The builder path uses LoreGrepConfig's default include patterns rather
+        // than auto_discover's detected ones; every dialect the TypeScript
+        // analyzer claims must be scannable through it too.
+        let temp_dir = TempDir::new().unwrap();
+        for (name, body) in [
+            ("a.js", "export function jsFn() {}"),
+            ("b.mjs", "export function mjsFn() {}"),
+            ("c.cjs", "function cjsFn() {}\nmodule.exports = { cjsFn };"),
+            ("d.jsx", "export function jsxFn() { return <p />; }"),
+            ("e.mts", "export function mtsFn(): void {}"),
+            ("f.ts", "export function tsFn(): void {}"),
+        ] {
+            fs::write(temp_dir.path().join(name), body).unwrap();
+        }
+
+        let mut loregrep = LoreGrep::builder()
+            .with_typescript_analyzer()
+            .build()
+            .unwrap();
+        let result = loregrep
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.files_scanned, 6, "every dialect must be indexed");
+
+        for pattern in ["jsFn", "mjsFn", "cjsFn", "jsxFn", "mtsFn", "tsFn"] {
+            let found = loregrep
+                .execute_tool("search_functions", serde_json::json!({"pattern": pattern}))
+                .await
+                .unwrap();
+            assert!(
+                found.data.to_string().contains(pattern),
+                "{pattern} should be indexed and searchable: {}",
+                found.data
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_discover_js_only_indexes_js_files() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // A JavaScript-only project: package.json + a .js file, no tsconfig.json.
+        // JavaScript is handled by the TypeScript analyzer (TSX grammar), so the
+        // file must actually be indexed rather than scanned and dropped.
         let temp_dir = TempDir::new().unwrap();
         fs::write(temp_dir.path().join("package.json"), "{}").unwrap();
-        fs::write(temp_dir.path().join("index.js"), "function f() {}").unwrap();
+        fs::write(
+            temp_dir.path().join("index.js"),
+            "export function greet(name) { return `hi ${name}`; }\n",
+        )
+        .unwrap();
 
-        let loregrep = LoreGrep::auto_discover(temp_dir.path()).unwrap();
+        let mut loregrep = LoreGrep::auto_discover(temp_dir.path()).unwrap();
         let langs = loregrep.language_registry.list_supported_languages();
-
-        assert!(
-            langs.contains(&"rust".to_string()),
-            "rust analyzer should be registered, got {:?}",
-            langs
-        );
-        assert!(
-            langs.contains(&"python".to_string()),
-            "python analyzer should be registered, got {:?}",
-            langs
-        );
         assert!(
             langs.contains(&"typescript".to_string()),
-            "typescript analyzer should be registered, got {:?}",
+            "the TypeScript analyzer handles JavaScript, got {:?}",
             langs
+        );
+
+        let result = loregrep
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.files_scanned, 1, "the .js file must be indexed");
+
+        let found = loregrep
+            .execute_tool("search_functions", serde_json::json!({"pattern": "greet"}))
+            .await
+            .unwrap();
+        assert!(
+            found.data.to_string().contains("greet"),
+            "the JS function should be searchable: {}",
+            found.data
         );
     }
 
