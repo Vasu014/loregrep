@@ -77,3 +77,44 @@ loregrep appears in this pipeline exactly once: as the system under test inside 
 Corpus fetching, SCIP generation, converters, symbol sampling and golden triage are built and
 operated **loregrep-free** — correlated ground truth silently inflates recall. See
 EVAL_PLAN.md §4b.5.
+
+## Verification log
+
+### 2026-07-22 — corpus scorecards re-verified under isolation
+
+A path-resolution audit found two defects that could in principle have
+contaminated corpus scoring, so every published number was re-derived before
+being trusted:
+
+- **K3** — `LoreGrep::scan()` is additive and never resets, so one long-lived
+  instance scanning several roots accumulates symbols across repositories.
+- **K5** — cache freshness compares only the newest mtime, so a fixture
+  materialized with preserved mtimes (`cp -p`, `rsync -a`, `tar -x`) could be
+  served from a stale index.
+
+Both are structurally unreachable from this harness, and that was confirmed
+rather than assumed:
+
+- `corpus_score.py` removes `<src>/.loregrep` **before and after** every run, so
+  each scoring pass is a cold scan (K5's vector needs a surviving cache).
+- Scoring spawns one `exec-tool` subprocess per tool call, one root per process,
+  so no library instance outlives a single repository (K3 needs one that does).
+- Every corpus checkout comes from `git clone` via `fetch.sh`, so all mtimes are
+  checkout time — verified: no file in any corpus predates the fetch.
+
+Re-run cold, with all caches deleted and every checkout confirmed clean and at
+its pinned commit, all three scorecards were byte-identical to the published
+tables:
+
+    ripgrep  3172 gold  3194 emit  R 1.00  P 0.99  span 1.00  miss 0
+    flask    1481 gold  1507 emit  R 1.00  P 0.98  span 1.00  miss 0
+    hono     1343 gold  1366 emit  R 0.99  P 0.98  span 0.98  miss 10
+
+As a stronger check, hono was additionally scored against a **fresh clone at a
+different filesystem path with no `node_modules`** — also byte-identical, so the
+numbers depend on neither checkout location nor build artifacts.
+
+Re-run this whenever a cache or scan-state defect is found:
+
+    find evals/corpus -maxdepth 3 -name .loregrep -type d -exec rm -rf {} +
+    for c in ripgrep flask hono; do python3 evals/retrieval/run.py --corpus $c; done
