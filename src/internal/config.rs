@@ -61,14 +61,21 @@ impl Default for FileScanningConfig {
                 "*.tsx".to_string(),
                 "*.js".to_string(),
                 "*.jsx".to_string(),
+                "*.mts".to_string(),
+                "*.cts".to_string(),
+                "*.mjs".to_string(),
+                "*.cjs".to_string(),
                 "*.go".to_string(),
             ],
             exclude_patterns: vec![
-                "target/*".to_string(),
-                "node_modules/*".to_string(),
-                "dist/*".to_string(),
-                "build/*".to_string(),
-                ".git/*".to_string(),
+                // `**/…/**` so the glob matches at any depth: `node_modules/*`
+                // does not cross `/`, which let vendored JS into the index once
+                // JavaScript gained an analyzer.
+                "**/target/**".to_string(),
+                "**/node_modules/**".to_string(),
+                "**/dist/**".to_string(),
+                "**/build/**".to_string(),
+                "**/.git/**".to_string(),
                 "*.d.ts".to_string(),
                 "*.test.js".to_string(),
                 "*.spec.js".to_string(),

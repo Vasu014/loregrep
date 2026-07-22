@@ -1317,7 +1317,10 @@ class Widget { render() { return 1; } }
             .collect();
         assert!(names.contains(&"greet"), "got {names:?}");
         assert!(names.contains(&"render"), "got {names:?}");
-        assert!(analysis.tree_node.parse_errors.is_empty());
+        // Extraction results are the real signal: `parse_errors` records
+        // extractor failures, not a tree with ERROR nodes, so asserting it is
+        // empty would pass even if the grammar rejected the file.
+        assert_eq!(analysis.tree_node.structs.len(), 1, "class Widget");
     }
 
     #[tokio::test]
@@ -1326,17 +1329,18 @@ class Widget { render() { return 1; } }
         // routed to the TSX grammar rather than the TypeScript one.
         let analyzer = TypeScriptAnalyzer::new().unwrap();
         let code = r#"
+import { Child } from "./Child";
 export function App(props) {
   return <div className="app">{props.children}<Child /></div>;
 }
 "#;
         let analysis = analyzer.analyze_file(code, "App.js").await.unwrap();
-        assert!(
-            analysis.tree_node.parse_errors.is_empty(),
-            "JSX in .js must parse cleanly: {:?}",
-            analysis.tree_node.parse_errors
-        );
+        // If the grammar choked on the JSX, the enclosing function and the
+        // import inside it would not be extracted at all.
+        assert_eq!(analysis.tree_node.functions.len(), 1);
         assert_eq!(analysis.tree_node.functions[0].name, "App");
+        assert_eq!(analysis.tree_node.imports.len(), 1);
+        assert_eq!(analysis.tree_node.imports[0].module_path, "./Child");
     }
 
     #[tokio::test]

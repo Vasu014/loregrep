@@ -30,17 +30,23 @@ pub fn resolve_ts_import(
         let dir = files.dir_of(from_file).unwrap_or_default();
         // `join_normalized` (used inside `probe`) collapses a leading `./`, so we
         // can pass these candidates verbatim.
-        // TypeScript sources first (a `.ts` beside a compiled `.js` is the source
-        // of truth), then JavaScript, then the specifier verbatim.
+        // Node/TypeScript resolution order: EVERY file-extension candidate before
+        // any directory index, so `./foo` prefers `foo.js` over `foo/index.ts`.
+        // Within each group, TypeScript sources first — a `.ts` beside its
+        // compiled `.js` is the source of truth.
         let mut candidates = vec![
             format!("{spec}.ts"),
             format!("{spec}.tsx"),
-            format!("{spec}/index.ts"),
-            format!("{spec}/index.tsx"),
+            format!("{spec}.mts"),
+            format!("{spec}.cts"),
             format!("{spec}.js"),
             format!("{spec}.jsx"),
             format!("{spec}.mjs"),
             format!("{spec}.cjs"),
+            format!("{spec}/index.ts"),
+            format!("{spec}/index.tsx"),
+            format!("{spec}/index.mts"),
+            format!("{spec}/index.cts"),
             format!("{spec}/index.js"),
             format!("{spec}/index.jsx"),
             format!("{spec}/index.mjs"),
@@ -58,6 +64,7 @@ pub fn resolve_ts_import(
                     format!("{stem}.tsx"),
                     format!("{stem}.mts"),
                     format!("{stem}.cts"),
+                    format!("{stem}.jsx"),
                 ],
             );
         }
@@ -220,6 +227,30 @@ mod tests {
             resolve(&files, 0, "./util.js", false),
             ImportTarget::File(1)
         );
+    }
+
+    #[test]
+    fn a_same_named_file_beats_a_directory_index() {
+        // Node/TypeScript try every extension for `./foo` BEFORE `./foo/index.*`,
+        // so `foo.js` wins over `foo/index.ts`.
+        let files = vec![
+            ts_file("src/a.ts"),
+            ts_file("src/foo/index.ts"),
+            ts_file("src/foo.js"),
+        ];
+        assert_eq!(resolve(&files, 0, "./foo", false), ImportTarget::File(2));
+    }
+
+    #[test]
+    fn directory_index_still_resolves_when_no_file_matches() {
+        let files = vec![ts_file("src/a.ts"), ts_file("src/foo/index.ts")];
+        assert_eq!(resolve(&files, 0, "./foo", false), ImportTarget::File(1));
+    }
+
+    #[test]
+    fn mts_and_cts_sources_resolve() {
+        let files = vec![ts_file("src/a.mts"), ts_file("src/util.mts")];
+        assert_eq!(resolve(&files, 0, "./util", false), ImportTarget::File(1));
     }
 
     #[test]

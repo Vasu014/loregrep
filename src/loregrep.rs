@@ -50,6 +50,12 @@ impl Default for LoreGrepConfig {
                 "**/*.pyi".to_string(),
                 "**/*.ts".to_string(),
                 "**/*.tsx".to_string(),
+                "**/*.mts".to_string(),
+                "**/*.cts".to_string(),
+                "**/*.js".to_string(),
+                "**/*.jsx".to_string(),
+                "**/*.mjs".to_string(),
+                "**/*.cjs".to_string(),
             ],
             exclude_patterns: vec![
                 "**/target/**".to_string(),
@@ -696,9 +702,12 @@ impl LoreGrepBuilder {
                     "**/*.pyx".to_string(),
                     "**/*.pyi".to_string(),
                 ]),
-                "typescript" => {
-                    patterns.extend(vec!["**/*.ts".to_string(), "**/*.tsx".to_string()])
-                }
+                "typescript" => patterns.extend(vec![
+                    "**/*.ts".to_string(),
+                    "**/*.tsx".to_string(),
+                    "**/*.mts".to_string(),
+                    "**/*.cts".to_string(),
+                ]),
                 "javascript" => patterns.extend(vec![
                     "**/*.js".to_string(),
                     "**/*.jsx".to_string(),
@@ -1376,6 +1385,49 @@ mod tests {
         // A missing cache is never fresh.
         let missing = temp_dir.path().join("nope").join("index.cache");
         assert!(!fresh.is_cache_fresh(&missing, temp_dir.path()));
+    }
+
+    #[tokio::test]
+    async fn test_builder_scan_indexes_every_js_and_ts_dialect() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // The builder path uses LoreGrepConfig's default include patterns rather
+        // than auto_discover's detected ones; every dialect the TypeScript
+        // analyzer claims must be scannable through it too.
+        let temp_dir = TempDir::new().unwrap();
+        for (name, body) in [
+            ("a.js", "export function jsFn() {}"),
+            ("b.mjs", "export function mjsFn() {}"),
+            ("c.cjs", "function cjsFn() {}\nmodule.exports = { cjsFn };"),
+            ("d.jsx", "export function jsxFn() { return <p />; }"),
+            ("e.mts", "export function mtsFn(): void {}"),
+            ("f.ts", "export function tsFn(): void {}"),
+        ] {
+            fs::write(temp_dir.path().join(name), body).unwrap();
+        }
+
+        let mut loregrep = LoreGrep::builder()
+            .with_typescript_analyzer()
+            .build()
+            .unwrap();
+        let result = loregrep
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.files_scanned, 6, "every dialect must be indexed");
+
+        for pattern in ["jsFn", "mjsFn", "cjsFn", "jsxFn", "mtsFn", "tsFn"] {
+            let found = loregrep
+                .execute_tool("search_functions", serde_json::json!({"pattern": pattern}))
+                .await
+                .unwrap();
+            assert!(
+                found.data.to_string().contains(pattern),
+                "{pattern} should be indexed and searchable: {}",
+                found.data
+            );
+        }
     }
 
     #[tokio::test]
