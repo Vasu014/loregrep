@@ -167,6 +167,11 @@ impl CliApp {
                         false
                     } else {
                         eprintln!("Loaded index cache from {}", cache_path.display());
+                        // The cache does not carry the analysis root, so restore
+                        // it from the invocation: without it, path containment
+                        // for agent-supplied parameters cannot be enforced and
+                        // those tools refuse rather than guess.
+                        self.loregrep.set_scan_root(&args.path.to_string_lossy());
                         true
                     }
                 }
@@ -389,6 +394,21 @@ impl CliApp {
             if self.verbose {
                 eprintln!("Analyzing file: {}", args.file.display());
                 eprintln!("Output format: {}", args.format);
+            }
+
+            // A human naming a file on the command line IS the authorization, so
+            // the file's own directory becomes the analysis root for this
+            // invocation. The containment rule exists to stop AGENT-supplied
+            // parameters — which may be relaying untrusted text — from reaching
+            // arbitrary paths; it is not here to second-guess an explicit
+            // argument the user typed.
+            if let Some(parent) = args.file.parent() {
+                let root = if parent.as_os_str().is_empty() {
+                    std::path::Path::new(".")
+                } else {
+                    parent
+                };
+                self.loregrep.set_scan_root(&root.to_string_lossy());
             }
 
             // Use public API to analyze file
@@ -836,7 +856,14 @@ use std::collections::HashMap;
         let file_path = create_test_rust_file(&temp_dir, "test.rs", rust_content);
 
         let config = create_test_config();
-        let app = CliApp::new(config, false, false).await.unwrap();
+        let mut app = CliApp::new(config, false, false).await.unwrap();
+        // Scan first, as every real invocation does: analyze_file resolves its
+        // parameter against the analysis root and refuses when none is known,
+        // rather than reading relative to the process cwd.
+        app.loregrep
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         // Use public API to analyze file
         let result = app
@@ -1366,7 +1393,12 @@ pub struct DirStruct {
         let file_path = create_test_rust_file(&temp_dir, "simple.rs", rust_content);
 
         let config = create_test_config();
-        let app = CliApp::new(config, false, false).await.unwrap();
+        let mut app = CliApp::new(config, false, false).await.unwrap();
+        // Scan first: analyze_file resolves against the analysis root.
+        app.loregrep
+            .scan(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         // Corrected key used by `analyze <file>` -> content present.
         let with_content = app

@@ -420,6 +420,11 @@ impl LoreGrep {
                 LoreGrepError::InternalError(format!("Failed to lock repo map: {}", e))
             })?;
 
+            // Agent-supplied paths resolve against this, and nothing outside it
+            // may be read (internal::paths). Recorded here because it is the one
+            // place the caller's intent is unambiguous.
+            repo_map.set_scan_root(path);
+
             for tree_node in analysis_results {
                 if let Err(e) = repo_map.add_file(tree_node) {
                     eprintln!("Warning: Failed to store analysis: {}", e);
@@ -469,15 +474,44 @@ impl LoreGrep {
             .await
             .map_err(|e| LoreGrepError::ToolError(format!("Tool execution failed: {}", e)))?;
 
-        // Convert from ai_tools::ToolResult to core::types::ToolResult
+        // Convert from ai_tools::ToolResult to core::types::ToolResult.
+        //
+        // This boundary used to read ONLY `.error` and discard `data`, so a
+        // handler reporting failure via `error_with_data` (which leaves `.error`
+        // as None by design) had its diagnostic replaced with the literal string
+        // "Unknown error" — the agent-facing symptom of the analyze_file bug was
+        // manufactured here, not there. A failure must never reach a caller
+        // without a message it can act on, so: prefer the explicit error, fall
+        // back to a message carried in `data`, and if a handler somehow supplies
+        // neither, say which tool failed and hand back the data instead of
+        // swallowing it.
         if ai_result.success {
             Ok(ToolResult::success(ai_result.data))
         } else {
-            Ok(ToolResult::error(
-                ai_result
-                    .error
-                    .unwrap_or_else(|| "Unknown error".to_string()),
-            ))
+            let message = ai_result
+                .error
+                .clone()
+                .or_else(|| {
+                    ai_result
+                        .data
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| format!("tool '{}' failed without reporting a reason", name));
+            Ok(ToolResult {
+                success: false,
+                data: ai_result.data,
+                error: Some(message),
+            })
+        }
+    }
+
+    /// Record the analysis root on the index. Needed after a cache load, which
+    /// does not carry it; a scan sets it itself.
+    pub fn set_scan_root(&mut self, root: &str) {
+        if let Ok(mut repo_map) = self.repo_map.lock() {
+            repo_map.set_scan_root(root);
         }
     }
 

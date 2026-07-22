@@ -324,33 +324,75 @@ impl LocalAnalysisTools {
         let analyze_input: AnalyzeFileInput =
             serde_json::from_value(input).context("Invalid analyze_file input")?;
 
+        // Resolve the parameter before touching the filesystem.
+        //
+        // Two failures lived here. The path was read RELATIVE TO THE PROCESS CWD,
+        // so a path any sibling tool accepted (they resolve through the index)
+        // failed here whenever the caller stood somewhere else — the tool's own
+        // output was invalid input to itself. And there was no containment check
+        // at all, so an absolute path or a `../../..` traversal read any file on
+        // disk and, with include_content, returned its contents: a file-read
+        // primitive wearing a code-analysis label, one prompt injection from
+        // being an exfiltration path.
+        //
+        // Order: the index first (anything in it is in scope by construction and
+        // this preserves the tolerant matching siblings offer), then the analysis
+        // root for files that exist but were not indexed (excluded by patterns,
+        // say). An unknown root refuses rather than falling back to cwd.
+        let resolved_path = {
+            let repo_map = self.repo_map.lock().unwrap();
+            match repo_map.resolve_file_index(&analyze_input.file_path) {
+                Some(idx) => repo_map
+                    .get_all_files()
+                    .get(idx)
+                    .map(|f| f.file_path.clone())
+                    .unwrap_or_else(|| analyze_input.file_path.clone()),
+                None => match repo_map.scan_root() {
+                    Some(root) => {
+                        match crate::internal::paths::resolve_within_root(
+                            std::path::Path::new(root),
+                            &analyze_input.file_path,
+                        ) {
+                            Ok(p) => p.display().to_string(),
+                            Err(e) => return Ok(ToolResult::error(e.message())),
+                        }
+                    }
+                    None => {
+                        return Ok(ToolResult::error(
+                            crate::internal::paths::PathError::NoRoot {
+                                input: analyze_input.file_path.clone(),
+                            }
+                            .message(),
+                        ));
+                    }
+                },
+            }
+        };
+
         // Resolve the analyzer for this file's language via the registry. If no
         // analyzer is registered for the file's extension, report a clear error
         // instead of silently analyzing it with the wrong language.
-        let analyzer = match self
-            .registry
-            .get_analyzer_for_path(&analyze_input.file_path)
-        {
+        let analyzer = match self.registry.get_analyzer_for_path(&resolved_path) {
             Some(analyzer) => analyzer,
             None => {
                 return Ok(ToolResult::error(format!(
                     "unsupported language for {}",
-                    analyze_input.file_path
+                    resolved_path
                 )));
             }
         };
 
         // Try to read the file and analyze it
-        match tokio::fs::read_to_string(&analyze_input.file_path).await {
+        match tokio::fs::read_to_string(&resolved_path).await {
             Ok(content) => {
-                let file_analysis = analyzer
-                    .analyze_file(&content, &analyze_input.file_path)
-                    .await?;
+                let file_analysis = analyzer.analyze_file(&content, &resolved_path).await?;
 
                 let tree_node = &file_analysis.tree_node;
                 let mut result = json!({
                     "status": "success",
-                    "file_path": analyze_input.file_path,
+                    // Echo the RESOLVED path: echoing the caller's raw string put
+                    // two vocabularies for one file in a single response.
+                    "file_path": resolved_path,
                     // Expose the analysis fields at the top level so consumers
                     // (CLI display, public API callers) can read them directly.
                     "language": tree_node.language,
@@ -1257,6 +1299,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_file_with_nonexistent_file() {
+        // An index with no known analysis root must refuse rather than fall back
+        // to reading relative to the process cwd, and must say why.
         let tools = create_mock_tools();
         let input = json!({
             "file_path": "/nonexistent/file.rs",
@@ -1265,25 +1309,108 @@ mod tests {
 
         let result = tools.execute_tool("analyze_file", input).await.unwrap();
         assert!(!result.success);
-        assert_eq!(result.data["status"], "error");
-        assert!(
-            result.data["error"]
-                .as_str()
-                .unwrap()
-                .contains("Failed to read file")
-        );
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("no analysis root"), "{err}");
+        assert!(err.contains("/nonexistent/file.rs"), "{err}");
     }
 
     #[tokio::test]
-    async fn test_analyze_file_minimal_input() {
-        let tools = create_mock_tools();
-        let input = json!({
-            "file_path": "/nonexistent/file.rs"
-        });
+    async fn test_analyze_file_refuses_paths_outside_the_analysis_root() {
+        // The security property: a code-analysis tool must not be a general
+        // file-read primitive. With include_content this returned the file.
+        use crate::types::TreeNode;
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("inside.rs"), "fn inside() {}").unwrap();
+        let outside_dir = tempfile::TempDir::new().unwrap();
+        let outside = outside_dir.path().join("secret.rs");
+        std::fs::write(&outside, "fn secret() {}").unwrap();
 
-        let result = tools.execute_tool("analyze_file", input).await.unwrap();
-        assert!(!result.success); // Will fail because file doesn't exist
-        assert_eq!(result.data["status"], "error");
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            rm.set_scan_root(dir.path().to_string_lossy().to_string());
+            let mut node = TreeNode::new(
+                dir.path().join("inside.rs").to_string_lossy().to_string(),
+                "rust".to_string(),
+            );
+            node.content_hash = "h".to_string();
+            rm.add_file(node).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        // Absolute path outside the root.
+        let result = tools
+            .execute_tool(
+                "analyze_file",
+                json!({"file_path": outside.to_string_lossy(),
+                       "include_content": true}),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success, "reading outside the root must be refused");
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("outside the analysis root"), "{err}");
+        assert!(
+            !format!("{:?}", result.data).contains("secret"),
+            "file contents must not leak in the failure payload"
+        );
+
+        // Traversal out of the root.
+        let escaped = tools
+            .execute_tool(
+                "analyze_file",
+                json!({"file_path": "../../../../etc/hosts", "include_content": true}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !escaped.success,
+            "traversal out of the root must be refused"
+        );
+
+        // A file inside the root still works.
+        let ok = tools
+            .execute_tool("analyze_file", json!({"file_path": "inside.rs"}))
+            .await
+            .unwrap();
+        assert!(ok.success, "{:?}", ok.error);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_file_resolves_against_the_root_not_the_cwd() {
+        // Composition: a repo-relative path (what siblings accept and what
+        // get_repository_tree emits) must work no matter where the caller stands.
+        use crate::types::TreeNode;
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "fn lib_fn() {}").unwrap();
+
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            rm.set_scan_root(dir.path().to_string_lossy().to_string());
+            let mut node = TreeNode::new(
+                dir.path().join("src/lib.rs").to_string_lossy().to_string(),
+                "rust".to_string(),
+            );
+            node.content_hash = "h".to_string();
+            rm.add_file(node).unwrap();
+        }
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+
+        // `src/lib.rs` also exists in this crate, so a cwd-resolving
+        // implementation would pass by accident — assert the echoed path is the
+        // one under the fixture root.
+        let result = tools
+            .execute_tool("analyze_file", json!({"file_path": "src/lib.rs"}))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        let echoed = result.data["file_path"].as_str().unwrap_or_default();
+        assert!(
+            echoed.contains(dir.path().to_string_lossy().trim_start_matches("/private")),
+            "expected the fixture's file, got {echoed}"
+        );
     }
 
     #[tokio::test]

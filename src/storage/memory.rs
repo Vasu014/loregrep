@@ -197,6 +197,17 @@ pub struct RepoMap {
     // Call graph
     call_graph: HashMap<String, Vec<CallSite>>, // function_name -> call sites
 
+    // The directory this index was built from, as the caller named it.
+    //
+    // Agent-supplied paths must resolve against THIS, never the process working
+    // directory, and nothing outside it may be read (see internal::paths).
+    // Deliberately not derived from the indexed paths: `find_common_root_path`
+    // infers a root by character-wise prefix, which is a guess, and a guess is
+    // not something containment may rest on. Not serialized — a cache load
+    // leaves it None until the caller sets it, and an unknown root refuses
+    // rather than assuming one.
+    scan_root: Option<String>,
+
     // Metadata
     metadata: RepoMapMetadata,
 
@@ -219,6 +230,7 @@ impl Clone for RepoMap {
             // Derived; let the clone rebuild it on demand rather than deep-copying.
             module_graph: RwLock::new(None),
             file_index: self.file_index.clone(),
+            scan_root: self.scan_root.clone(),
             function_index: self.function_index.clone(),
             struct_index: self.struct_index.clone(),
             import_index: self.import_index.clone(),
@@ -252,6 +264,7 @@ impl RepoMap {
             export_index: HashMap::new(),
             language_index: HashMap::new(),
             call_graph: HashMap::new(),
+            scan_root: None,
             metadata: RepoMapMetadata::default(),
             max_files: None,
             query_cache: HashMap::new(),
@@ -364,6 +377,19 @@ impl RepoMap {
 
     /// Map a file path to its index in the current file set (module-graph indices
     /// are positions in `get_all_files`).
+    /// Record the directory this index was built from. Set by every entry point
+    /// that scans (CLI, library, bindings) and after a cache load, since the
+    /// cache does not carry it.
+    pub fn set_scan_root(&mut self, root: impl Into<String>) {
+        self.scan_root = Some(root.into());
+    }
+
+    /// The analysis root, if known. `None` means containment cannot be enforced,
+    /// and callers must refuse rather than fall back to the process cwd.
+    pub fn scan_root(&self) -> Option<&str> {
+        self.scan_root.as_deref()
+    }
+
     pub fn file_index_of(&self, file_path: &str) -> Option<usize> {
         self.file_index.get(file_path).copied()
     }
