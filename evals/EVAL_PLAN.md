@@ -24,21 +24,34 @@ Confirmed by reading source; Layer 1 should break loudly on drift.
   2. `find_callers` is an **exact key lookup** in the call graph (no pattern). Gold uses exact names; include a method-call attribution probe (`self.foo()`/`obj.foo()`).
   3. `find_functions`/`find_structs` try exact-name first, fall back to pattern only on a miss — cover both branches.
   4. `get_dependencies`/`analyze_file` look files up by the stored path string — discover the stored convention empirically (§4.3 path normalization), don't assume.
-- Registered analyzers: Rust, Python, TypeScript/TSX only. A `.go` file is a genuine "unsupported language" probe.
+- Registered analyzers: Rust, Python, TypeScript/TSX/JavaScript. A `.go` file is a genuine "unsupported language" probe.
+- **Tool count is 10, not 6** (`src/internal/ai_tools.rs`): the six original + `trace_callers`, `analyze_impact`, `find_importers`, `get_dependency_graph`. P3-6 adds `find_definition`/`find_references`, making 12. Anywhere this doc said "all 6 tools" it means "every tool".
 - Layer 2 arm-B treatment: the skill at `skills/loregrep/SKILL.md`. The pi extension is untested against a live runtime — don't build Layer 2 on it.
 
 ## 1. Phased implementation plan
 
 | Phase | Deliverable | Depends on |
 |---|---|---|
-| **P0** | `evals/` scaffolding; `rust-basic` fixture + gold (all 6 tools); `.gitignore` for `.loregrep/` | — |
+| **P0** | `evals/` scaffolding; `rust-basic` fixture + gold (every tool); `.gitignore` for `.loregrep/` | — |
 | **P1** | Layer 1 runner (`evals/retrieval/run.py`) + JSONL + summary + non-zero exit on regression; wire into CI | P0 |
 | **P2** | `python-basic`, `ts-basic`, `mixed-small` fixtures + gold; cold/warm latency; `known_failures.json` seeded with the language-filter bug | P1 |
 | **P3** | Layer 2 MVP: Claude Code headless, 2 arms, 3 code-QA tasks on pinned loregrep repo, N=5, JSONL | P1 |
 | **P4** | Full task suite (10–15 tasks incl. negative controls), oracle scripts, `analyze.py` (Wilcoxon, Cliff's delta, bootstrap CIs, Pareto) | P3 |
 | **P5 (v2)** | Arm C (semantic baseline), cross-model replication, larger subjects | P4 |
+| **L1-S1** | SCIP corpus: pin ripgrep + flask, `corpus.lock` (repo SHAs + indexer versions) | P2 |
+| **L1-S2** | Rust SCIP→symbol converter + `regen.sh`; committed `golden-symbols.json` | L1-S1 |
+| **L1-S3** | `run.py --corpus` mode: definition parity scoring; first triage | L1-S2 |
+| **L1-S4** | Python converter + flask goldens; decide CI gating after the first number | L1-S3 |
+| **L1-S5** | Edge parity (coverage / wrongness) — **lands as P3-7**, not before | P3-5 |
 
 Layer 1 is a hard prerequisite: if retrieval quality is bad, an agent A/B measures noise.
+
+**The two levels, stated plainly:**
+- **Level 1 — do we parse the world correctly?** Deterministic, no LLM. Two sources of truth:
+  hand-written fixtures (§4, contract + traps) and SCIP parity on real repos (§4b, population
+  scale). Gates merges.
+- **Level 2 — does that actually save an agent tokens?** Statistical A/B against Claude Code
+  (§5). Gated on Level 1 being green, and its task answer keys derive from Level 1 goldens.
 
 ## 2. Directory layout
 
@@ -128,12 +141,98 @@ CI: `cargo build --release && python3 evals/retrieval/run.py` → non-zero on an
 - an import graph for `get_dependencies`;
 - `mixed-small` adds a `.go` file → the `analyze_file` `error` case.
 
-Coverage: every tool × every applicable fixture language; ≥30 cases in P2. This is the **contribution gate** — a new-language analyzer PR must add `fixtures/<lang>-basic/` with gold covering all 6 tools.
+Coverage: every tool × every applicable fixture language; ≥30 cases in P2. This is the **contribution gate** — a new-language analyzer PR must add `fixtures/<lang>-basic/` with gold covering every applicable tool.
 
 ### 4.3 Runner algorithm
 Per fixture: `rm -rf .loregrep` (cold); run first case cold (`latency_ms_cold`), rerun warm (`latency_ms_warm`), rest warm. Per case: `subprocess.run([binary,"exec-tool",tool,"--params",json.dumps(params),"--path",fixture_dir],capture_output=True,timeout=60)`; parse stdout JSON; record exit code + stderr tail. **Path normalization**: relativize each result `file_path` to the fixture root (POSIX). Project onto `match_on`; set-compare per `expect.mode`; compute P/R/F1; record FP/FN verbatim. Emit JSONL + human summary; exit 1 on unexpected failure/pass. Latency never gates pass/fail.
 
+## 4b. Level 1 at population scale — SCIP parity on real repos
+
+§4's fixtures are 304 lines of hand-written code. They prove *we did not regress* and pin
+traps an oracle cannot express (a commented-out call that must stay absent). They cannot
+answer *do we find everything a compiler-grade indexer finds* — for that the ground truth has
+to come from outside.
+
+### 4b.1 Oracle
+
+SCIP indexers, run locally, no account or upload: `rust-analyzer scip`, `scip-python`
+(Pyright fork, MIT), `scip-typescript` (Apache-2.0), converted to JSON with the `scip` CLI
+(Apache-2.0). Goldens are **committed artifacts**; CI never runs an indexer. Only manual
+regeneration does.
+
+### 4b.2 The metric, split (this is the crux)
+
+loregrep is a tree-sitter heuristic engine that treats `Ambiguous` / `Unresolved` /
+`External` as *correct answers*; SCIP is compiler-grade and resolves nearly everything. A
+single recall number against SCIP would score our honesty as failure. So parity is scored on
+two different axes:
+
+- **Definitions — strict, and gated.** Symbol inventory: name, kind, file, span, visibility,
+  owner. A function SCIP found and we did not is a bug, full stop. Recall and precision both
+  gated. This is where the boring, real bug surface lives (span off-by-ones, missed
+  declaration forms — TS enums/namespaces/generators shipped in `77c09a6` with zero golden
+  coverage).
+- **Edges (calls, imports) — honest, partly gated.** Three numbers instead of one:
+  - `coverage` = resolved edges / SCIP edges. **Tracked, not gated** — this is the roadmap
+    number, and it is what P3/P4 are for.
+  - `wrongness` = edges we assert that SCIP contradicts. **Gated at ~0.** Asserting a wrong
+    edge violates the never-guess contract; failing to assert one does not.
+  - `unresolved` = edges we declined to resolve. Reported, never penalized.
+
+A single blended recall figure is explicitly rejected: it would understate correctness by
+design and push all the explanation into a waiver file.
+
+### 4b.3 Corpus
+
+Start with **two** repos, not six: `ripgrep` (Rust) and `flask` (Python), pinned as
+submodules under `evals/corpus/` — deliberately NOT `evals/fixtures/`, which already means
+hand-written micro-repos. `corpus.lock` records repo SHAs **and** indexer versions; an
+indexer bump is treated like a fixture bump (regen + re-triage). TS/TSX joins once the
+converter pattern is proven; large SPA repos are an OOM and CI-time trap with no incremental
+methodology to learn.
+
+### 4b.4 Where it lives
+
+Extends `evals/retrieval/run.py` with a `--corpus` mode, reusing the existing `dig` /
+`normalize_item_paths` / `project` / `score` helpers and the `known_failures.json` xfail
+ledger (which already fails CI on an unexpected pass — exactly the anti-rot property a
+separate `waivers.json` would reinvent). **Not** a parallel scorer under `evals/scripts/`:
+two runners that can disagree about what "the same result" means is a bug factory.
+
+### 4b.5 Independence invariant
+
+loregrep appears in this pipeline exactly once — as the system under test inside the scorer.
+SCIP generation, converters, symbol sampling and any audit assistance are built and operated
+loregrep-free; correlated ground truth silently inflates recall. Concretely: no using
+loregrep tools to triage golden diffs or write converters, and no developing this tooling in
+an agent session with `skills/loregrep/SKILL.md` enabled.
+
+An LLM audit pass over the goldens is **optional and unvalidated** — a prefilter whose
+disputes a human arbitrates. We deliberately do not build a calibration gate (seeded
+mutations, detection thresholds, a permanent hand-verified sample): that is measurement
+infrastructure for the measurement infrastructure, and it is worth building only for a
+project with no other ground truth. We have fixtures whose answers are known by construction.
+
+### 4b.6 Sequencing against the CodeGraph plan
+
+Definition goldens are safe to build **now** — definition extraction is P1-complete, P3 does
+not touch it, and the goldens harden the same `TreeNode`s that P3-1's symbol table is built
+from.
+
+Edge goldens must wait. P3-3/P3-4 split today's name-merged caller sets into per-symbol
+resolved ones, so a caller golden built now is a superset that a correct resolved graph will
+legitimately shrink — every entry would be triaged twice. Edge parity therefore *becomes*
+P3-7 rather than preceding it.
+
 ## 5. Layer 2 — statistical agent A/B
+
+### 5.0 Start with the taste test, not the harness
+
+§7.5 is the entry point and it is not optional: 2 code-QA tasks x 2 arms x 3 reps, run by
+hand with `claude -p --output-format json`, eyeballed. If the token/turn delta is invisible at
+N=3 on the friendliest terrain, that redirects the entire Layer 2 investment before
+`run_ab.py` exists. Build the designed harness (§5.4) only after the taste test says there is
+an effect worth measuring precisely.
 
 ### 5.1 Driver: Claude Code headless (`claude -p "<prompt>" --output-format stream-json`)
 It *is* the deployment target; reports `usage`/`num_turns`/`duration_ms`/`total_cost_usd`; stream-json gives a transcript for tool-call counting. (Direct API loop = evaluating a bespoke agent nobody uses + reimplementing grep/read = confound. pi = untested runtime.) Record the Claude Code version per row; temperature isn't controllable — accept it, control via reps + interleaving.
