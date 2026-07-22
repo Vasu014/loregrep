@@ -358,7 +358,7 @@ reports the version of the code actually loaded:
 
 ```python
 import loregrep
-loregrep.__version__          # e.g. "0.5.0"
+loregrep.__version__          # e.g. "0.6.0"
 loregrep.LoreGrep.version()   # same value, same source (Cargo.toml)
 ```
 
