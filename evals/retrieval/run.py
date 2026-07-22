@@ -73,10 +73,16 @@ def dig(obj, dotted):
 
 
 def relativize_path(p, fixture_abs):
-    """Relativize an absolute (or scan-joined) result path to the fixture root, POSIX."""
+    """Relativize a result path to the fixture root, POSIX.
+
+    loregrep emits ROOT-RELATIVE paths (relative to the `--path` it was given,
+    which is `fixture_abs` here), so a relative path is anchored at the scan root,
+    not at this repo's root. Absolute paths are still accepted: input tolerance is
+    the point, and older/embedding callers may hand back either.
+    """
     if not isinstance(p, str):
         return p
-    ap = p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
+    ap = p if os.path.isabs(p) else os.path.join(fixture_abs, p)
     ap = os.path.normpath(ap)
     try:
         rel = os.path.relpath(ap, fixture_abs)

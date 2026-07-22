@@ -1,5 +1,5 @@
 // Placeholder RepoMap - will be enhanced in Phase 2: Task 2.1
-use crate::storage::graph::{ModuleGraph, build_module_graph};
+use crate::storage::graph::{IndexPath, ModuleGraph, build_module_graph, normalize_path};
 use crate::types::{
     AnalysisError, ExportStatement, FunctionSignature, ImportStatement, StructSignature, TreeNode,
     TypeKind,
@@ -204,11 +204,14 @@ pub struct RepoMap {
     module_graph: RwLock<Option<ModuleGraph>>,
 
     // Fast indexes
-    file_index: HashMap<String, usize>, // file_path -> index
+    // file identity -> index. Keyed by `IndexPath`, which cannot be built
+    // without normalizing, so this map and `graph::FileSet::by_path` can no
+    // longer dedup on different keys (K2).
+    file_index: HashMap<IndexPath, usize>,
     function_index: HashMap<String, Vec<usize>>, // function_name -> file indices
-    struct_index: HashMap<String, Vec<usize>>, // struct_name -> file indices
-    import_index: HashMap<String, Vec<usize>>, // import_path -> file indices
-    export_index: HashMap<String, Vec<usize>>, // export_name -> file indices
+    struct_index: HashMap<String, Vec<usize>>,   // struct_name -> file indices
+    import_index: HashMap<String, Vec<usize>>,   // import_path -> file indices
+    export_index: HashMap<String, Vec<usize>>,   // export_name -> file indices
     language_index: HashMap<String, Vec<usize>>, // language -> file indices
 
     // Call graph
@@ -299,11 +302,19 @@ impl RepoMap {
         self
     }
 
-    /// Add or update a file in the repository map
+    /// Add or update a file in the repository map.
+    ///
+    /// **This is the normalization boundary.** Every path the node carries — its
+    /// own, and those on its functions/structs/imports/exports/call-sites — is
+    /// rewritten to the one key form here, so nothing downstream has to remember
+    /// to normalize and no two spellings of one file can occupy two slots.
     pub fn add_file(&mut self, tree_node: TreeNode) -> Result<()> {
+        let tree_node = Self::canonicalize_paths(tree_node);
+        let key = IndexPath::new(&tree_node.file_path);
+
         // Check memory limits
         if let Some(max) = self.max_files {
-            if self.files.len() >= max && !self.file_index.contains_key(&tree_node.file_path) {
+            if self.files.len() >= max && !self.file_index.contains_key(&key) {
                 return Err(AnalysisError::Other(format!(
                     "Maximum file limit ({}) reached",
                     max
@@ -311,10 +322,8 @@ impl RepoMap {
             }
         }
 
-        let file_path = tree_node.file_path.clone();
-
         // Remove existing file if present
-        if let Some(&existing_index) = self.file_index.get(&file_path) {
+        if let Some(&existing_index) = self.file_index.get(&key) {
             self.remove_file_by_index(existing_index);
         }
 
@@ -339,9 +348,35 @@ impl RepoMap {
         Ok(())
     }
 
+    /// Rewrite every path a node carries into the single key form.
+    ///
+    /// Analyzers stamp the path they were handed onto each symbol they emit, so
+    /// normalizing only `TreeNode::file_path` would leave `search_functions`
+    /// emitting one vocabulary and `find_importers` another for the same file.
+    fn canonicalize_paths(mut tree_node: TreeNode) -> TreeNode {
+        let canonical = IndexPath::new(&tree_node.file_path).into_string();
+        for f in &mut tree_node.functions {
+            f.file_path = canonical.clone();
+        }
+        for s in &mut tree_node.structs {
+            s.file_path = canonical.clone();
+        }
+        for i in &mut tree_node.imports {
+            i.file_path = canonical.clone();
+        }
+        for e in &mut tree_node.exports {
+            e.file_path = canonical.clone();
+        }
+        for c in &mut tree_node.function_calls {
+            c.file_path = canonical.clone();
+        }
+        tree_node.file_path = canonical;
+        tree_node
+    }
+
     /// Remove a file from the repository map
     pub fn remove_file(&mut self, file_path: &str) -> Result<bool> {
-        if let Some(&index) = self.file_index.get(file_path) {
+        if let Some(&index) = self.file_index.get(&IndexPath::new(file_path)) {
             self.remove_file_by_index(index);
             self.update_metadata();
             self.query_cache.clear();
@@ -360,7 +395,7 @@ impl RepoMap {
     /// Get a file by path
     pub fn get_file(&self, file_path: &str) -> Option<&TreeNode> {
         self.file_index
-            .get(file_path)
+            .get(&IndexPath::new(file_path))
             .and_then(|&index| self.files.get(index))
     }
 
@@ -397,8 +432,22 @@ impl RepoMap {
     /// Record the directory this index was built from. Set by every entry point
     /// that scans (CLI, library, bindings) and after a cache load, since the
     /// cache does not carry it.
+    /// The root is CANONICALIZED here (absolute, symlinks resolved), so however
+    /// the caller spelled it — `.`, `../..`, a symlink — the index records one
+    /// value. Callers comparing roots (the cache header, notably) compare this.
     pub fn set_scan_root(&mut self, root: impl Into<String>) {
-        self.scan_root = Some(root.into());
+        let root = root.into();
+        let canonical = crate::scanner::discovery::canonical_root(&root);
+        self.scan_root = Some(canonical.to_string_lossy().to_string());
+    }
+
+    /// Absolutize a stored (root-relative) path for filesystem access. `None`
+    /// when no root is known — an unknown root refuses rather than falling back
+    /// to the process cwd, which is precisely the K1 failure.
+    pub fn absolute_path(&self, stored: &str) -> Option<std::path::PathBuf> {
+        self.scan_root
+            .as_ref()
+            .map(|root| std::path::Path::new(root).join(stored))
     }
 
     /// The analysis root, if known. `None` means containment cannot be enforced,
@@ -408,7 +457,7 @@ impl RepoMap {
     }
 
     pub fn file_index_of(&self, file_path: &str) -> Option<usize> {
-        self.file_index.get(file_path).copied()
+        self.file_index.get(&IndexPath::new(file_path)).copied()
     }
 
     /// Resolve a file argument to an index, tolerant of how an agent phrases the
@@ -430,15 +479,26 @@ impl RepoMap {
     /// Resolve a file argument to an index, distinguishing the two ways it can
     /// fail. `mod.rs` in a repo with ten of them is not missing — it is
     /// ambiguous, and the caller can only say so if it is told so.
+    /// Input tolerance is deliberate and one-directional: ANY reasonable spelling
+    /// is accepted here (absolute, root-relative, `./`-prefixed, containing
+    /// `..`), while what the index EMITS is always the single canonical
+    /// root-relative form.
     pub fn lookup_file_index(&self, file_path: &str) -> FileLookup {
         if let Some(idx) = self.file_index_of(file_path) {
             return FileLookup::Found(idx);
         }
-        let norm = crate::storage::graph::normalize_path(file_path);
+        // An absolute path (or one with `..`) that lands inside the root is the
+        // same file under a different spelling — relativize it and try again.
+        if let Some(rel) = self.relativize_to_root(file_path) {
+            if let Some(idx) = self.file_index_of(&rel) {
+                return FileLookup::Found(idx);
+            }
+        }
+        let norm = normalize_path(file_path);
         let needle = format!("/{norm}");
         let mut hits: Vec<usize> = Vec::new();
         for (i, f) in self.files.iter().enumerate() {
-            let np = crate::storage::graph::normalize_path(&f.file_path);
+            let np = normalize_path(&f.file_path);
             if np == norm || np.ends_with(&needle) {
                 hits.push(i);
             }
@@ -448,6 +508,29 @@ impl RepoMap {
             1 => FileLookup::Found(hits[0]),
             _ => FileLookup::Ambiguous(hits),
         }
+    }
+
+    /// Express `input` as a root-relative path, if it names something inside the
+    /// recorded scan root. `None` when no root is known or the path is outside
+    /// it — never a silent clamp.
+    pub fn relativize_to_root(&self, input: &str) -> Option<String> {
+        let root = self.scan_root.as_ref()?;
+        let root_norm = normalize_path(root);
+        if root_norm.is_empty() {
+            return None;
+        }
+        // A relative input is resolved against the root, not the process cwd.
+        let candidate = if std::path::Path::new(input).is_absolute() {
+            normalize_path(input)
+        } else {
+            crate::storage::graph::join_normalized(&root_norm, input)
+        };
+        if candidate == root_norm {
+            return Some(String::new());
+        }
+        candidate
+            .strip_prefix(&format!("{root_norm}/"))
+            .map(|s| s.to_string())
     }
 
     /// The longest path prefix common to every indexed file. Used only as a
@@ -1146,27 +1229,38 @@ impl RepoMap {
             path_to_node.insert(dir_path.clone(), dir_node);
         }
 
-        // Create root directory
-        let root_name = std::path::Path::new(&root_path)
-            .file_name()
-            .unwrap_or_else(|| std::path::Path::new(&root_path).as_os_str())
-            .to_string_lossy()
-            .to_string();
+        // Create root directory.
+        //
+        // Stored paths are root-relative, so the root's own path is `"."` — the
+        // root-relative spelling of the root — and never the empty string, which
+        // is what produced the phantom `{"name": "", "path": ""}` node that
+        // `get_dependency_graph` then matched nothing against. Its NAME comes
+        // from the recorded scan root, which is the only place the directory's
+        // real name survives once paths are relative to it.
+        let root_name = self
+            .scan_root
+            .as_deref()
+            .and_then(|r| std::path::Path::new(r).file_name().map(|n| n.to_owned()))
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "root".to_string());
 
         let mut root = directory_map
             .remove(&root_path)
             .unwrap_or_else(|| DirectoryNode {
-                name: if root_name.is_empty() {
-                    "root".to_string()
-                } else {
-                    root_name
-                },
+                name: String::new(),
                 path: root_path.clone(),
                 children: Vec::new(),
                 file_count: 0,
                 total_lines: 0,
                 languages: HashSet::new(),
             });
+        if root.name.is_empty() {
+            root.name = root_name;
+        }
+        if root.path.is_empty() {
+            root.path = ".".to_string();
+        }
 
         // Add files to their respective directories
         for file_node in file_nodes {
@@ -1252,58 +1346,67 @@ impl RepoMap {
         }
     }
 
-    /// Find the common root path of all files
+    /// The directory every indexed path hangs off.
+    ///
+    /// Stored paths are root-relative, so that directory is the root itself and
+    /// the answer is the empty string — "" is "the root", not "unknown". The
+    /// prefix computation below survives only for an index whose paths are not
+    /// root-relative (a hand-built `RepoMap` in a test or an embedding host).
     fn find_common_root_path(&self) -> String {
         if self.files.is_empty() {
-            return "/".to_string();
+            return String::new();
         }
 
-        if self.files.len() == 1 {
-            return std::path::Path::new(&self.files[0].file_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("/"))
-                .to_string_lossy()
-                .to_string();
+        // Root-relative storage: a single relative path means the root anchors
+        // everything, so there is nothing to infer.
+        if self.files.iter().any(|f| !f.file_path.starts_with('/')) {
+            return String::new();
         }
 
-        // Find common prefix of all file paths
-        let first_path = &self.files[0].file_path;
-        let mut common_prefix = first_path.clone();
-
+        let mut common_prefix = normalize_path(&self.files[0].file_path);
         for file in &self.files[1..] {
-            common_prefix = self.find_common_prefix(&common_prefix, &file.file_path);
+            common_prefix =
+                Self::find_common_prefix(&common_prefix, &normalize_path(&file.file_path));
         }
 
-        // Ensure we end at a directory boundary and normalize the path
-        let common_path = std::path::Path::new(&common_prefix);
-
-        // If the common prefix ends with a file, get its parent directory
-        if common_path.is_file() || !common_prefix.ends_with('/') {
-            let parent = common_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("/"));
-            parent.to_string_lossy().to_string()
-        } else {
-            // Remove trailing slash for consistency
-            common_prefix.trim_end_matches('/').to_string()
+        // The prefix is already a whole-segment path; drop the trailing file
+        // component when every file shares one (a single-file index).
+        if self.files.len() == 1 {
+            return crate::storage::graph::parent_dir(&common_prefix);
         }
+        common_prefix
     }
 
-    /// Find common prefix of two paths
-    fn find_common_prefix(&self, path1: &str, path2: &str) -> String {
-        let chars1: Vec<char> = path1.chars().collect();
-        let chars2: Vec<char> = path2.chars().collect();
+    /// The longest **whole-segment** directory prefix shared by two normalized
+    /// paths.
+    ///
+    /// This used to compare character-by-character, which made `src/foo` and
+    /// `src/foobar` "share" the prefix `src/foo` — a directory that need not
+    /// exist, handed onward as a path (F9). Comparison is per segment, so the
+    /// answer is always a real ancestor directory of both inputs.
+    fn find_common_prefix(path1: &str, path2: &str) -> String {
+        let absolute = path1.starts_with('/') && path2.starts_with('/');
+        let segs1: Vec<&str> = path1.trim_start_matches('/').split('/').collect();
+        let segs2: Vec<&str> = path2.trim_start_matches('/').split('/').collect();
 
-        let mut common_len = 0;
-        for (c1, c2) in chars1.iter().zip(chars2.iter()) {
-            if c1 == c2 {
-                common_len += 1;
+        // The LAST segment of each path is the file name, never a directory, so
+        // it can never contribute to a shared directory prefix.
+        let limit = segs1.len().saturating_sub(1).min(segs2.len() - 1);
+        let mut shared: Vec<&str> = Vec::new();
+        for i in 0..limit {
+            if segs1[i] == segs2[i] {
+                shared.push(segs1[i]);
             } else {
                 break;
             }
         }
 
-        path1.chars().take(common_len).collect()
+        let joined = shared.join("/");
+        if absolute {
+            format!("/{joined}")
+        } else {
+            joined
+        }
     }
 
     /// Generate repository summary statistics
@@ -1396,7 +1499,7 @@ impl RepoMap {
         let file_path = file.file_path.clone();
 
         // Remove from file index
-        self.file_index.remove(&file_path);
+        self.file_index.remove(&IndexPath::new(&file_path));
 
         // Remove from other indexes
         self.remove_from_function_index(index);
@@ -1428,7 +1531,7 @@ impl RepoMap {
         let file_path = tree_node.file_path.clone();
 
         // Update file index
-        self.file_index.insert(file_path, index);
+        self.file_index.insert(IndexPath::new(&file_path), index);
 
         // Update function index
         for func in &tree_node.functions {
@@ -1601,7 +1704,7 @@ impl RepoMap {
         }
 
         // Update file_index
-        let files_to_update: Vec<(String, usize)> = self
+        let files_to_update: Vec<(IndexPath, usize)> = self
             .file_index
             .iter()
             .filter_map(|(path, &index)| {
@@ -2541,5 +2644,122 @@ mod tests {
                 "lost a real directory: {dirs:?}"
             );
         }
+    }
+
+    // ----------------------------------------------------------------- //
+    // Canonical-path refactor regressions
+    // ----------------------------------------------------------------- //
+
+    /// F9: `find_common_prefix` compared characters, so `src/foo` and
+    /// `src/foobar` "shared" the prefix `src/foo` — a directory that need not
+    /// exist, handed onward as a path. Prefixes are whole segments now.
+    #[test]
+    fn common_prefix_is_segment_aware_not_character_wise() {
+        // The old character-wise implementation returned "src/foo" here.
+        assert_eq!(
+            RepoMap::find_common_prefix("src/foo/a.rs", "src/foobar/b.rs"),
+            "src"
+        );
+        // A shared directory IS reported.
+        assert_eq!(
+            RepoMap::find_common_prefix("src/foo/a.rs", "src/foo/b.rs"),
+            "src/foo"
+        );
+        // Nothing in common -> nothing claimed.
+        assert_eq!(RepoMap::find_common_prefix("a/x.rs", "b/y.rs"), "");
+        // Absolute paths keep their leading slash.
+        assert_eq!(
+            RepoMap::find_common_prefix("/r/src/foo/a.rs", "/r/src/foobar/b.rs"),
+            "/r/src"
+        );
+        // And the file name itself is never a directory prefix.
+        assert_eq!(RepoMap::find_common_prefix("src/a.rs", "src/a.rs"), "src");
+    }
+
+    /// K2: two spellings of one root used to produce TWO `file_index` entries
+    /// (raw-string dedup) that collapsed into ONE `graph::FileSet` slot
+    /// (normalized dedup). Both maps key on `IndexPath` now, so a second
+    /// spelling REPLACES rather than duplicates.
+    #[test]
+    fn two_spellings_of_one_path_occupy_one_index_entry() {
+        let mut map = RepoMap::new();
+        for spelling in ["src/a.rs", "./src/a.rs", "src/./x/../a.rs"] {
+            let mut node = TreeNode::new(spelling.to_string(), "rust".to_string());
+            node.content_hash = "h".to_string();
+            map.add_file(node).unwrap();
+        }
+        assert_eq!(map.get_all_files().len(), 1, "one file, one entry");
+        // And it is stored under the canonical form, whatever was handed in.
+        assert_eq!(map.get_all_files()[0].file_path, "src/a.rs");
+        // Every spelling still RESOLVES: input tolerance is one-directional.
+        for spelling in ["src/a.rs", "./src/a.rs", "src/x/../a.rs"] {
+            assert!(
+                matches!(map.lookup_file_index(spelling), FileLookup::Found(0)),
+                "{spelling} must resolve"
+            );
+        }
+    }
+
+    /// Symbols carry the file's path too; if only `TreeNode::file_path` were
+    /// normalized, `search_functions` and `find_importers` would speak two
+    /// vocabularies for one file.
+    #[test]
+    fn symbol_paths_are_normalized_with_the_file() {
+        let mut node = TreeNode::new("./src/a.rs".to_string(), "rust".to_string());
+        node.functions.push(FunctionSignature::new(
+            "f".to_string(),
+            "./src/a.rs".to_string(),
+        ));
+        node.function_calls.push(FunctionCall::new(
+            "g".to_string(),
+            "./src/a.rs".to_string(),
+            3,
+        ));
+        let mut map = RepoMap::new();
+        map.add_file(node).unwrap();
+
+        let stored = &map.get_all_files()[0];
+        assert_eq!(stored.file_path, "src/a.rs");
+        assert_eq!(stored.functions[0].file_path, "src/a.rs");
+        assert_eq!(stored.function_calls[0].file_path, "src/a.rs");
+    }
+
+    /// Input tolerance survives the switch to root-relative keys: an ABSOLUTE
+    /// path under the root names the same file as its relative spelling.
+    #[test]
+    fn absolute_input_resolves_against_the_recorded_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let mut map = RepoMap::new();
+        map.set_scan_root(root.to_string_lossy().to_string());
+        let mut node = TreeNode::new("src/a.rs".to_string(), "rust".to_string());
+        node.content_hash = "h".to_string();
+        map.add_file(node).unwrap();
+
+        let abs = root.join("src/a.rs");
+        assert!(matches!(
+            map.lookup_file_index(&abs.to_string_lossy()),
+            FileLookup::Found(0)
+        ));
+        // A path outside the root does not become root-relative by accident.
+        assert_eq!(map.relativize_to_root("/somewhere/else/a.rs"), None);
+    }
+
+    /// K9: a symlinked root and the real root are one repository, so the index
+    /// records one canonical root for both.
+    #[test]
+    #[cfg(unix)]
+    fn scan_root_is_canonicalized_through_symlinks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut via_real = RepoMap::new();
+        via_real.set_scan_root(real.to_string_lossy().to_string());
+        let mut via_link = RepoMap::new();
+        via_link.set_scan_root(link.to_string_lossy().to_string());
+        assert_eq!(via_real.scan_root(), via_link.scan_root());
     }
 }

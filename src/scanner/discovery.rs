@@ -34,6 +34,10 @@ pub struct ScanConfig {
 }
 
 pub struct ScanResult {
+    /// The analysis root, canonicalized (absolute, symlinks resolved). This is
+    /// THE root every `relative_path` below is anchored at, and the value the
+    /// index records as its `scan_root`.
+    pub root: PathBuf,
     pub files: Vec<DiscoveredFile>,
     pub total_files_found: usize,
     pub total_files_filtered: usize,
@@ -43,10 +47,45 @@ pub struct ScanResult {
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
+    /// Absolute, canonical-root-anchored path. Use this to READ the file.
     pub path: PathBuf,
     pub language: String,
     pub size: u64,
+    /// The file's path relative to the canonical analysis root. This — not
+    /// [`DiscoveredFile::path`] — is the file's identity everywhere downstream;
+    /// see [`DiscoveredFile::index_path`].
     pub relative_path: PathBuf,
+}
+
+impl DiscoveredFile {
+    /// The file's identity in the index: its root-relative path, normalized.
+    ///
+    /// One canonicalization at the scanner boundary plus this one derivation is
+    /// what makes the emitted path independent of how `--path` was spelled and
+    /// of where the caller's shell stood (F3/F4/K1/K9).
+    pub fn index_path(&self) -> crate::storage::graph::IndexPath {
+        crate::storage::graph::IndexPath::new(&self.relative_path.to_string_lossy())
+    }
+}
+
+/// Resolve an analysis root to ONE canonical absolute path (symlinks resolved).
+///
+/// Every spelling of the same directory — `.`, `./src/..`, an absolute path, a
+/// `../..` climb, a symlink to it — collapses here, before anything derived from
+/// it (index keys, cache header, emitted paths) exists. Falls back to the input
+/// joined onto the cwd when the path does not exist, so a bad root still
+/// produces a clear downstream error rather than a panic.
+pub fn canonical_root<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        }
+    })
 }
 
 #[derive(Clone)]
@@ -217,7 +256,12 @@ impl RepositoryScanner {
 
     pub fn scan<P: AsRef<Path>>(&self, root_path: P) -> Result<ScanResult> {
         let start_time = Instant::now();
-        let root_path = root_path.as_ref();
+        // Canonicalize ONCE, here, before anything is derived from the root.
+        // `ignore::WalkBuilder` yields `entry.path()` = the literal spelling it
+        // was handed with the discovered suffix appended, and that string used to
+        // become the file's identity in one hop with no normalization.
+        let root_path = canonical_root(root_path);
+        let root_path = root_path.as_path();
 
         info!("Starting repository scan at: {:?}", root_path);
 
@@ -298,6 +342,7 @@ impl RepositoryScanner {
         );
 
         Ok(ScanResult {
+            root: root_path.to_path_buf(),
             files: discovered_files,
             total_files_found: total_found.load(Ordering::Relaxed),
             total_files_filtered: total_filtered.load(Ordering::Relaxed),
@@ -335,8 +380,8 @@ impl RepositoryScanner {
         &self,
         root_path: P,
     ) -> Result<(usize, std::collections::HashMap<String, usize>)> {
-        let root_path = root_path.as_ref();
-        let walker = self.build_walker(root_path)?;
+        let root_path = canonical_root(root_path);
+        let walker = self.build_walker(&root_path)?;
 
         let mut count = 0;
         let mut languages = std::collections::HashMap::new();
@@ -504,6 +549,68 @@ mod tests {
         assert_eq!(result.languages_found.get("rust"), Some(&3));
         assert_eq!(result.languages_found.get("python"), Some(&1));
 
+        Ok(())
+    }
+
+    /// F3: three spellings of one root must produce one canonical root and one
+    /// set of root-relative identities. Pre-fix the same file came back as
+    /// `./src/x.rs`, `/abs/…/src/x.rs` or `../../src/x.rs` depending on how
+    /// `--path` was typed and where the caller stood.
+    #[test]
+    fn every_spelling_of_one_root_yields_identical_identities() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let root = std::fs::canonicalize(temp_dir.path())?;
+        fs::create_dir(root.join("src"))?;
+        fs::write(root.join("src/main.rs"), "fn main() {}")?;
+        fs::write(root.join("lib.rs"), "pub fn f() {}")?;
+
+        let scanner = RepositoryScanner::new(&create_test_config(), None)?;
+
+        let ids = |p: &Path| -> Result<Vec<String>> {
+            let result = scanner.scan(p)?;
+            assert_eq!(result.root, root, "root must canonicalize to one value");
+            let mut v: Vec<String> = result
+                .files
+                .iter()
+                .map(|f| f.index_path().into_string())
+                .collect();
+            v.sort();
+            Ok(v)
+        };
+
+        let absolute = ids(&root)?;
+        // A `..` climb back into the same directory.
+        let climbed = ids(&root.join("src").join(".."))?;
+        // A `./`-prefixed spelling.
+        let dotted = ids(&PathBuf::from(format!("{}/./.", root.display())))?;
+
+        assert_eq!(absolute, vec!["lib.rs", "src/main.rs"]);
+        assert_eq!(absolute, climbed);
+        assert_eq!(absolute, dotted);
+        Ok(())
+    }
+
+    /// K9: a symlink to the root and the real root are one repository, so they
+    /// must produce the same canonical root and the same keys.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_root_and_real_root_agree() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let real = temp_dir.path().join("real");
+        fs::create_dir(&real)?;
+        fs::write(real.join("a.rs"), "pub fn a() {}")?;
+        let link = temp_dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link)?;
+
+        let scanner = RepositoryScanner::new(&create_test_config(), None)?;
+        let via_real = scanner.scan(&real)?;
+        let via_link = scanner.scan(&link)?;
+
+        assert_eq!(via_real.root, via_link.root);
+        assert_eq!(
+            via_real.files[0].index_path(),
+            via_link.files[0].index_path()
+        );
         Ok(())
     }
 }

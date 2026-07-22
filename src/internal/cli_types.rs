@@ -3,22 +3,16 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct ScanArgs {
-    /// Directory to scan
+    /// Directory to scan (relative paths resolve against --directory)
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
-    /// Include only these file patterns
-    #[arg(short, long)]
-    pub include: Vec<String>,
-
-    /// Exclude these file patterns
-    #[arg(short, long)]
-    pub exclude: Vec<String>,
-
-    /// Follow symbolic links
-    #[arg(long)]
-    pub follow_symlinks: bool,
-
+    // `--include`, `--exclude` and `--follow-symlinks` used to be accepted here
+    // and were then silently discarded — nothing in `src/` ever read them, so a
+    // flag that looked like it worked did nothing. Include/exclude patterns and
+    // symlink behaviour come from the config file (`file_scanning.*`), which
+    // `CliApp::new` feeds to the builder. Removed rather than left parsed: a flag
+    // that lies is worse than a flag that is absent.
     /// Save results to cache
     #[arg(long)]
     pub cache: bool,
@@ -29,7 +23,7 @@ pub struct SearchArgs {
     /// Search query (function name, struct name, etc.)
     pub query: String,
 
-    /// Directory to search in
+    /// Directory to search in (relative paths resolve against --directory)
     #[arg(short, long, default_value = ".")]
     pub path: PathBuf,
 
@@ -48,7 +42,7 @@ pub struct SearchArgs {
 
 #[derive(Args)]
 pub struct AnalyzeArgs {
-    /// File to analyze
+    /// File or directory to analyze (relative paths resolve against --directory)
     pub file: PathBuf,
 
     /// Output format: json, text, tree
@@ -78,7 +72,9 @@ pub struct ExecToolArgs {
     #[arg(long, default_value = "{}")]
     pub params: String,
 
-    /// Directory to scan before executing the tool
+    /// Analysis root to scan before executing the tool (relative paths resolve
+    /// against --directory). Path parameters inside --params are resolved
+    /// against this root, never against the shell's working directory.
     #[arg(long, default_value = ".")]
     pub path: PathBuf,
 }

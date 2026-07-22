@@ -531,9 +531,26 @@ impl CliApp {
         results
     }
 
+    /// The path to SHOW a human for a tool result.
+    ///
+    /// Tool JSON is root-relative by contract (stable across machines, cheap in
+    /// tokens); a person reading a terminal wants the path they can paste, so the
+    /// display layer rejoins it with the `analysis_root` the response carries.
+    fn displayable_path(data: &serde_json::Value, file_path: &str) -> String {
+        match data.get("analysis_root").and_then(|v| v.as_str()) {
+            Some(root) if !root.is_empty() && !Path::new(file_path).is_absolute() => {
+                Path::new(root)
+                    .join(file_path)
+                    .to_string_lossy()
+                    .to_string()
+            }
+            _ => file_path.to_string(),
+        }
+    }
+
     fn display_tool_analysis_text(&self, data: &serde_json::Value, args: &AnalyzeArgs) {
         if let Some(file_path) = data.get("file_path").and_then(|v| v.as_str()) {
-            println!("File: {}", file_path);
+            println!("File: {}", Self::displayable_path(data, file_path));
         }
 
         if let Some(language) = data.get("language").and_then(|v| v.as_str()) {
@@ -595,7 +612,7 @@ impl CliApp {
 
     fn display_tool_analysis_tree(&self, data: &serde_json::Value) {
         if let Some(file_path) = data.get("file_path").and_then(|v| v.as_str()) {
-            println!("{}", file_path);
+            println!("{}", Self::displayable_path(data, file_path));
 
             if let Some(functions) = data.get("functions").and_then(|v| v.as_array()) {
                 for func in functions {
@@ -736,10 +753,18 @@ impl CliApp {
                     .get("repository_tree")
                     .unwrap_or(&serde_json::Value::Null);
 
+                // The tree's own `root_path` is now the root-relative ".", which
+                // tells a human nothing; the absolute root travels alongside as
+                // `analysis_root`. Prefer it, and fall back for a response that
+                // predates it.
                 if let Some(root_path) = data
-                    .get("metadata")
-                    .and_then(|m| m.get("root_path"))
+                    .get("analysis_root")
                     .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        data.get("metadata")
+                            .and_then(|m| m.get("root_path"))
+                            .and_then(|v| v.as_str())
+                    })
                     .or_else(|| tree.get("path").and_then(|v| v.as_str()))
                 {
                     println!("{}", root_path);
@@ -899,9 +924,6 @@ use std::collections::HashMap;
 
         let scan_args = ScanArgs {
             path: temp_dir.path().to_path_buf(),
-            include: vec![],
-            exclude: vec![],
-            follow_symlinks: false,
             cache: false,
         };
 

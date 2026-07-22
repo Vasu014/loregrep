@@ -327,6 +327,35 @@ impl LocalAnalysisTools {
     }
 
     pub async fn execute_tool(&self, tool_name: &str, input: Value) -> Result<ToolResult> {
+        let result = self.dispatch_tool(tool_name, input).await;
+        // Every path in every response is ROOT-RELATIVE — stable across machines
+        // and cheaper in tokens than an absolute path — so every response must
+        // also say what root it is relative to, or a caller that needs to reach
+        // the filesystem has no way to absolutize. Stamped here, once, because a
+        // per-handler convention is exactly what let the vocabularies drift.
+        result.map(|r| self.stamp_analysis_root(r))
+    }
+
+    /// Attach `analysis_root` (the canonical absolute root) to a tool result.
+    fn stamp_analysis_root(&self, mut result: ToolResult) -> ToolResult {
+        let root = self
+            .repo_map
+            .lock()
+            .ok()
+            .and_then(|m| m.scan_root().map(str::to_string));
+        if let Value::Object(map) = &mut result.data {
+            map.insert(
+                "analysis_root".to_string(),
+                match root {
+                    Some(r) => Value::String(r),
+                    None => Value::Null,
+                },
+            );
+        }
+        result
+    }
+
+    async fn dispatch_tool(&self, tool_name: &str, input: Value) -> Result<ToolResult> {
         match tool_name {
             "search_functions" => self.search_functions(input).await,
             "search_structs" => self.search_structs(input).await,
@@ -443,14 +472,24 @@ impl LocalAnalysisTools {
         // this preserves the tolerant matching siblings offer), then the analysis
         // root for files that exist but were not indexed (excluded by patterns,
         // say). An unknown root refuses rather than falling back to cwd.
-        let resolved_path = {
+        // `(emitted, on_disk)`: the emitted form is the index's root-relative
+        // vocabulary — the one every other tool speaks — while the on-disk form
+        // is what `read_to_string` needs. Keeping them as one string is what made
+        // the emitted path depend on how the process was invoked.
+        let (emitted_path, disk_path) = {
             let repo_map = self.repo_map.lock().unwrap();
             match repo_map.lookup_file_index(&analyze_input.file_path) {
-                FileLookup::Found(idx) => repo_map
-                    .get_all_files()
-                    .get(idx)
-                    .map(|f| f.file_path.clone())
-                    .unwrap_or_else(|| analyze_input.file_path.clone()),
+                FileLookup::Found(idx) => {
+                    let stored = repo_map
+                        .get_all_files()
+                        .get(idx)
+                        .map(|f| f.file_path.clone())
+                        .unwrap_or_else(|| analyze_input.file_path.clone());
+                    let disk = repo_map
+                        .absolute_path(&stored)
+                        .unwrap_or_else(|| std::path::PathBuf::from(&stored));
+                    (stored, disk)
+                }
                 // Several files match: say so, with the candidates. Falling
                 // through to the filesystem here would resolve the caller's
                 // relative string against the root and pick a file it may not
@@ -468,11 +507,22 @@ impl LocalAnalysisTools {
                 }
                 FileLookup::NotFound => match repo_map.scan_root() {
                     Some(root) => {
+                        // Not indexed, but it may still exist under the root
+                        // (excluded by a pattern, say). Containment is enforced
+                        // against the CANONICAL root; the emitted form is then
+                        // relativized back to it so this tool's output remains
+                        // valid input to its siblings.
                         match crate::internal::paths::resolve_within_root(
                             std::path::Path::new(root),
                             &analyze_input.file_path,
                         ) {
-                            Ok(p) => p.display().to_string(),
+                            Ok(p) => {
+                                let abs = p.display().to_string();
+                                let rel = repo_map
+                                    .relativize_to_root(&abs)
+                                    .unwrap_or_else(|| abs.clone());
+                                (rel, p)
+                            }
                             Err(e) => return Ok(ToolResult::error(e.message())),
                         }
                     }
@@ -491,27 +541,28 @@ impl LocalAnalysisTools {
         // Resolve the analyzer for this file's language via the registry. If no
         // analyzer is registered for the file's extension, report a clear error
         // instead of silently analyzing it with the wrong language.
-        let analyzer = match self.registry.get_analyzer_for_path(&resolved_path) {
+        let analyzer = match self.registry.get_analyzer_for_path(&emitted_path) {
             Some(analyzer) => analyzer,
             None => {
                 return Ok(ToolResult::error(format!(
                     "unsupported language for {}",
-                    resolved_path
+                    emitted_path
                 )));
             }
         };
 
         // Try to read the file and analyze it
-        match tokio::fs::read_to_string(&resolved_path).await {
+        match tokio::fs::read_to_string(&disk_path).await {
             Ok(content) => {
-                let file_analysis = analyzer.analyze_file(&content, &resolved_path).await?;
+                let file_analysis = analyzer.analyze_file(&content, &emitted_path).await?;
 
                 let tree_node = &file_analysis.tree_node;
                 let mut result = json!({
                     "status": "success",
-                    // Echo the RESOLVED path: echoing the caller's raw string put
-                    // two vocabularies for one file in a single response.
-                    "file_path": resolved_path,
+                    // Echo the RESOLVED path, root-relative: echoing the
+                    // caller's raw string put two vocabularies for one file in a
+                    // single response.
+                    "file_path": emitted_path,
                     // Expose the analysis fields at the top level so consumers
                     // (CLI display, public API callers) can read them directly.
                     "language": tree_node.language,
@@ -1027,6 +1078,8 @@ impl LocalAnalysisTools {
                         "total_files": final_tree_root.file_count,
                         "total_lines": final_tree_root.total_lines,
                         "languages": final_tree_root.languages.iter().collect::<Vec<_>>(),
+                        // Root-relative vocabulary: "." IS the repository root.
+                        // The absolute root travels alongside as `analysis_root`.
                         "root_path": final_tree_root.path,
                         "include_file_details": tree_input.include_file_details.unwrap_or(true),
                         "max_depth": tree_input.max_depth
@@ -2648,6 +2701,88 @@ mod tests {
 
             // Ensure we can serialize the schema (ToolSchema only implements Serialize, not Deserialize)
             let _serialized = serde_json::to_string(&schema).unwrap();
+        }
+    }
+
+    /// K2, at the layer where it bit: `RepoMap::file_index` deduped on the RAW
+    /// path string while `graph::FileSet::by_path` deduped on the NORMALIZED
+    /// one. Two spellings of one file therefore occupied two `file_index` slots
+    /// but ONE graph slot, `find_importers` resolved the argument through the
+    /// former and the edges through the latter, and a file that IS imported came
+    /// back with 0 importers.
+    ///
+    /// Both maps key on `IndexPath` now, so the second spelling replaces the
+    /// first instead of splitting it — the divergent state is unconstructible.
+    #[tokio::test]
+    async fn find_importers_survives_two_spellings_of_one_file() {
+        use crate::types::{ImportStatement, TreeNode};
+
+        let repo_map = Arc::new(Mutex::new(RepoMap::new()));
+        {
+            let mut rm = repo_map.lock().unwrap();
+            rm.set_scan_root("/repo");
+            // The SAME file, added under two spellings — the shape a rescan under
+            // a differently-spelled root used to produce.
+            for spelling in ["./src/config.rs", "src/config.rs"] {
+                let mut node = TreeNode::new(spelling.to_string(), "rust".to_string());
+                node.content_hash = "h".to_string();
+                rm.add_file(node).unwrap();
+            }
+            let mut main = TreeNode::new("src/main.rs".to_string(), "rust".to_string());
+            main.declared_modules.push("config".to_string());
+            main.imports.push(ImportStatement::new(
+                "crate::config".to_string(),
+                "src/main.rs".to_string(),
+            ));
+            rm.add_file(main).unwrap();
+
+            assert_eq!(
+                rm.get_all_files().len(),
+                2,
+                "two spellings of one file must not become two index entries"
+            );
+        }
+
+        let tools = LocalAnalysisTools::new(repo_map, create_test_registry());
+        for spelling in ["src/config.rs", "./src/config.rs", "/repo/src/config.rs"] {
+            let result = tools
+                .execute_tool("find_importers", json!({ "file": spelling }))
+                .await
+                .unwrap();
+            assert!(result.success, "{spelling}: {:?}", result.error);
+            assert_eq!(
+                result.data["count"].as_u64().unwrap(),
+                1,
+                "{spelling} reported no importers: {:?}",
+                result.data
+            );
+            // Whatever spelling went IN, one canonical spelling comes OUT.
+            assert_eq!(result.data["file"], "src/config.rs");
+            assert_eq!(result.data["importers"][0], "src/main.rs");
+        }
+    }
+
+    /// Every response that carries paths must also say what root they are
+    /// relative to, or a caller that needs the filesystem cannot absolutize
+    /// them. Stamped centrally, so it cannot be forgotten by a new tool.
+    #[tokio::test]
+    async fn every_tool_response_carries_the_analysis_root() {
+        let tools = tools_with_nested_src(&["/repo/src/a.rs"]);
+        for (tool, params) in [
+            ("search_functions", json!({"pattern": ".*"})),
+            ("search_structs", json!({"pattern": ".*"})),
+            ("get_dependencies", json!({"file_path": "src/a.rs"})),
+            ("find_importers", json!({"file": "src/a.rs"})),
+            ("find_callers", json!({"function_name": "x"})),
+            ("get_repository_tree", json!({})),
+            ("get_dependency_graph", json!({})),
+        ] {
+            let result = tools.execute_tool(tool, params).await.unwrap();
+            assert_eq!(
+                result.data["analysis_root"], "/repo",
+                "{tool} did not carry the analysis root: {:?}",
+                result.data
+            );
         }
     }
 }

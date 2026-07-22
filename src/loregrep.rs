@@ -375,6 +375,9 @@ impl LoreGrep {
             .scanner
             .scan(path)
             .map_err(|e| LoreGrepError::InternalError(format!("File scanning failed: {}", e)))?;
+        // The scanner canonicalized the root; from here on THAT is the root, not
+        // whatever string the caller typed. Every stored path is relative to it.
+        let root = scan_result.root.to_string_lossy().to_string();
         let discovered_files = scan_result.files;
 
         if discovered_files.is_empty() {
@@ -382,7 +385,7 @@ impl LoreGrep {
             eprintln!("Check that the path exists and contains supported file types");
             // An empty root still *replaces* the index: a rescan of a root whose
             // files all vanished must not keep serving them.
-            self.replace_index(path, Vec::new())?;
+            self.replace_index(&root, Vec::new())?;
             self.coverage.set(IndexCoverage::complete(0));
             return Ok(ScanResult::new(
                 0,
@@ -421,7 +424,11 @@ impl LoreGrep {
             // Dispatch to the analyzer registered for this file's language.
             // Analyzers are shared `Arc`s owned by the registry, so this reuses a
             // single instance per language instead of constructing one per file.
-            let path_str = file_info.path.to_string_lossy().to_string();
+            // The file's IDENTITY is its normalized root-relative path — one
+            // string per file, independent of how `--path` was spelled and of
+            // where the caller's shell stood. The absolute `file_info.path` is
+            // used to READ, never to name.
+            let path_str = file_info.index_path().into_string();
             let analysis_result = match self.language_registry.get_analyzer_for_path(&path_str) {
                 Some(analyzer) => analyzer.analyze_file(&content, &path_str).await,
                 None => {
@@ -467,7 +474,7 @@ impl LoreGrep {
         // Install the results as THE index for this root (holding mutex only
         // briefly). This is a replacement, not an accumulation — see the doc
         // comment on this method.
-        self.replace_index(path, analysis_results)?;
+        self.replace_index(&root, analysis_results)?;
 
         // Record how much of the repository this index actually covers, and say
         // so loudly when it is partial: "Found 10050 files" followed by "Files
@@ -823,8 +830,9 @@ impl LoreGrep {
                     LoreGrepError::InternalError(format!("Failed to lock repo map: {}", e))
                 })?;
                 *repo_map = loaded.repo_map;
-                // The cache does not carry the analysis root; restore it from
-                // the caller's invocation so path containment can be enforced.
+                // The cache DOES carry the analysis root now (and was refused
+                // above unless it matched this run's), so this only re-states
+                // it in canonical form.
                 repo_map.set_scan_root(root.to_string_lossy().to_string());
                 self.coverage.set(loaded.coverage);
                 Ok(true)
@@ -891,9 +899,16 @@ impl LoreGrep {
 
         let (dir, name) =
             Self::cache_dir_and_name(cache_path).map_err(|e| format!("bad cache path: {}", e))?;
+        // The cache lives at `<root>/.loregrep/index.cache`, and every spelling
+        // of `<root>` — a symlink to it, a run from another cwd — resolves to
+        // that same file. Requiring the header's root to equal THIS run's
+        // canonical root is what stops one invocation's vocabulary from being
+        // served to another (K1/K9).
+        let canonical_root = crate::scanner::discovery::canonical_root(root);
         let manager = PersistenceManager::new(&dir)
             .map_err(|e| format!("cache directory unusable: {}", e))?
-            .with_config_fingerprint(self.config_fingerprint());
+            .with_config_fingerprint(self.config_fingerprint())
+            .with_scan_root(canonical_root.to_string_lossy().to_string());
         let loaded = manager.load_index(&name).map_err(|e| e.to_string())?;
 
         if loaded.coverage.truncated {
@@ -916,7 +931,8 @@ impl LoreGrep {
 
         let mut seen = 0usize;
         for file in &discovered {
-            let path_str = file.path.to_string_lossy().to_string();
+            // Compare in the index's vocabulary, not the walker's.
+            let path_str = file.index_path().into_string();
             let Some(indexed_hash) = indexed.get(path_str.as_str()) else {
                 // Not in the index. If a scan could not have read it either, the
                 // absence is expected; otherwise the file is genuinely new.
@@ -962,11 +978,17 @@ impl LoreGrep {
     /// unvalidated [`LoreGrep::load_index`]).
     pub fn first_missing_indexed_path(&self) -> Option<String> {
         let repo_map = self.repo_map.lock().ok()?;
+        // Stored paths are root-relative, so existence is checked against the
+        // recorded analysis root — never against the process cwd, which is the
+        // whole class of bug this refactor closed.
         repo_map
             .get_all_files()
             .iter()
             .map(|file| file.file_path.clone())
-            .find(|path| !Path::new(path).exists())
+            .find(|path| match repo_map.absolute_path(path) {
+                Some(abs) => !abs.exists(),
+                None => !Path::new(path).exists(),
+            })
     }
 
     /// Reset the in-memory index to empty, including its coverage.
@@ -2278,6 +2300,250 @@ mod tests {
             config
                 .exclude_patterns
                 .contains(&"**/node_modules/**".to_string())
+        );
+    }
+
+    // ------------------------------------------------------------------ //
+    // Canonical-path refactor regressions (F3 / F4 / K1 / K2 / K9)
+    // ------------------------------------------------------------------ //
+
+    /// Serializes the tests that change the process working directory. `cwd` is
+    /// process-global, so two of them running concurrently would each observe
+    /// the other's directory.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    async fn emitted_paths(lg: &LoreGrep) -> Vec<String> {
+        let result = lg
+            .execute_tool("search_functions", json!({"pattern": ".*", "limit": 100}))
+            .await
+            .unwrap();
+        let mut paths: Vec<String> = result.data["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["file_path"].as_str().unwrap().to_string())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// F3: one file used to come back as `./src/x.rs`, `/abs/.../src/x.rs` or
+    /// `../../src/x.rs` depending purely on how `--path` was spelled and where
+    /// the caller stood — and the `../..` form stopped resolving the moment the
+    /// agent changed directory. All spellings, from any cwd, now emit one string.
+    #[tokio::test]
+    async fn every_path_spelling_and_cwd_emits_one_path_string() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original_cwd = std::env::current_dir().unwrap();
+
+        let repo = TempDir::new().unwrap();
+        let root = fs::canonicalize(repo.path()).unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn spelled_once() -> i32 { 1 }\n",
+        )
+        .unwrap();
+
+        let expected = vec!["src/lib.rs".to_string()];
+
+        // (cwd, spelling) pairs that all name the same directory.
+        let cases: Vec<(std::path::PathBuf, String)> = vec![
+            // Absolute, from outside the repo.
+            (original_cwd.clone(), root.to_string_lossy().to_string()),
+            // "." from inside the repo.
+            (root.clone(), ".".to_string()),
+            // "../.." climbing back out of a nested subdirectory.
+            (root.join("src"), "../src/..".to_string()),
+        ];
+
+        for (cwd, spelling) in cases {
+            std::env::set_current_dir(&cwd).unwrap();
+            let mut lg = LoreGrep::builder().build().unwrap();
+            lg.scan(&spelling).await.unwrap();
+            let paths = emitted_paths(&lg).await;
+            std::env::set_current_dir(&original_cwd).unwrap();
+            assert_eq!(
+                paths,
+                expected,
+                "spelling {spelling:?} from cwd {} emitted a different path",
+                cwd.display()
+            );
+        }
+    }
+
+    /// K1 (verified pre-fix): scanning repo R1 and then querying it from inside
+    /// R2 returned `repo_one_only -> ./src/lib.rs`, and that path, read from R2,
+    /// names a DIFFERENT repository's file. An emitted path must identify a file
+    /// in the repository that was scanned, unambiguously.
+    #[tokio::test]
+    async fn a_path_emitted_for_one_repo_never_resolves_into_another() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original_cwd = std::env::current_dir().unwrap();
+
+        let repo_one = TempDir::new().unwrap();
+        let repo_two = TempDir::new().unwrap();
+        let one = fs::canonicalize(repo_one.path()).unwrap();
+        let two = fs::canonicalize(repo_two.path()).unwrap();
+        for r in [&one, &two] {
+            fs::create_dir(r.join("src")).unwrap();
+        }
+        fs::write(
+            one.join("src/lib.rs"),
+            "pub fn repo_one_only() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        // A DECOY at the same relative path in the other repo — this is the file
+        // a cwd-relative path silently resolved to.
+        fs::write(
+            two.join("src/lib.rs"),
+            "pub fn repo_two_decoy() -> i32 { 2 }\n",
+        )
+        .unwrap();
+
+        // Scan R1 from R1, then move into R2 and query.
+        std::env::set_current_dir(&one).unwrap();
+        let mut lg = LoreGrep::builder().build().unwrap();
+        lg.scan(".").await.unwrap();
+        std::env::set_current_dir(&two).unwrap();
+
+        let result = lg
+            .execute_tool("search_functions", json!({"pattern": "repo_one_only"}))
+            .await
+            .unwrap();
+        let emitted = result.data["results"][0]["file_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let analysis_root = result.data["analysis_root"].as_str().unwrap().to_string();
+        std::env::set_current_dir(&original_cwd).unwrap();
+
+        // The response is self-describing: a root-relative path PLUS the root it
+        // is relative to. Together they name exactly one file on disk.
+        assert_eq!(emitted, "src/lib.rs");
+        assert_eq!(analysis_root, one.to_string_lossy());
+        let absolutized = std::path::Path::new(&analysis_root).join(&emitted);
+        assert_eq!(absolutized, one.join("src/lib.rs"));
+        let content = std::fs::read_to_string(&absolutized).unwrap();
+        assert!(
+            content.contains("repo_one_only"),
+            "the emitted path must name R1's file, got: {content}"
+        );
+    }
+
+    /// K2: `RepoMap::file_index` deduped on the RAW key while
+    /// `graph::FileSet::by_path` deduped on the NORMALIZED one, so two spellings
+    /// of one root produced two index entries that collapsed into one graph slot
+    /// — and `find_importers` answered 0 for a file that IS imported.
+    #[tokio::test]
+    async fn two_root_spellings_leave_one_index_entry_and_a_working_importer() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let repo = TempDir::new().unwrap();
+        let root = fs::canonicalize(repo.path()).unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/config.rs"), "pub fn cfg() -> i32 { 1 }\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "mod config;\nuse crate::config;\nfn main() { let _ = config::cfg(); }\n",
+        )
+        .unwrap();
+
+        let mut lg = LoreGrep::builder().build().unwrap();
+        // Scan twice, under two different spellings of the same root.
+        lg.scan(root.to_str().unwrap()).await.unwrap();
+        let second = lg
+            .scan(&format!("{}/src/..", root.display()))
+            .await
+            .unwrap();
+        assert_eq!(second.files_scanned, 2, "one root, two files, not four");
+
+        let importers = lg
+            .execute_tool("find_importers", json!({"file": "src/config.rs"}))
+            .await
+            .unwrap();
+        assert!(importers.success, "{:?}", importers.error);
+        assert_eq!(
+            importers.data["count"].as_u64().unwrap(),
+            1,
+            "an imported file reported 0 importers: {:?}",
+            importers.data
+        );
+        assert_eq!(importers.data["importers"][0], "src/main.rs");
+        // The echoed path is in the same vocabulary as the importers.
+        assert_eq!(importers.data["file"], "src/config.rs");
+    }
+
+    /// K9: a symlinked root and the real root are one repository. They shared a
+    /// cache file but produced different keys; both now canonicalize to one root.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_symlinked_root_and_its_target_produce_identical_keys() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let outer = TempDir::new().unwrap();
+        let real = fs::canonicalize(outer.path()).unwrap().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("a.rs"), "pub fn linked_fn() -> i32 { 1 }\n").unwrap();
+        let link = fs::canonicalize(outer.path()).unwrap().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut via_real = LoreGrep::builder().build().unwrap();
+        via_real.scan(real.to_str().unwrap()).await.unwrap();
+        let mut via_link = LoreGrep::builder().build().unwrap();
+        via_link.scan(link.to_str().unwrap()).await.unwrap();
+
+        assert_eq!(
+            emitted_paths(&via_real).await,
+            emitted_paths(&via_link).await
+        );
+
+        // And the analysis root itself is the same, so the cache they share is
+        // accepted for both rather than rejected for one.
+        let root_of = |lg: &LoreGrep| lg.repo_map.lock().unwrap().scan_root().unwrap().to_string();
+        assert_eq!(root_of(&via_real), root_of(&via_link));
+    }
+
+    /// F4: the cache stored raw path strings and was keyed only on the directory,
+    /// so whichever invocation populated it imposed its spelling on every later
+    /// run. The header now carries the canonical root and a mismatch is refused.
+    #[tokio::test]
+    async fn a_cache_built_for_another_root_is_refused() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let repo_one = TempDir::new().unwrap();
+        let repo_two = TempDir::new().unwrap();
+        fs::write(
+            repo_one.path().join("a.rs"),
+            "pub fn only_in_one() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            repo_two.path().join("a.rs"),
+            "pub fn only_in_two() -> i32 { 2 }\n",
+        )
+        .unwrap();
+
+        let mut lg = LoreGrep::builder().build().unwrap();
+        lg.scan(repo_one.path().to_str().unwrap()).await.unwrap();
+        let cache = LoreGrep::default_cache_path(repo_one.path());
+        lg.save_index(&cache).unwrap();
+        assert!(lg.is_cache_fresh(&cache, repo_one.path()));
+
+        // The same cache FILE, validated for a different root: refused.
+        assert!(
+            !lg.is_cache_fresh(&cache, repo_two.path()),
+            "a cache built for one root must not be served to another"
         );
     }
 }

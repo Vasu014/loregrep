@@ -29,7 +29,15 @@ type Result<T> = std::result::Result<T, AnalysisError>;
 ///   rather than silently served) and index-coverage fields (so a truncated
 ///   index is never mistaken for a complete one). `file_count` is now
 ///   validated against the payload.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+/// * v3 — paths in the payload became normalized ROOT-RELATIVE keys, and the
+///   header records the CANONICAL analysis root they are relative to. A cache is
+///   now refused when its root is not the root of the current invocation:
+///   without that, a cwd-relative path stored by one run re-resolved against a
+///   different cwd in the next (K1), and a symlinked root shared a cache file
+///   with its target while producing different keys (K9). Nothing migrates a v2
+///   cache — its paths are in the old ambiguous vocabulary, which is the very
+///   thing being discarded.
+pub const CACHE_FORMAT_VERSION: u32 = 3;
 
 /// How much of the repository an index actually covers.
 ///
@@ -151,6 +159,11 @@ pub struct CacheHeader {
     pub config_fingerprint: String,
     /// Coverage of the indexed set (see [`IndexCoverage`]).
     pub coverage: IndexCoverage,
+    /// The CANONICAL analysis root the payload's root-relative paths hang off.
+    /// Empty only for an index that never recorded one. A cache whose root is
+    /// not the current invocation's root describes a different repository and
+    /// must be rejected, not reinterpreted.
+    pub scan_root: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +195,7 @@ impl SerializedRepoMap {
                 compression,
                 config_fingerprint: String::new(),
                 coverage,
+                scan_root: repo_map.scan_root().unwrap_or_default().to_string(),
             },
             metadata: repo_map.get_metadata().clone(),
             files,
@@ -220,6 +234,7 @@ impl SerializedRepoMap {
 
 /// A cache that was read back from disk, together with everything the header
 /// says about it.
+#[derive(Debug)]
 pub struct LoadedIndex {
     pub repo_map: RepoMap,
     pub coverage: IndexCoverage,
@@ -233,6 +248,9 @@ pub struct PersistenceManager {
     /// Fingerprint of the *current* configuration. Stamped into caches on save
     /// and required to match on load.
     config_fingerprint: String,
+    /// The canonical analysis root of the current invocation. When set, a cache
+    /// whose header names a different root is rejected.
+    expected_scan_root: Option<String>,
     /// Coverage stamped into caches on save.
     coverage: IndexCoverage,
 }
@@ -248,6 +266,7 @@ impl PersistenceManager {
             compression: CompressionType::Gzip,
             max_cache_files: 10, // Keep last 10 cache files
             config_fingerprint: String::new(),
+            expected_scan_root: None,
             coverage: IndexCoverage::default(),
         })
     }
@@ -265,6 +284,12 @@ impl PersistenceManager {
     /// Set the configuration fingerprint used to stamp and validate caches.
     pub fn with_config_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
         self.config_fingerprint = fingerprint.into();
+        self
+    }
+
+    /// Require loaded caches to have been built from `root` (canonical form).
+    pub fn with_scan_root(mut self, root: impl Into<String>) -> Self {
+        self.expected_scan_root = Some(root.into());
         self
     }
 
@@ -351,6 +376,20 @@ impl PersistenceManager {
             ));
         }
 
+        // K1/K9: the cache's root, not merely its directory, decides whether it
+        // describes this invocation. `<root>/.loregrep/index.cache` is shared by
+        // every spelling of `<root>` — including a symlink to it, and a run from
+        // a different cwd — so the directory alone cannot tell them apart.
+        if let Some(expected) = &self.expected_scan_root {
+            if &serialized.header.scan_root != expected {
+                return Err(AnalysisError::Other(format!(
+                    "Cache was built for analysis root {:?}, this run's root is {:?}; \
+                     regeneration required",
+                    serialized.header.scan_root, expected
+                )));
+            }
+        }
+
         if serialized.header.file_count != serialized.files.len() {
             return Err(AnalysisError::Other(format!(
                 "Cache is inconsistent: header claims {} files, payload has {}",
@@ -362,8 +401,12 @@ impl PersistenceManager {
         let header = serialized.header.clone();
         let coverage = header.coverage;
 
-        // Reconstruct RepoMap
+        // Reconstruct RepoMap. The root travels WITH the cache, so a load no
+        // longer depends on the caller remembering to re-record it.
         let mut repo_map = RepoMap::new();
+        if !header.scan_root.is_empty() {
+            repo_map.set_scan_root(header.scan_root.clone());
+        }
         for file in serialized.files {
             repo_map.add_file(file)?;
         }
@@ -685,8 +728,12 @@ impl PersistentRepoMap for RepoMap {
             )));
         }
 
-        // Reconstruct RepoMap
+        // Reconstruct RepoMap. The root travels WITH the cache, so a load no
+        // longer depends on the caller remembering to re-record it.
         let mut repo_map = RepoMap::new();
+        if !serialized.header.scan_root.is_empty() {
+            repo_map.set_scan_root(serialized.header.scan_root.clone());
+        }
         for file in serialized.files {
             repo_map.add_file(file)?;
         }
@@ -1298,5 +1345,47 @@ mod tests {
 
         let age = info.age();
         assert!(age.as_secs() >= 25 && age.as_secs() <= 35); // Should be around 30 seconds
+    }
+
+    /// K1/K9: `<root>/.loregrep/index.cache` is reached by every spelling of
+    /// `<root>` — a symlink to it, a run from another cwd — so the cache DIRECTORY
+    /// cannot tell two roots apart. The header's canonical root can, and must.
+    #[test]
+    fn a_cache_written_under_one_root_is_refused_for_another() {
+        let dir = TempDir::new().unwrap();
+        let cache_dir = dir.path().join("cache");
+
+        let mut repo_map = RepoMap::new();
+        repo_map.set_scan_root("/repo/one");
+        repo_map
+            .add_file(create_test_tree_node("a", "rust"))
+            .unwrap();
+
+        PersistenceManager::new(&cache_dir)
+            .unwrap()
+            .save_to_disk(&repo_map, "index")
+            .unwrap();
+
+        // Same cache file, different analysis root: refuse, do not reinterpret.
+        let err = PersistenceManager::new(&cache_dir)
+            .unwrap()
+            .with_scan_root("/repo/two")
+            .load_index("index")
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("analysis root"),
+            "error must name the root mismatch, got: {message}"
+        );
+
+        // The run it WAS built for still gets it, with the root restored from
+        // the header rather than from the caller's memory.
+        let loaded = PersistenceManager::new(&cache_dir)
+            .unwrap()
+            .with_scan_root("/repo/one")
+            .load_index("index")
+            .unwrap();
+        assert_eq!(loaded.header.scan_root, "/repo/one");
+        assert_eq!(loaded.repo_map.scan_root(), Some("/repo/one"));
     }
 }
