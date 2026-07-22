@@ -395,10 +395,32 @@ impl LanguageAnalyzer for RustAnalyzer {
             // under the `type:` field (the `Type` in `impl Type` / `impl Trait for Type`),
             // which becomes the method's `owner`.
             if let Some(node) = function_node {
-                let impl_item = node
+                let container = node
                     .parent()
                     .filter(|p| p.kind() == "declaration_list")
-                    .and_then(|parent| parent.parent().filter(|gp| gp.kind() == "impl_item"));
+                    .and_then(|parent| parent.parent())
+                    .filter(|gp| gp.kind() == "impl_item" || gp.kind() == "trait_item");
+
+                // A trait's own methods (`trait Flag { fn name(&self) {...} }`)
+                // belong to the trait. Attributing only `impl` blocks left every
+                // defaulted trait method ownerless — surfaced by SCIP parity
+                // against ripgrep, and it is exactly the `(owner, method)` key
+                // P3-1's symbol table is built on.
+                if let Some(trait_node) = container.filter(|c| c.kind() == "trait_item") {
+                    if let Some(name_node) = trait_node.child_by_field_name("name")
+                        && let Ok(owner) = name_node.utf8_text(source.as_bytes())
+                    {
+                        function_sig.owner = Some(owner.to_string());
+                    }
+                    let has_self = function_sig
+                        .parameters
+                        .first()
+                        .map(|p| p.name == "self")
+                        .unwrap_or(false);
+                    function_sig.is_static = !has_self;
+                }
+
+                let impl_item = container.filter(|c| c.kind() == "impl_item");
 
                 if let Some(impl_node) = impl_item {
                     // A method without a `self` receiver is an associated (static) function.
@@ -455,6 +477,16 @@ impl LanguageAnalyzer for RustAnalyzer {
               (type_parameters)? @tuple_generics
               body: (ordered_field_declaration_list) @tuple_fields
             ) @tuple_struct
+
+            ; Unit struct (`struct Foo;`) — it has no field list of either kind, so
+            ; neither pattern above can match it. ripgrep's flag definitions are ~100
+            ; of these; a SCIP parity run surfaced every one as a missing symbol.
+            (struct_item
+              (visibility_modifier)? @unit_visibility
+              name: (type_identifier) @unit_name
+              (type_parameters)? @unit_generics
+              !body
+            ) @unit_struct
         "#;
 
         let query =
@@ -476,11 +508,11 @@ impl LanguageAnalyzer for RustAnalyzer {
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
                 match capture_name {
-                    "name" | "tuple_name" => struct_sig.name = text.to_string(),
-                    "visibility" | "tuple_visibility" => {
+                    "name" | "tuple_name" | "unit_name" => struct_sig.name = text.to_string(),
+                    "visibility" | "tuple_visibility" | "unit_visibility" => {
                         struct_sig.is_public = text.contains("pub")
                     }
-                    "generics" | "tuple_generics" => {
+                    "generics" | "tuple_generics" | "unit_generics" => {
                         struct_sig.generics = self.extract_generics(&capture.node, source);
                     }
                     "fields" => {
@@ -532,7 +564,7 @@ impl LanguageAnalyzer for RustAnalyzer {
                             }
                         }
                     }
-                    "struct" | "tuple_struct" => {
+                    "struct" | "tuple_struct" | "unit_struct" => {
                         let start_point = capture.node.start_position();
                         let end_point = capture.node.end_position();
                         struct_sig.start_line = start_point.row as u32 + 1;
@@ -549,6 +581,9 @@ impl LanguageAnalyzer for RustAnalyzer {
 
         // ---- Enums and traits ----
         // `enum_item` -> a `StructSignature` with `kind: Enum`.
+        // `type_item` (`type Result<T> = ...;`) -> `kind: TypeAlias`. Rust aliases
+        // were silently dropped until a SCIP parity run surfaced them; TypeScript
+        // has emitted `TypeAlias` since P1-1, so the vocabulary already existed.
         // `trait_item` -> a `StructSignature` with `kind: Trait`; its supertraits
         // live under the `bounds:` field (a `trait_bounds` node whose direct
         // `type_identifier` children are the named supertraits, e.g. the `Bar`/`Baz`
@@ -566,6 +601,19 @@ impl LanguageAnalyzer for RustAnalyzer {
               (type_parameters)? @trait_generics
               bounds: (trait_bounds)? @trait_bounds
             ) @trait
+
+            (type_item
+              (visibility_modifier)? @alias_visibility
+              name: (type_identifier) @alias_name
+              (type_parameters)? @alias_generics
+            ) @type_alias
+
+            ; An associated type in a trait (`type Captures: Captures;`) is a
+            ; distinct node from a free `type` alias, so it needs its own pattern.
+            (associated_type
+              name: (type_identifier) @alias_name
+              (type_parameters)? @alias_generics
+            ) @type_alias
         "#;
 
         let enum_trait_query = Query::new(&self.language, enum_trait_query_str).map_err(|e| {
@@ -586,9 +634,11 @@ impl LanguageAnalyzer for RustAnalyzer {
                 let text = capture.node.utf8_text(source.as_bytes()).unwrap_or("");
 
                 match capture_name {
-                    "enum_name" | "trait_name" => sig.name = text.to_string(),
-                    "enum_visibility" | "trait_visibility" => sig.is_public = text.contains("pub"),
-                    "enum_generics" | "trait_generics" => {
+                    "enum_name" | "trait_name" | "alias_name" => sig.name = text.to_string(),
+                    "enum_visibility" | "trait_visibility" | "alias_visibility" => {
+                        sig.is_public = text.contains("pub")
+                    }
+                    "enum_generics" | "trait_generics" | "alias_generics" => {
                         sig.generics = self.extract_generics(&capture.node, source);
                     }
                     "trait_bounds" => {
@@ -617,6 +667,13 @@ impl LanguageAnalyzer for RustAnalyzer {
                     }
                     "trait" => {
                         sig.kind = TypeKind::Trait;
+                        let start_point = capture.node.start_position();
+                        let end_point = capture.node.end_position();
+                        sig.start_line = start_point.row as u32 + 1;
+                        sig.end_line = end_point.row as u32 + 1;
+                    }
+                    "type_alias" => {
+                        sig.kind = TypeKind::TypeAlias;
                         let start_point = capture.node.start_position();
                         let end_point = capture.node.end_position();
                         sig.start_line = start_point.row as u32 + 1;
@@ -1341,6 +1398,80 @@ pub enum ConfigError {
     }
 
     #[tokio::test]
+    async fn test_extract_unit_struct() {
+        // `struct Foo;` has no field list of either kind, so it matched neither
+        // struct pattern and was dropped. Surfaced by SCIP parity against ripgrep,
+        // whose flag definitions are ~100 unit structs.
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+/// --context-separator
+#[derive(Debug)]
+struct ContextSeparator;
+
+pub struct Marker<T>;
+
+pub struct Named { field: u32 }
+
+pub struct Tuple(u32);
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let structs = &analysis.tree_node.structs;
+
+        let unit = structs
+            .iter()
+            .find(|s| s.name == "ContextSeparator")
+            .expect("unit struct not found");
+        assert_eq!(unit.kind, TypeKind::Struct);
+        assert!(!unit.is_public);
+        assert!(unit.fields.is_empty());
+
+        let generic_unit = structs
+            .iter()
+            .find(|s| s.name == "Marker")
+            .expect("generic unit struct not found");
+        assert!(generic_unit.is_public);
+        assert_eq!(generic_unit.generics, vec!["T".to_string()]);
+
+        // The other two shapes must still resolve exactly once each.
+        assert_eq!(structs.iter().filter(|s| s.name == "Named").count(), 1);
+        assert_eq!(structs.iter().filter(|s| s.name == "Tuple").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_extract_type_alias_kind() {
+        // Rust `type X = Y;` was silently dropped until a SCIP parity run over this
+        // repo surfaced it: 109 extracted types, zero of kind TypeAlias.
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+pub type Result<T> = std::result::Result<T, AnalysisError>;
+type Private = u32;
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let structs = &analysis.tree_node.structs;
+
+        let public = structs
+            .iter()
+            .find(|s| s.name == "Result")
+            .expect("Result alias not found");
+        assert_eq!(public.kind, TypeKind::TypeAlias);
+        assert!(public.is_public);
+        assert_eq!(public.generics, vec!["T".to_string()]);
+
+        let private = structs
+            .iter()
+            .find(|s| s.name == "Private")
+            .expect("Private alias not found");
+        assert_eq!(private.kind, TypeKind::TypeAlias);
+        assert!(!private.is_public);
+    }
+
+    #[tokio::test]
     async fn test_extract_trait_kind_and_supertraits() {
         let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
         let code = r#"
@@ -1402,6 +1533,61 @@ fn helper() {}
 
         let helper = functions.iter().find(|f| f.name == "helper").unwrap();
         assert_eq!(helper.owner, None);
+    }
+
+    #[tokio::test]
+    async fn test_trait_method_owner_is_the_trait() {
+        // A defaulted trait method belongs to the trait. Attributing only `impl`
+        // blocks left these ownerless; SCIP parity against ripgrep surfaced 50 in
+        // one file. `(owner, method)` is the key P3-1's symbol table is built on.
+        let analyzer = RustAnalyzer::new().expect("Failed to create RustAnalyzer");
+        let code = r#"
+pub trait Flag {
+    /// Has a default body.
+    fn name_negated(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// A required method, no body.
+    fn is_switch(&self) -> bool;
+
+    /// An associated function (no self receiver).
+    fn make() -> Self;
+}
+
+struct Real;
+
+impl Flag for Real {
+    fn is_switch(&self) -> bool { true }
+    fn make() -> Self { Real }
+}
+        "#;
+        let analysis = analyzer
+            .analyze_file(code, "test.rs")
+            .await
+            .expect("Analysis failed");
+        let fns = &analysis.tree_node.functions;
+
+        let defaulted = fns
+            .iter()
+            .find(|f| f.name == "name_negated")
+            .expect("defaulted trait method not found");
+        assert_eq!(defaulted.owner, Some("Flag".to_string()));
+        assert!(!defaulted.is_static, "it takes &self");
+
+        // The trait's associated function has no receiver -> static.
+        let assoc = fns
+            .iter()
+            .find(|f| f.name == "make" && f.owner.as_deref() == Some("Flag"))
+            .expect("trait associated fn not found");
+        assert!(assoc.is_static);
+
+        // impl-block attribution must still work, and must win for the impl copy.
+        assert!(
+            fns.iter()
+                .any(|f| f.name == "is_switch" && f.owner.as_deref() == Some("Real")),
+            "impl method should be owned by Real"
+        );
     }
 
     #[tokio::test]

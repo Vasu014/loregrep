@@ -222,6 +222,34 @@ def load_known_failures():
     return {e["id"]: e for e in data}
 
 
+def run_corpus(args, binary):
+    """`--corpus <id>`: definition parity against the SCIP golden.
+
+    A thin delegation to corpus_score, deliberately sharing this module's
+    helpers rather than duplicating them — two runners that can disagree about
+    what "the same result" means is a bug factory. The fixture path above and
+    this one answer different questions: fixtures pin contracts and traps an
+    oracle cannot express, the corpus measures population-scale recall.
+    """
+    import corpus_score
+
+    corpus_dir = os.path.join(REPO_ROOT, "evals", "corpus", args.corpus)
+    golden = os.path.join(corpus_dir, "golden-symbols.json")
+    src = os.path.join(corpus_dir, "src")
+    if not os.path.exists(golden):
+        print("ERROR: golden not found: %s\n  generate it with "
+              "evals/corpus/scripts/scip_to_golden.py" % golden, file=sys.stderr)
+        return 2
+    if not os.path.isdir(src):
+        print("ERROR: corpus checkout not found: %s\n  fetch it with "
+              "./evals/corpus/fetch.sh %s" % (src, args.corpus), file=sys.stderr)
+        return 2
+    argv = ["--golden", golden, "--src", src, "--binary", binary]
+    if args.json_out:
+        argv += ["--json-out", args.json_out]
+    return corpus_score.main(argv)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Loregrep Layer 1 retrieval runner")
     ap.add_argument("--binary", default=os.environ.get("LOREGREP_BIN",
@@ -231,6 +259,12 @@ def main():
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--no-latency", action="store_true",
                     help="(accepted for compatibility; the slice does a single cold pass)")
+    ap.add_argument("--corpus", default=None, metavar="REPO_ID",
+                    help="score population-scale DEFINITION PARITY against the SCIP "
+                         "golden for a pinned corpus repo (see EVAL_PLAN.md 4b) "
+                         "instead of running the hand-written fixture cases. "
+                         "Requires evals/corpus/<id>/golden-symbols.json and a "
+                         "checkout at evals/corpus/<id>/src (./evals/corpus/fetch.sh).")
     args = ap.parse_args()
 
     binary = os.path.abspath(args.binary)
@@ -238,6 +272,9 @@ def main():
         print("ERROR: binary not found: %s\n  build it with: cargo build --release" % binary,
               file=sys.stderr)
         return 2
+
+    if args.corpus:
+        return run_corpus(args, binary)
 
     fixture_abs = os.path.abspath(os.path.join(FIXTURES_DIR, args.fixture))
     gold_path = os.path.join(fixture_abs, "gold", "cases.json")

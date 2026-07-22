@@ -1,0 +1,26 @@
+# Corpus source is fetched, not vendored (see fetch.sh / corpus.lock).
+# Everything generated stays out of git; the lock, the scripts and the goldens
+# are the tracked artifacts.
+
+# Fetched upstream checkouts and any interrupted staging dirs
+*/src/
+*/.src.staging.*
+
+# Generated SCIP indexes and their JSON conversions
+*.scip
+*.scip.json
+
+# Regeneration scratch: venvs, logs, indexer caches
+*/.venv/
+*/venv/
+*/.env/
+*/*.log
+*/.scip-python/
+__pycache__/
+*.egg-info/
+
+# ...but never lose the tracked artifacts
+!corpus.lock
+!*.sh
+!golden.schema.json
+!*/gold/

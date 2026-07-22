@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "Pin file for the Level 1 population-scale SCIP parity corpus (EVAL_PLAN.md 4b.3).",
+    "Corpus source is FETCHED, NOT VENDORED: ./fetch.sh clones each repo at `commit`",
+    "into evals/corpus/<id>/src/, which is gitignored. The tracked artifacts are this",
+    "lock file, the scripts, and the generated goldens.",
+    "SHAs below are peeled COMMIT sha1s (tag^{}), not annotated-tag object sha1s.",
+    "A toolchain version bump is treated like a fixture bump: regen + re-triage."
+  ],
+  "version": 1,
+  "repos": [
+    {
+      "id": "ripgrep",
+      "url": "https://github.com/BurntSushi/ripgrep.git",
+      "tag": "15.2.0",
+      "commit": "e89fff89ac9af12e8d4ce9d5fd07beb408ca730f",
+      "language": "rust",
+      "indexer": "rust-analyzer",
+      "why": "Mid-size, multi-crate Rust workspace by a Rust-idiomatic author. Heavy on traits, generics, modules and re-exports, which is exactly the declaration-form surface where our tree-sitter definition extraction can silently miss things. Tagged release, not a floating branch, so the index is reproducible."
+    },
+    {
+      "id": "flask",
+      "url": "https://github.com/pallets/flask.git",
+      "tag": "3.1.3",
+      "commit": "22d924701a6ae2e4cd01e9a15bbaf3946094af65",
+      "language": "python",
+      "indexer": "scip-python",
+      "why": "Small, stable, pure-Python package with a real src/ layout, decorators, class hierarchies and typing-heavy signatures. Installable with `pip install -e .` so scip-python can see the package metadata it needs for cross-module resolution. Small enough to reindex in seconds during converter development."
+    }
+  ],
+  "toolchain": {
+    "scip": {
+      "version": "v0.9.0",
+      "source": "https://github.com/scip-code/scip",
+      "$comment": "The project moved from sourcegraph/scip to the neutral scip-code/scip home; the old GitHub API path 301s, which silently breaks naive release lookups.",
+      "path": "evals/.tools/scip",
+      "role": "protobuf -> JSON conversion (`scip print --json`)"
+    },
+    "rust-analyzer": {
+      "version": "1.97.1",
+      "commit": "8bab26f4",
+      "date": "2026-07-14",
+      "source": "system install (rustup component / standalone binary on PATH)",
+      "role": "`rust-analyzer scip .` for the Rust corpus"
+    },
+    "scip-python": {
+      "version": "0.6.6",
+      "package": "@sourcegraph/scip-python",
+      "install": "npm install --prefix evals/.tools",
+      "path": "evals/.tools/node_modules/.bin/scip-python",
+      "role": "`scip-python index` for the Python corpus"
+    },
+    "node": {
+      "version": "v22.14.0",
+      "role": "runtime for scip-python"
+    },
+    "python": {
+      "version": "3.14.2",
+      "role": "interpreter used to build the venv that scip-python inspects for package versions"
+    }
+  }
+}
