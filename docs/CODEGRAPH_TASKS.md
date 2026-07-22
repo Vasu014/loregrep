@@ -401,19 +401,25 @@ symbols returns that one as `resolved` with the other absent; `find_references` 
 returns both its call-adjacent and import sites, each tagged with site kind.
 **Dependencies:** P3-5. **Effort:** S.
 
-### P3-7 — Eval flip + dynamic-dispatch pin + Layer-2 A/B re-run (eval coverage)
-**What/why:** The plan's proof obligations: the P0-5 collision fixture flips from "flagged
-ambiguous" to "resolved via import"; a param-typed receiver case; a deliberately
+### P3-7 — Eval flip + dynamic-dispatch pin + SCIP edge parity (eval coverage)
+**What/why:** The plan's proof obligations, plus the task that Level 1 deliberately defers to
+here (see `evals/EVAL_PLAN.md` §4b.6). Fixture side: the P0-5 collision fixture flips from
+"flagged ambiguous" to "resolved via import"; a param-typed receiver case; a deliberately
 unresolvable dynamic-dispatch case pinned in `known_failures.json` as **by-design**
-`Ambiguous`; re-run the original callers/impact A/B — the metric is unchanged win at higher
-correctness.
+`Ambiguous`. Corpus side: materialize SCIP caller/import goldens for the pinned corpus
+**against the now-resolved graph** — building them earlier would mean triaging name-merged
+supersets that this phase legitimately shrinks, i.e. the same diffs triaged twice.
 **Files/functions:** `evals/fixtures/rust-basic/gold/cases.json` (edit P0-5 case
 expectations), new fixture code for param-typed receiver + trait-object dispatch,
-`evals/retrieval/known_failures.json` (the pin), `evals/agent/run_pilot.py` task re-run.
-**Acceptance:** Layer-1 all green with the flipped expectations; the dispatch case appears in
-`known_failures.json` with a "by design" note, not as a gold pass; A/B results committed to
-the eval log location (not the repo's tracked results — see P0-2).
-**Dependencies:** P3-5 (and P3-6 if its tools get gold now). **Effort:** M.
+`evals/retrieval/known_failures.json` (the pin), `evals/corpus/<repo>/golden-edges.json` +
+the `--corpus` edge scorer.
+**Acceptance:** Layer-1 fixtures all green with the flipped expectations; the dispatch case
+appears in `known_failures.json` with a "by design" note, not as a gold pass; edge parity
+reported on the split metric — `wrongness` ~0 (gated: an asserted edge SCIP contradicts
+breaks the never-guess contract), `coverage` and `unresolved` tracked as the roadmap numbers,
+with the pre-P3 coverage figure recorded alongside so the phase's gain is visible.
+**Dependencies:** P3-5 (and P3-6 if its tools get gold now); `evals/` L1-S1..S4 for the
+corpus and converters. **Effort:** M.
 
 ---
 
